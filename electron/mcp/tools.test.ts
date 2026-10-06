@@ -199,6 +199,56 @@ describe("buildRecordlyMcpServer", () => {
 		expect(agent.findElements).toHaveBeenCalledWith({ text: "Save" });
 	});
 
+	it("keeps the whole-window screenshot output unchanged", async () => {
+		const { call, agent } = setup();
+		const { result } = await call("tools/call", { name: "screenshot", arguments: {} });
+		expect(agent.screenshot).toHaveBeenCalledWith(undefined);
+		expect(JSON.parse(result.content[1].text)).toEqual({
+			width: 1568,
+			height: 980,
+			scale: 0.5,
+			hint: "Window point = image pixel × scale. Pass window points to click, drag, move_pointer, scroll and perform.",
+		});
+	});
+
+	it("zooms into a region and returns its origin", async () => {
+		const { call, agent } = setup();
+		agent.screenshot.mockResolvedValueOnce({
+			data: "aGk=",
+			mimeType: "image/jpeg",
+			width: 600,
+			height: 400,
+			scale: 0.5,
+			originX: 200,
+			originY: 100,
+		});
+		const region = { x: 200, y: 100, width: 300, height: 200 };
+		const { result } = await call("tools/call", { name: "screenshot", arguments: { region } });
+		expect(agent.screenshot).toHaveBeenCalledWith(region);
+		expect(JSON.parse(result.content[1].text)).toEqual({
+			width: 600,
+			height: 400,
+			scale: 0.5,
+			originX: 200,
+			originY: 100,
+			hint: "Only the region is shown. Window point = (originX + pixel x × scale, originY + pixel y × scale).",
+		});
+		const { description } = (await call("tools/list")).result.tools.find(
+			(tool: { name: string }) => tool.name === "screenshot",
+		);
+		expect(description).toContain("point = origin + pixel × scale");
+	});
+
+	it.each([
+		{ x: 0, y: 0, width: 0, height: 10 },
+		{ x: 0, y: 0, width: 10 },
+	])("refuses a bad screenshot region %o before reaching the agent", async (region) => {
+		const { call, agent } = setup();
+		const { result } = await call("tools/call", { name: "screenshot", arguments: { region } });
+		expect(result.isError).toBe(true);
+		expect(agent.screenshot).not.toHaveBeenCalled();
+	});
+
 	it("turns single-action tools into one-step perform calls", async () => {
 		const { call, agent } = setup();
 		const calls: [string, Record<string, unknown>][] = [

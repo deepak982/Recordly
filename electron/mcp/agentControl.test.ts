@@ -599,7 +599,10 @@ describe("findElements and screenshot", () => {
 		const { agent, deps, names } = setup();
 		await expect(agent.screenshot()).resolves.toMatchObject({ width: 800, scale: 1 });
 		expect(names()).toEqual(["raise"]);
-		expect(deps.capture).toHaveBeenCalledWith(FRAME);
+		expect(deps.capture).toHaveBeenCalledWith(FRAME, undefined);
+		const region = { x: 10, y: 20, width: 300, height: 200 };
+		await agent.screenshot(region);
+		expect(deps.capture).toHaveBeenLastCalledWith(FRAME, region);
 	});
 });
 

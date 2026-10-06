@@ -514,12 +514,31 @@ export function buildRecordlyMcpServer(
 				"also returns originX/originY: point = origin + pixel × scale. Not part of the video. Take " +
 				"a fresh one after anything that changes the view (navigation, dialogs, scrolling, " +
 				"resizing); older coordinates are stale. If the window is closed, minimized or on another " +
-				"desktop, call list_sources, then select_source.",
+				"desktop, call list_sources, then select_source. To aim precisely at a small target (an " +
+				"icon, list row, toggle) that find_elements does not list, screenshot a region around it " +
+				"(e.g. 300 × 200 points): the image then shows only that rectangle, clamped to the window, " +
+				"at up to the display's full resolution, and returns originX/originY — use point = origin + " +
+				"pixel × scale.",
+			inputSchema: z.object({
+				region: z
+					.object({
+						x: z
+							.number()
+							.describe("Window-relative x of the region's left edge, in points"),
+						y: z
+							.number()
+							.describe("Window-relative y of the region's top edge, in points"),
+						width: z.number().positive().describe("Region width in points"),
+						height: z.number().positive().describe("Region height in points"),
+					})
+					.optional()
+					.describe("Zoom into this rectangle of the window; omit for the whole window"),
+			}),
 		},
-		async () => {
+		async ({ region }) => {
 			const { data, mimeType, width, height, scale, originX, originY } =
-				await agent.screenshot();
-			const offset = originX !== 0 || originY !== 0;
+				await agent.screenshot(region);
+			const offset = region !== undefined || originX !== 0 || originY !== 0;
 			const info = offset
 				? {
 						width,
@@ -527,7 +546,7 @@ export function buildRecordlyMcpServer(
 						scale,
 						originX,
 						originY,
-						hint: "Part of the window is off screen. Window point = (originX + pixel x × scale, originY + pixel y × scale).",
+						hint: `${region ? "Only the region is shown." : "Part of the window is off screen."} Window point = (originX + pixel x × scale, originY + pixel y × scale).`,
 					}
 				: {
 						width,

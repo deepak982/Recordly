@@ -1,10 +1,12 @@
 import { desktopCapturer } from "electron";
-import { type WindowBounds, WINDOW_OFF_SCREEN_MESSAGE } from "../ipc/types";
+import { WINDOW_OFF_SCREEN_MESSAGE, type WindowBounds } from "../ipc/types";
 import { getScreen } from "../ipc/utils";
 
 export const MAX_IMAGE_EDGE = 1568;
 export const MAX_IMAGE_PIXELS = 1_150_000;
 const JPEG_QUALITY = 80;
+const REGION_OFF_SCREEN_MESSAGE =
+	"That part of the window is off screen. Move the window fully onto a display, then try again.";
 
 export type WindowShot = {
 	data: string;
@@ -15,6 +17,26 @@ export type WindowShot = {
 	originX: number;
 	originY: number;
 };
+
+export function clampRegion(window: WindowBounds, region: WindowBounds): WindowBounds {
+	const { x, y, width, height } = region;
+	if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) {
+		throw new Error(
+			"A screenshot region needs numbers x and y and a positive width and height, in window points.",
+		);
+	}
+	const left = Math.max(0, x);
+	const top = Math.max(0, y);
+	const right = Math.min(window.width, x + width);
+	const bottom = Math.min(window.height, y + height);
+	if (right - left < 1 || bottom - top < 1) {
+		throw new Error(
+			`The region (${x}, ${y}, ${width} × ${height}) is outside the selected window ` +
+				`(${Math.round(window.width)} × ${Math.round(window.height)} points). Use window-relative points.`,
+		);
+	}
+	return { x: window.x + left, y: window.y + top, width: right - left, height: bottom - top };
+}
 
 export function planWindowCrop(
 	window: WindowBounds,
@@ -56,12 +78,16 @@ export function planWindowCrop(
 	};
 }
 
-export async function captureWindow(frame: WindowBounds): Promise<WindowShot> {
+export async function captureWindow(
+	frame: WindowBounds,
+	region?: WindowBounds,
+): Promise<WindowShot> {
+	const area = region ? clampRegion(frame, region) : frame;
 	const display = getScreen().getDisplayMatching({
-		x: Math.round(frame.x),
-		y: Math.round(frame.y),
-		width: Math.round(frame.width),
-		height: Math.round(frame.height),
+		x: Math.round(area.x),
+		y: Math.round(area.y),
+		width: Math.round(area.width),
+		height: Math.round(area.height),
 	});
 	const sources = await desktopCapturer.getSources({
 		types: ["screen"],
@@ -78,8 +104,8 @@ export async function captureWindow(frame: WindowBounds): Promise<WindowShot> {
 			"Recordly could not capture the screen. Check its Screen Recording permission in System Settings > Privacy & Security.",
 		);
 	}
-	const plan = planWindowCrop(frame, display.bounds, source.thumbnail.getSize());
-	if (!plan) throw new Error(WINDOW_OFF_SCREEN_MESSAGE);
+	const plan = planWindowCrop(area, display.bounds, source.thumbnail.getSize());
+	if (!plan) throw new Error(region ? REGION_OFF_SCREEN_MESSAGE : WINDOW_OFF_SCREEN_MESSAGE);
 	const image = source.thumbnail.crop(plan.crop).resize({ ...plan.output, quality: "best" });
 	return {
 		data: image.toJPEG(JPEG_QUALITY).toString("base64"),
@@ -87,7 +113,7 @@ export async function captureWindow(frame: WindowBounds): Promise<WindowShot> {
 		width: plan.output.width,
 		height: plan.output.height,
 		scale: plan.scale,
-		originX: plan.originX,
-		originY: plan.originY,
+		originX: plan.originX + area.x - frame.x,
+		originY: plan.originY + area.y - frame.y,
 	};
 }

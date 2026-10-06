@@ -104,7 +104,7 @@ export type AgentControlDeps = {
 	ownPid: number;
 	getSelectedSource: () => SelectedSource | null;
 	findWindow: (sourceId: string) => Promise<{ pid?: number; frame: WindowBounds | null } | null>;
-	capture: (frame: WindowBounds) => Promise<WindowShot>;
+	capture: (frame: WindowBounds, region?: WindowBounds) => Promise<WindowShot>;
 	openExternal: (url: string) => Promise<void>;
 	getBrowserName: (url: string) => string;
 	getDisplays: () => WindowBounds[];
@@ -494,11 +494,11 @@ export function createAgentControl(
 		};
 	}
 
-	async function screenshot() {
+	async function screenshot(region?: WindowBounds) {
 		requireMac();
 		const target = await requireTarget();
 		await raise(target).catch(() => undefined);
-		return deps.capture(target.frame);
+		return deps.capture(target.frame, region);
 	}
 
 	async function selectWindow(windowId: number) {
