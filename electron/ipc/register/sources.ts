@@ -9,15 +9,17 @@ import {
 	reassertHudOverlayMousePassthrough,
 } from "../../windows";
 import { ALLOW_RECORDLY_WINDOW_CAPTURE } from "../constants";
+import { agentInput, HelperUnavailableError } from "../../mcp/agentInput";
 import {
 	getNativeMacWindowSources,
+	getWindowBoundsFromNativeSource,
 	resolveLinuxWindowBounds,
 	resolveMacWindowBounds,
 	stopWindowBoundsCapture,
 } from "../cursor/bounds";
 import { getDisplayBoundsForSource, getDisplayWorkAreaForSource } from "../recording/ffmpeg";
 import { selectedSource, setSelectedSource } from "../state";
-import type { SelectedSource, WindowBounds } from "../types";
+import type { NativeMacWindowSource, SelectedSource, WindowBounds } from "../types";
 import { getScreen, parseWindowId } from "../utils";
 import { bringWindowsWindowForward, resolveWindowsWindowBounds } from "../windowsWindowControl";
 import { getScreenSourceIdForDisplay } from "./sourceMapping";
@@ -42,6 +44,45 @@ function broadcastSelectedSourceChange() {
 	}
 }
 
+function countInstances(windows: NativeMacWindowSource[], bundleId: string, pid: number) {
+	const pids = windows
+		.filter((candidate) => candidate.bundleId === bundleId)
+		.map((candidate) => candidate.pid);
+	return new Set([pid, ...pids].filter((value) => typeof value === "number")).size;
+}
+
+async function raiseMacWindowByPid(
+	source: SelectedSource,
+	windowId: number,
+	pid: number,
+): Promise<WindowBounds | null | "by-name"> {
+	const onScreen = await getNativeMacWindowSources();
+	const cached = onScreen.find((candidate) => parseWindowId(candidate.id) === windowId);
+	const bundleId = cached?.bundleId ?? source.bundleId;
+	if (typeof bundleId !== "string" || countInstances(onScreen, bundleId, pid) < 2) {
+		return "by-name";
+	}
+	const windows = await getNativeMacWindowSources({ maxAgeMs: 0, allSpaces: true });
+	const entry = windows.find((candidate) => parseWindowId(candidate.id) === windowId);
+	const targetPid = entry?.pid ?? pid;
+	const singleInstance = countInstances(windows, bundleId, targetPid) < 2;
+	const frame = getWindowBoundsFromNativeSource(entry ?? (source as NativeMacWindowSource));
+	if (!frame) return singleInstance ? "by-name" : null;
+	try {
+		const { raised } = await agentInput.request(
+			{ cmd: "raise", pid: targetPid, windowId, frame },
+			{ timeoutMs: 3000 },
+		);
+		if (raised) {
+			await new Promise((resolve) => setTimeout(resolve, 250));
+			return frame;
+		}
+	} catch (error) {
+		return error instanceof HelperUnavailableError || singleInstance ? "by-name" : null;
+	}
+	return singleInstance ? "by-name" : null;
+}
+
 export async function bringSelectedWindowForward(
 	source: SelectedSource,
 ): Promise<WindowBounds | null> {
@@ -50,6 +91,10 @@ export async function bringSelectedWindowForward(
 
 	try {
 		if (process.platform === "darwin") {
+			if (typeof source.pid === "number") {
+				const raised = await raiseMacWindowByPid(source, windowId, source.pid);
+				if (raised !== "by-name") return raised;
+			}
 			const rawAppName = source.appName || source.name?.split(" — ")[0]?.trim();
 			const appName =
 				rawAppName && /^[\w .&()+'-]{1,64}$/.test(rawAppName) ? rawAppName : null;
@@ -121,13 +166,27 @@ let registered: {
 	getSourceSelectorWindow: () => BrowserWindow | null;
 } | null = null;
 
-export async function getSources(opts?: Partial<Electron.SourcesOptions>) {
+export async function getSources(
+	options?: Partial<Electron.SourcesOptions> & { allSpaces?: boolean },
+) {
+	const { allSpaces = false, ...opts } = options ?? {};
 	const cacheKey = JSON.stringify({
-		types: opts?.types,
-		thumbnailSize: opts?.thumbnailSize,
-		fetchWindowIcons: opts?.fetchWindowIcons,
+		types: opts.types,
+		thumbnailSize: opts.thumbnailSize,
+		fetchWindowIcons: opts.fetchWindowIcons,
 	});
+	const remember = (value: Array<Record<string, unknown>>) => {
+		if (!allSpaces) {
+			sourceListCache = {
+				key: cacheKey,
+				expiresAt: Date.now() + SOURCE_LIST_CACHE_TTL_MS,
+				value,
+			};
+		}
+		return value;
+	};
 	if (
+		!allSpaces &&
 		sourceListCache &&
 		sourceListCache.key === cacheKey &&
 		sourceListCache.expiresAt > Date.now()
@@ -250,17 +309,13 @@ export async function getSources(opts?: Partial<Electron.SourcesOptions>) {
 				appIcon: includeWindowIcons && source.appIcon ? source.appIcon.toDataURL() : null,
 				sourceType: "window" as const,
 			}));
-		const result = [...screenSources, ...windowSources];
-		sourceListCache = {
-			key: cacheKey,
-			expiresAt: Date.now() + SOURCE_LIST_CACHE_TTL_MS,
-			value: result,
-		};
-		return result;
+		return remember([...screenSources, ...windowSources]);
 	}
 
 	try {
-		const nativeWindowSources = await getNativeMacWindowSources();
+		const nativeWindowSources = await getNativeMacWindowSources(
+			allSpaces ? { maxAgeMs: 0, allSpaces: true } : undefined,
+		);
 		const electronWindowSourceMap = new Map(
 			electronSources
 				.filter((source) => source.id.startsWith("window:"))
@@ -321,17 +376,17 @@ export async function getSources(opts?: Partial<Electron.SourcesOptions>) {
 					appName: source.appName,
 					windowTitle: source.windowTitle,
 					bundleId: source.bundleId,
+					pid: source.pid,
+					onScreen: source.onScreen,
+					x: source.x,
+					y: source.y,
+					width: source.width,
+					height: source.height,
 					sourceType: "window" as const,
 				};
 			});
 
-		const result = [...screenSources, ...mergedWindowSources];
-		sourceListCache = {
-			key: cacheKey,
-			expiresAt: Date.now() + SOURCE_LIST_CACHE_TTL_MS,
-			value: result,
-		};
-		return result;
+		return remember([...screenSources, ...mergedWindowSources]);
 	} catch (error) {
 		console.warn("Falling back to Electron window enumeration on macOS:", error);
 
@@ -370,13 +425,7 @@ export async function getSources(opts?: Partial<Electron.SourcesOptions>) {
 				sourceType: "window" as const,
 			}));
 
-		const result = [...screenSources, ...windowSources];
-		sourceListCache = {
-			key: cacheKey,
-			expiresAt: Date.now() + SOURCE_LIST_CACHE_TTL_MS,
-			value: result,
-		};
-		return result;
+		return remember([...screenSources, ...windowSources]);
 	}
 }
 
@@ -397,13 +446,20 @@ export async function selectSource(source: SelectedSource, { focusApp }: { focus
 	return selectedSource;
 }
 
-export function showRecordingHud(returnWindow: BrowserWindow | null) {
+export function showRecordingHud(
+	returnWindow: BrowserWindow | null,
+	{ focus = true }: { focus?: boolean } = {},
+) {
 	setHudRecordingPreparationActive(true);
 	registered?.recordingNavigation.setReturnWindow(returnWindow);
 	const hud = getHudOverlayWindow();
 	if (hud && !hud.isDestroyed()) {
-		hud.show();
-		hud.focus();
+		if (focus) {
+			hud.show();
+			hud.focus();
+		} else {
+			hud.showInactive();
+		}
 	} else {
 		createHudOverlayWindow();
 	}
