@@ -11,7 +11,36 @@ export async function installDesktopBridge(page: Page, videoFixture = "preview.m
 		};
 		Object.assign(window, {
 			electronAPI: {
-				getAppSetting: (key: string) => key === "recordly.onboarding.v1.seen" ? true : null,
+				getAppSetting: (key: string) =>
+					key === "recordly.onboarding.v1.seen" ? true : null,
+				getMcpServerState: async () => ({
+					enabled: false,
+					running: false,
+					url: "http://127.0.0.1:43832/mcp",
+					token: "",
+					error: null,
+				}),
+				setMcpServerEnabled: async (enabled: boolean) => ({
+					enabled,
+					running: enabled,
+					url: "http://127.0.0.1:43832/mcp",
+					token: enabled ? "test-token" : "",
+					error: null,
+				}),
+				regenerateMcpServerToken: async () => ({
+					enabled: true,
+					running: true,
+					url: "http://127.0.0.1:43832/mcp",
+					token: "regenerated-token",
+					error: null,
+				}),
+				onRemoteRecordingCommand: subscribe,
+				sendRemoteRecordingResult: () => undefined,
+				notifyRemoteRecordingReady: () => undefined,
+				onRemoteExportRequest: subscribe,
+				sendRemoteExportResult: () => undefined,
+				sendRemoteExportProgress: () => undefined,
+				sendRemoteEditorReady: () => undefined,
 				finishRecordingStartup: async () => undefined,
 				showProjectDashboard: async () => {
 					document.documentElement.dataset.dashboardOpened = "true";

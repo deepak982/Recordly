@@ -21,6 +21,53 @@ declare namespace NodeJS {
 	}
 }
 
+interface McpServerState {
+	enabled: boolean;
+	running: boolean;
+	url: string;
+	token: string;
+	error: "port-in-use" | "start-failed" | null;
+}
+
+type RemoteRecordingAction = "start" | "stop" | "pause" | "resume" | "cancel";
+
+interface RemoteRecordingCommand {
+	id: string;
+	action: RemoteRecordingAction;
+	countdownSeconds?: number;
+	expiresAt: number;
+}
+
+interface RemoteCommandResult {
+	id: string;
+	ok: boolean;
+	error?: string;
+}
+
+interface RemoteExportRequest {
+	id: string;
+	outputPath: string;
+	format: "mp4" | "gif";
+	quality?: "medium" | "good" | "high" | "source";
+}
+
+interface RemoteExportResult {
+	id: string;
+	ok: boolean;
+	path?: string;
+	error?: string;
+}
+
+interface RemoteExportProgress {
+	id: string;
+	progress: number;
+}
+
+interface RemoteEditorReadyState {
+	videoPath: string | null;
+	ready: boolean;
+}
+
 // Used in Renderer process, expose in `preload.ts`
 interface NativeCaptureDiagnostics {
 	backend: "windows-wgc" | "mac-screencapturekit" | "browser-store" | "ffmpeg";
@@ -996,6 +1043,18 @@ interface Window {
 		saveShortcuts: (shortcuts: unknown) => Promise<{ success: boolean; error?: string }>;
 		getAppSetting: (key: string) => unknown;
 		setAppSetting: (key: string, value: unknown) => boolean;
+		getMcpServerState: () => Promise<McpServerState>;
+		setMcpServerEnabled: (enabled: boolean) => Promise<McpServerState>;
+		regenerateMcpServerToken: () => Promise<McpServerState>;
+		onRemoteRecordingCommand: (
+			callback: (command: RemoteRecordingCommand) => void,
+		) => () => void;
+		sendRemoteRecordingResult: (result: RemoteCommandResult) => void;
+		notifyRemoteRecordingReady: () => void;
+		onRemoteExportRequest: (callback: (request: RemoteExportRequest) => void) => () => void;
+		sendRemoteExportResult: (result: RemoteExportResult) => void;
+		sendRemoteExportProgress: (progress: RemoteExportProgress) => void;
+		sendRemoteEditorReady: (state: RemoteEditorReadyState) => void;
 		setHasUnsavedChanges: (hasChanges: boolean) => void;
 		onRequestSaveBeforeClose: (callback: () => Promise<boolean>) => () => void;
 		isNativeWindowsCaptureAvailable: () => Promise<{ available: boolean }>;

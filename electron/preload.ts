@@ -1114,4 +1114,29 @@ contextBridge.exposeInMainWorld("electronAPI", {
 		ipcRenderer.on("countdown-tick", listener);
 		return () => ipcRenderer.removeListener("countdown-tick", listener);
 	},
+	getMcpServerState: () => ipcRenderer.invoke("mcp-server:get-state"),
+	setMcpServerEnabled: (enabled: boolean) =>
+		ipcRenderer.invoke("mcp-server:set-enabled", enabled),
+	regenerateMcpServerToken: () => ipcRenderer.invoke("mcp-server:regenerate-token"),
+	onRemoteRecordingCommand: (callback: (command: RemoteRecordingCommand) => void) => {
+		const listener = (_event: Electron.IpcRendererEvent, command: RemoteRecordingCommand) =>
+			callback(command);
+		ipcRenderer.on("remote-recording-command", listener);
+		return () => ipcRenderer.removeListener("remote-recording-command", listener);
+	},
+	sendRemoteRecordingResult: (result: RemoteCommandResult) =>
+		ipcRenderer.send("remote-recording-result", result),
+	notifyRemoteRecordingReady: () => ipcRenderer.send("remote-recording-ready"),
+	onRemoteExportRequest: (callback: (request: RemoteExportRequest) => void) => {
+		const listener = (_event: Electron.IpcRendererEvent, request: RemoteExportRequest) =>
+			callback(request);
+		ipcRenderer.on("remote-export-request", listener);
+		return () => ipcRenderer.removeListener("remote-export-request", listener);
+	},
+	sendRemoteExportResult: (result: RemoteExportResult) =>
+		ipcRenderer.send("remote-export-result", result),
+	sendRemoteExportProgress: (progress: RemoteExportProgress) =>
+		ipcRenderer.send("remote-export-progress", progress),
+	sendRemoteEditorReady: (state: RemoteEditorReadyState) =>
+		ipcRenderer.send("remote-editor-ready", state),
 });
