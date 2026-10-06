@@ -14,6 +14,7 @@ import type { useExportSession } from "./useExportSession";
 import type { useExportSettings } from "./useExportSettings";
 import { useExportStatusViewModel } from "./useExportStatusViewModel";
 import { useRemoteExportBridge } from "./useRemoteExportBridge";
+import { useRemoteReviewBridge } from "./useRemoteReviewBridge";
 import { useSmokeExportAutomation } from "./useSmokeExportAutomation";
 
 type Input = {
@@ -88,7 +89,8 @@ export function useEditorExportController(input: Input) {
 		videoSourcePath: input.videoSourcePath,
 		handleExport: runner.handleExport,
 	});
-	useRemoteExportBridge({ ...input, handleExport: runner.handleExport });
+	const remoteReady = useRemoteExportBridge({ ...input, handleExport: runner.handleExport });
+	useRemoteReviewBridge({ ...input, ready: remoteReady });
 	const status = useExportStatusViewModel({
 		t: input.t,
 		session: input.session,

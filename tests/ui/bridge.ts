@@ -53,6 +53,8 @@ export async function installDesktopBridge(page: Page, videoFixture = "preview.m
 				sendRemoteExportResult: () => undefined,
 				sendRemoteExportProgress: () => undefined,
 				sendRemoteEditorReady: () => undefined,
+				onRemoteReviewRequest: subscribe,
+				sendRemoteReviewResult: () => undefined,
 				finishRecordingStartup: async () => undefined,
 				showProjectDashboard: async () => {
 					document.documentElement.dataset.dashboardOpened = "true";

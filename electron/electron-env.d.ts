@@ -70,6 +70,27 @@ interface RemoteEditorReadyState {
 }
 
 // Used in Renderer process, expose in `preload.ts`
+interface RemoteReviewRequest {
+	id: string;
+}
+
+interface RemoteReviewTimeline {
+	clips: { startMs: number; endMs: number; sourceStartMs: number; speed: number }[];
+	zooms: number;
+	captions: number;
+	durationMs: number;
+	sourceDurationMs: number;
+	width: number;
+	height: number;
+}
+
+interface RemoteReviewResult {
+	id: string;
+	ok: boolean;
+	timeline?: RemoteReviewTimeline;
+	error?: string;
+}
+
 interface NativeCaptureDiagnostics {
 	backend: "windows-wgc" | "mac-screencapturekit" | "browser-store" | "ffmpeg";
 	phase: "availability" | "start" | "stop" | "mux";
@@ -1065,6 +1086,8 @@ interface Window {
 		sendRemoteExportProgress: (progress: RemoteExportProgress) => void;
 		sendRemoteEditorReady: (state: RemoteEditorReadyState) => void;
 		setHasUnsavedChanges: (hasChanges: boolean) => void;
+		onRemoteReviewRequest: (callback: (request: RemoteReviewRequest) => void) => () => void;
+		sendRemoteReviewResult: (result: RemoteReviewResult) => void;
 		onRequestSaveBeforeClose: (callback: () => Promise<boolean>) => () => void;
 		isNativeWindowsCaptureAvailable: () => Promise<{ available: boolean }>;
 		muxNativeWindowsRecording: (expectedDurationMs?: number) => Promise<{

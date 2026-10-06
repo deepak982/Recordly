@@ -128,4 +128,6 @@ export function useRemoteExportBridge(input: Input) {
 			}),
 		[],
 	);
+
+	return ready;
 }
