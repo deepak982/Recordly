@@ -3,6 +3,7 @@ import { findNativeMacWindow, getWindowBoundsFromNativeSource } from "../ipc/cur
 import { selectedSource } from "../ipc/state";
 import { type SelectedSource, WINDOW_OFF_SCREEN_MESSAGE, type WindowBounds } from "../ipc/types";
 import { getScreen, parseWindowId } from "../ipc/utils";
+import { type AgentActivityTarget, beginScene, beginSpan } from "./agentActivity";
 import { type AgentInput, agentInput } from "./agentInput";
 import {
 	AGENT_KEY_ALIASES,
@@ -231,6 +232,15 @@ function pointsOf(step: AgentStep) {
 	}
 }
 
+function targetOf(
+	step: AgentStep,
+	{ width, height }: WindowBounds,
+): AgentActivityTarget | undefined {
+	const points = pointsOf(step);
+	const point = points[points.length - 1];
+	return point && { cx: point.x / width, cy: point.y / height };
+}
+
 function stepDurationMs(step: AgentStep) {
 	switch (step.action) {
 		case "move":
@@ -412,10 +422,18 @@ export function createAgentControl(
 		await preflightInput();
 		const start = await requireTarget();
 		for (const step of steps) for (const point of pointsOf(step)) toGlobal(start, point);
-		await raise(start);
-		const { window } = await input.request({ cmd: "frontmost_window" });
-		if (window?.pid !== start.pid) {
-			throw new Error("Recordly couldn't bring the window to the front.");
+		const { window: front } = await input.request({ cmd: "frontmost_window" });
+		if (front?.pid !== start.pid || front.windowId !== start.windowId) {
+			const endRaise = beginSpan("wait", "raise");
+			try {
+				await raise(start);
+			} finally {
+				endRaise();
+			}
+			const { window } = await input.request({ cmd: "frontmost_window" });
+			if (window?.pid !== start.pid) {
+				throw new Error("Recordly couldn't bring the window to the front.");
+			}
 		}
 		let stopped = false;
 		let tookOver = false;
@@ -444,7 +462,15 @@ export function createAgentControl(
 		try {
 			for (const step of steps) {
 				if (stopped) throw takeover();
-				await Promise.race([runStep(step, start, post), aborted]);
+				const endSpan =
+					step.action === "wait"
+						? beginSpan("hold", "wait")
+						: beginSpan("motion", step.action, targetOf(step, start.frame));
+				try {
+					await Promise.race([runStep(step, start, post), aborted]);
+				} finally {
+					endSpan();
+				}
 			}
 		} catch (error) {
 			if (tookOver || (error instanceof Error && error.message === "user-input")) {
@@ -459,9 +485,19 @@ export function createAgentControl(
 		return { performed: steps.length };
 	}
 
-	async function perform(steps: AgentStep[]) {
+	async function perform(steps: AgentStep[], { title }: { title?: string } = {}) {
 		checkLimits(steps);
-		return exclusive(() => runSteps(steps));
+		return exclusive(async () => {
+			const endScene = beginScene(title);
+			try {
+				const result = await runSteps(steps);
+				endScene(false);
+				return result;
+			} catch (error) {
+				endScene(error instanceof Error && error.message.startsWith(TAKEOVER_MESSAGE));
+				throw error;
+			}
+		});
 	}
 
 	async function findElements({

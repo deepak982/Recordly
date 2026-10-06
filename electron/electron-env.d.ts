@@ -644,6 +644,12 @@ interface Window {
 			message?: string;
 			error?: string;
 		}>;
+		getAgentActivity: (videoPath?: string) => Promise<{
+			success: boolean;
+			log: AgentActivityLog | null;
+			message?: string;
+			error?: string;
+		}>;
 		setCursorTelemetry: (
 			videoPath: string | undefined,
 			samples: CursorTelemetryPoint[],
@@ -1138,6 +1144,38 @@ interface CursorTelemetryPoint {
 		| "resize-ew"
 		| "resize-ns"
 		| "not-allowed";
+}
+
+type AgentActivitySpanKind = "motion" | "hold" | "wait";
+
+type AgentActivityAction = "move" | "click" | "drag" | "scroll" | "type" | "key" | "wait" | "raise";
+
+interface AgentActivityTarget {
+	cx: number;
+	cy: number;
+	width?: number;
+	height?: number;
+}
+
+interface AgentActivitySpan {
+	kind: AgentActivitySpanKind;
+	action: AgentActivityAction;
+	startMs: number;
+	endMs: number;
+	target?: AgentActivityTarget;
+}
+
+interface AgentActivityScene {
+	startMs: number;
+	endMs: number;
+	failed: boolean;
+	title?: string;
+}
+
+interface AgentActivityLog {
+	version: 1;
+	scenes: AgentActivityScene[];
+	spans: AgentActivitySpan[];
 }
 
 interface SystemCursorAsset {

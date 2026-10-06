@@ -1,9 +1,15 @@
 import { EventEmitter } from "node:events";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const clock = vi.hoisted(() => ({ ms: 0 }));
 vi.mock("electron", () => ({ app: {}, shell: {} }));
 vi.mock("../ipc/cursor/bounds", () => ({}));
-vi.mock("../ipc/state", () => ({}));
+vi.mock("../ipc/cursor/telemetry", () => ({
+	clamp: (value: number, min: number, max: number) => Math.min(max, Math.max(min, value)),
+	getCursorCaptureElapsedMs: () => clock.ms,
+	isCursorCapturePaused: () => false,
+}));
+vi.mock("../ipc/state", () => ({ isCursorCaptureActive: true }));
 vi.mock("../ipc/utils", () => ({
 	parseWindowId: (id?: string) => {
 		const match = id?.match(/^window:(\d+)/);
@@ -13,6 +19,7 @@ vi.mock("../ipc/utils", () => ({
 vi.mock("./agentInput", () => ({ agentInput: {} }));
 vi.mock("./screenshot", () => ({ captureWindow: vi.fn() }));
 
+import { resetAgentActivity, snapshotAgentActivity } from "./agentActivity";
 import {
 	type AgentControlDeps,
 	type AgentStep,
@@ -100,7 +107,6 @@ describe("perform", () => {
 		).resolves.toEqual({ performed: 6 });
 		expect(commands).toEqual([
 			{ cmd: "preflight" },
-			{ cmd: "raise", pid: 42, windowId: 7, frame: FRAME },
 			{ cmd: "frontmost_window" },
 			{ cmd: "arm" },
 			{ cmd: "move", x: 110, y: 70, ms: 700 },
@@ -301,6 +307,211 @@ describe("perform", () => {
 		const { agent, commands } = setup();
 		await expect(agent.perform(steps)).rejects.toThrow();
 		expect(commands).toHaveLength(0);
+	});
+});
+
+describe("bringing the window to the front", () => {
+	it.each([
+		["another app", { ...CHROME, pid: 99 }],
+		["another window of the same app", { ...CHROME, windowId: 8 }],
+	])("raises and settles when %s is in front", async (_, window) => {
+		const sleep = vi.fn(async () => undefined);
+		const { agent, names } = setup(
+			{ sleep },
+			{
+				frontmost_window: vi
+					.fn()
+					.mockReturnValueOnce({ window })
+					.mockReturnValue({ window: CHROME }),
+			},
+		);
+		await agent.perform([{ action: "move", x: 1, y: 1 }]);
+		expect(names()).toEqual([
+			"preflight",
+			"frontmost_window",
+			"raise",
+			"frontmost_window",
+			"arm",
+			"move",
+			"disarm",
+		]);
+		expect(sleep).toHaveBeenCalledWith(250);
+	});
+
+	it("skips the raise and its settle when the window is already in front", async () => {
+		const sleep = vi.fn(async () => undefined);
+		const { agent, count } = setup({ sleep });
+		await agent.perform([{ action: "move", x: 1, y: 1 }]);
+		expect(count("raise")).toBe(0);
+		expect(count("frontmost_window")).toBe(1);
+		expect(sleep).not.toHaveBeenCalled();
+	});
+});
+
+describe("activity log", () => {
+	const tick = (command: AgentCommand) => {
+		clock.ms += "ms" in command ? command.ms : 10;
+		return {};
+	};
+	const timed = (
+		handlers: Record<string, Handler> = {},
+		overrides: Partial<AgentControlDeps> = {},
+	) =>
+		setup(
+			{
+				sleep: async (ms) => {
+					clock.ms += ms;
+				},
+				...overrides,
+			},
+			{
+				move: tick,
+				click: tick,
+				drag: tick,
+				scroll: tick,
+				type: tick,
+				key: tick,
+				...handlers,
+			},
+		);
+
+	beforeEach(() => {
+		clock.ms = 1_000;
+		resetAgentActivity();
+	});
+
+	it("logs one titled scene per perform with measured motion and hold spans", async () => {
+		const { agent } = timed();
+		await agent.perform(
+			[
+				{ action: "move", x: 80, y: 60, durationMs: 500 },
+				{ action: "click", x: 400, y: 300 },
+				{ action: "drag", fromX: 0, fromY: 0, toX: 200, toY: 150 },
+				{ action: "wait", ms: 1_000 },
+				{ action: "scroll", x: 80, y: 60, deltaY: 100 },
+				{ action: "type", text: "hi" },
+				{ action: "key", key: "enter" },
+			],
+			{ title: "Tour" },
+		);
+		clock.ms = 9_000;
+		await agent.perform([{ action: "wait", ms: 100 }]);
+		expect(snapshotAgentActivity(clock.ms)).toEqual({
+			version: 1,
+			scenes: [
+				{ startMs: 1_000, endMs: 4_620, failed: false, title: "Tour" },
+				{ startMs: 9_000, endMs: 9_100, failed: false },
+			],
+			spans: [
+				{
+					kind: "motion",
+					action: "move",
+					startMs: 1_000,
+					endMs: 1_500,
+					target: { cx: 0.1, cy: 0.1 },
+				},
+				{
+					kind: "motion",
+					action: "click",
+					startMs: 1_500,
+					endMs: 2_100,
+					target: { cx: 0.5, cy: 0.5 },
+				},
+				{
+					kind: "motion",
+					action: "drag",
+					startMs: 2_100,
+					endMs: 3_000,
+					target: { cx: 0.25, cy: 0.25 },
+				},
+				{ kind: "hold", action: "wait", startMs: 3_000, endMs: 4_000 },
+				{
+					kind: "motion",
+					action: "scroll",
+					startMs: 4_000,
+					endMs: 4_600,
+					target: { cx: 0.1, cy: 0.1 },
+				},
+				{ kind: "motion", action: "type", startMs: 4_600, endMs: 4_610 },
+				{ kind: "motion", action: "key", startMs: 4_610, endMs: 4_620 },
+				{ kind: "hold", action: "wait", startMs: 9_000, endMs: 9_100 },
+			],
+		});
+	});
+
+	it("logs the raise and its settle as a wait", async () => {
+		const { agent } = timed({
+			frontmost_window: vi
+				.fn()
+				.mockReturnValueOnce({ window: { ...CHROME, pid: 99 } })
+				.mockReturnValue({ window: CHROME }),
+		});
+		await agent.perform([{ action: "move", x: 1, y: 1, durationMs: 400 }]);
+		expect(snapshotAgentActivity(clock.ms).spans.slice(0, 2)).toEqual([
+			{ kind: "wait", action: "raise", startMs: 1_000, endMs: 1_250 },
+			{
+				kind: "motion",
+				action: "move",
+				startMs: 1_250,
+				endMs: 1_650,
+				target: { cx: 1 / 800, cy: 1 / 600 },
+			},
+		]);
+	});
+
+	it("marks the scene failed on a takeover, ending the running span at once", async () => {
+		const { agent, events } = timed(
+			{},
+			{
+				sleep: (ms) => (ms === 5_000 ? new Promise(() => undefined) : Promise.resolve()),
+			},
+		);
+		const running = agent.perform([{ action: "wait", ms: 5_000 }], { title: "Interrupted" });
+		await flush();
+		clock.ms = 2_500;
+		events.emit("user-input", { event: "user-input", kind: "move", escape: false });
+		await expect(running).rejects.toThrow(TAKEOVER_MESSAGE);
+		expect(snapshotAgentActivity(9_000)).toEqual({
+			version: 1,
+			scenes: [{ startMs: 1_000, endMs: 2_500, failed: true, title: "Interrupted" }],
+			spans: [{ kind: "hold", action: "wait", startMs: 1_000, endMs: 2_500 }],
+		});
+	});
+
+	it("keeps a scene whose step or check fails, since the earlier steps stay, and logs nothing for refused calls", async () => {
+		const { agent } = timed({
+			click: (command) => {
+				tick(command);
+				throw new Error("boom");
+			},
+		});
+		await expect(agent.perform([{ action: "click", x: 1, y: 1 }])).rejects.toThrow("boom");
+		await expect(agent.perform([{ action: "wait", ms: 30_001 }])).rejects.toThrow();
+		clock.ms = 3_000;
+		const offWindow = timed(
+			{},
+			{
+				findWindow: async () => {
+					clock.ms += 5;
+					return null;
+				},
+			},
+		);
+		await expect(offWindow.agent.perform([{ action: "wait", ms: 1 }])).rejects.toThrow();
+		const log = snapshotAgentActivity(5_000);
+		expect(log.scenes).toEqual([
+			{ startMs: 1_000, endMs: 1_600, failed: false },
+			{ startMs: 3_000, endMs: 3_005, failed: false },
+		]);
+		expect(log.spans).toEqual([
+			{
+				kind: "motion",
+				action: "click",
+				startMs: 1_000,
+				endMs: 1_600,
+				target: { cx: 1 / 800, cy: 1 / 600 },
+			},
+		]);
 	});
 });
 

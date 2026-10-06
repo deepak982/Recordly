@@ -126,6 +126,7 @@ export async function installDesktopBridge(page: Page, videoFixture = "preview.m
 					path: `${location.origin}/tests/ui/fixtures/${videoFixture}`,
 				}),
 				getCursorTelemetry: async () => ({ success: true, samples: [] }),
+				getAgentActivity: async () => ({ success: true, log: null }),
 				getVideoAudioFallbackPaths: async () => ({ success: true, paths: [] }),
 				getWhisperSmallModelStatus: async () => ({ success: true, exists: false }),
 				listProjectFiles: async () => ({ success: true, projects: [], entries: [] }),

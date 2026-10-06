@@ -14,12 +14,18 @@ import {
 } from "electron";
 import { getHudCaptureExcludedProcessIds } from "../../../src/lib/hudCaptureProtection";
 import { showCursor } from "../../cursorHider";
+import {
+	readAgentActivity,
+	resetAgentActivity,
+	snapshotAgentActivity,
+} from "../../mcp/agentActivity";
 import { getHudOverlayCaptureProtectionEnabled, beginHudCaptureProtection } from "../../windows";
 import { ALLOW_RECORDLY_WINDOW_CAPTURE } from "../constants";
 import { startWindowBoundsCapture, stopWindowBoundsCapture } from "../cursor/bounds";
 import { startInteractionCapture, stopInteractionCapture } from "../cursor/interaction";
 import { startNativeCursorMonitor, stopNativeCursorMonitor } from "../cursor/monitor";
 import {
+	getCursorCaptureElapsedMs,
 	normalizeCursorTelemetrySamples,
 	pauseCursorCaptureAtBoundary,
 	persistPendingCursorTelemetry,
@@ -1167,6 +1173,7 @@ export function registerRecordingHandlers(
 					preferredMicrophonePath,
 				);
 				setNativeCaptureStopRequested(true);
+				snapshotAgentActivity(getCursorCaptureElapsedMs());
 				process.stdin.write("stop\n");
 				const tempVideoPath = await waitForNativeCaptureStop(process);
 				console.log("[stop-native] Helper stopped, tempVideoPath:", tempVideoPath);
@@ -1871,12 +1878,14 @@ export function registerRecordingHandlers(
 			setPendingCursorSamples([]);
 			setCursorCaptureStartTimeMs(Date.now());
 			resetCursorCaptureClock();
+			resetAgentActivity();
 			setLinuxCursorScreenPoint(null);
 			setLastLeftClick(null);
 			sampleCursorPoint();
 			startCursorSampling();
 			void startInteractionCapture();
 		} else {
+			snapshotAgentActivity(getCursorCaptureElapsedMs());
 			setIsCursorCaptureActive(false);
 			stopCursorCapture();
 			stopInteractionCapture();
@@ -1939,6 +1948,25 @@ export function registerRecordingHandlers(
 				message: "Failed to load cursor telemetry",
 				error: String(error),
 				samples: [],
+			};
+		}
+	});
+
+	ipcMain.handle("get-agent-activity", async (_, videoPath?: string) => {
+		const targetVideoPath = normalizeVideoSourcePath(videoPath ?? currentVideoPath);
+		if (!targetVideoPath) {
+			return { success: true, log: null };
+		}
+
+		try {
+			return { success: true, log: await readAgentActivity(targetVideoPath) };
+		} catch (error) {
+			console.error("Failed to load agent activity:", error);
+			return {
+				success: false,
+				message: "Failed to load agent activity",
+				error: String(error),
+				log: null,
 			};
 		}
 	});

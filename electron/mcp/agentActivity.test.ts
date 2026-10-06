@@ -1,0 +1,275 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("electron", () => ({ app: { getPath: () => os.tmpdir() } }));
+
+import {
+	pauseCursorCapture,
+	resetCursorCaptureClock,
+	resumeCursorCapture,
+} from "../ipc/cursor/telemetry";
+import { setCursorCaptureStartTimeMs, setIsCursorCaptureActive } from "../ipc/state";
+import {
+	beginScene,
+	beginSpan,
+	getAgentActivityMs,
+	normalizeAgentActivityLog,
+	persistAgentActivity,
+	readAgentActivity,
+	resetAgentActivity,
+	snapshotAgentActivity,
+} from "./agentActivity";
+
+const START = 1_000_000;
+const at = (ms: number) => vi.setSystemTime(START + ms);
+
+function startRecording() {
+	at(0);
+	setIsCursorCaptureActive(true);
+	setCursorCaptureStartTimeMs(START);
+	resetCursorCaptureClock();
+	resetAgentActivity();
+}
+
+function stopRecording(ms: number) {
+	at(ms);
+	const log = snapshotAgentActivity(getAgentActivityMs() ?? ms);
+	setIsCursorCaptureActive(false);
+	return log;
+}
+
+beforeEach(() => {
+	vi.useFakeTimers();
+	at(0);
+	setIsCursorCaptureActive(false);
+	resetCursorCaptureClock();
+	resetAgentActivity();
+});
+
+afterEach(() => {
+	vi.useRealTimers();
+});
+
+describe("clock gating", () => {
+	it("logs nothing before start or during a countdown, and nothing after stop", () => {
+		at(500);
+		expect(getAgentActivityMs()).toBeNull();
+		beginSpan("motion", "click")();
+		const endScene = beginScene("Before");
+
+		startRecording();
+		endScene(true);
+		at(100);
+		const end = beginSpan("motion", "move");
+		at(400);
+		end();
+		const log = stopRecording(1_000);
+
+		at(1_200);
+		expect(getAgentActivityMs()).toBeNull();
+		beginSpan("hold", "wait")();
+		expect(snapshotAgentActivity(5_000)).toEqual(log);
+		expect(log).toEqual({
+			version: 1,
+			scenes: [],
+			spans: [{ kind: "motion", action: "move", startMs: 100, endMs: 400 }],
+		});
+	});
+
+	it("drops spans inside a pause, ends a running span at the pause, and starts a straddling one at the resume", () => {
+		startRecording();
+		at(100);
+		const running = beginSpan("hold", "wait");
+		at(300);
+		pauseCursorCapture(START + 300);
+		expect(getAgentActivityMs()).toBe(300);
+		at(800);
+		running();
+		const duringPause = beginSpan("motion", "click");
+		at(1_500);
+		const straddling = beginSpan("motion", "drag");
+		at(2_000);
+		resumeCursorCapture(START + 2_000);
+		duringPause();
+		at(2_100);
+		const afterResume = beginSpan("motion", "type");
+		at(2_300);
+		straddling();
+		at(2_600);
+		afterResume();
+		expect(stopRecording(3_000).spans).toEqual([
+			{ kind: "hold", action: "wait", startMs: 100, endMs: 300 },
+			{ kind: "motion", action: "drag", startMs: 300, endMs: 600 },
+			{ kind: "motion", action: "type", startMs: 400, endMs: 900 },
+		]);
+	});
+});
+
+describe("scenes and spans", () => {
+	it("keeps scenes and spans in order with titles, targets and failure", () => {
+		startRecording();
+		at(100);
+		const first = beginScene("Open settings");
+		const raise = beginSpan("wait", "raise");
+		at(350);
+		raise();
+		const click = beginSpan("motion", "click", { cx: 0.25, cy: 0.5 });
+		at(950);
+		click();
+		first(false);
+		at(4_000);
+		const second = beginScene();
+		const type = beginSpan("motion", "type");
+		at(4_500);
+		type();
+		second(true);
+		expect(stopRecording(6_000)).toEqual({
+			version: 1,
+			scenes: [
+				{ startMs: 100, endMs: 950, failed: false, title: "Open settings" },
+				{ startMs: 4_000, endMs: 4_500, failed: true },
+			],
+			spans: [
+				{ kind: "wait", action: "raise", startMs: 100, endMs: 350 },
+				{
+					kind: "motion",
+					action: "click",
+					startMs: 350,
+					endMs: 950,
+					target: { cx: 0.25, cy: 0.5 },
+				},
+				{ kind: "motion", action: "type", startMs: 4_000, endMs: 4_500 },
+			],
+		});
+	});
+
+	it("closes open entries at stop, drops empty ones, and ignores late ends", () => {
+		startRecording();
+		at(200);
+		const scene = beginScene("Mid-stop");
+		beginSpan("motion", "move")();
+		const open = beginSpan("motion", "drag");
+		const log = stopRecording(700);
+		at(900);
+		open();
+		scene(true);
+		expect(log).toEqual({
+			version: 1,
+			scenes: [{ startMs: 200, endMs: 700, failed: false, title: "Mid-stop" }],
+			spans: [{ kind: "motion", action: "drag", startMs: 200, endMs: 700 }],
+		});
+	});
+
+	it("clamps to the stop time and forgets everything on reset", () => {
+		startRecording();
+		at(100);
+		const end = beginSpan("hold", "wait");
+		at(900);
+		end();
+		expect(snapshotAgentActivity(500).spans).toEqual([
+			{ kind: "hold", action: "wait", startMs: 100, endMs: 500 },
+		]);
+		startRecording();
+		expect(snapshotAgentActivity(500)).toEqual({ version: 1, scenes: [], spans: [] });
+	});
+});
+
+describe("persistence", () => {
+	let dir: string;
+	beforeEach(async () => {
+		dir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-activity-"));
+	});
+	afterEach(async () => {
+		await fs.rm(dir, { recursive: true, force: true });
+	});
+
+	it("writes the sidecar once, reads it back, and skips an empty log", async () => {
+		const video = path.join(dir, "demo.mp4");
+		startRecording();
+		at(100);
+		const scene = beginScene("Demo");
+		const span = beginSpan("motion", "scroll", { cx: 0.1, cy: 0.9 });
+		at(600);
+		span();
+		scene(false);
+		const log = stopRecording(1_000);
+		await persistAgentActivity(video);
+		expect(await readAgentActivity(video)).toEqual(log);
+
+		const empty = path.join(dir, "empty.mp4");
+		await persistAgentActivity(empty);
+		await expect(fs.access(`${empty}.agent.json`)).rejects.toThrow();
+		expect(await readAgentActivity(empty)).toBeNull();
+	});
+
+	it("tolerates a byte order mark and rejects broken JSON", async () => {
+		const video = path.join(dir, "bom.mp4");
+		await fs.writeFile(
+			`${video}.agent.json`,
+			`﻿${JSON.stringify({ version: 1, scenes: [], spans: [] })}`,
+		);
+		expect(await readAgentActivity(video)).toEqual({ version: 1, scenes: [], spans: [] });
+		await fs.writeFile(`${video}.agent.json`, "{");
+		await expect(readAgentActivity(video)).rejects.toThrow();
+	});
+
+	it("normalizes malformed logs defensively", () => {
+		expect(normalizeAgentActivityLog(null)).toBeNull();
+		expect(normalizeAgentActivityLog({ version: 2, scenes: [], spans: [] })).toBeNull();
+		expect(normalizeAgentActivityLog({ version: 1 })).toEqual({
+			version: 1,
+			scenes: [],
+			spans: [],
+		});
+		expect(
+			normalizeAgentActivityLog({
+				version: 1,
+				scenes: [
+					{ startMs: 5_000, endMs: 6_000, failed: "yes", title: 7 },
+					{ startMs: -10, endMs: 400, failed: true, title: "Intro" },
+					{ startMs: 10, endMs: 5 },
+					null,
+				],
+				spans: [
+					null,
+					{ kind: "think", action: "move", startMs: 0, endMs: 10 },
+					{ kind: "motion", action: "teleport", startMs: 0, endMs: 10 },
+					{ kind: "motion", action: "move", startMs: "0", endMs: 10 },
+					{ kind: "hold", action: "wait", startMs: 20, endMs: 20 },
+					{
+						kind: "motion",
+						action: "click",
+						startMs: 300,
+						endMs: 900,
+						target: { cx: 1.5, cy: -0.2, width: 0.1, height: Number.NaN },
+					},
+					{
+						kind: "motion",
+						action: "drag",
+						startMs: 100,
+						endMs: 200,
+						target: { cx: "left", cy: 0.5 },
+					},
+				],
+			}),
+		).toEqual({
+			version: 1,
+			scenes: [
+				{ startMs: 0, endMs: 400, failed: true, title: "Intro" },
+				{ startMs: 5_000, endMs: 6_000, failed: false },
+			],
+			spans: [
+				{ kind: "motion", action: "drag", startMs: 100, endMs: 200 },
+				{
+					kind: "motion",
+					action: "click",
+					startMs: 300,
+					endMs: 900,
+					target: { cx: 1, cy: 0, width: 0.1 },
+				},
+			],
+		});
+	});
+});
