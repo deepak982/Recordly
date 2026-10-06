@@ -117,6 +117,14 @@ export function getNativeWindowListBinaryPath(): string {
 	return path.join(app.getPath("userData"), "native-tools", "recordly-window-list");
 }
 
+export function getAgentInputSourcePath(): string {
+	return resolveUnpackedAppPath("electron", "native", "AgentInput.swift");
+}
+
+export function getAgentInputBinaryPath(): string {
+	return path.join(app.getPath("userData"), "native-tools", "recordly-agent-input");
+}
+
 export function getWindowsCaptureExePath(): string {
 	return resolvePreferredWindowsNativeHelperPath("wgc-capture", "wgc-capture.exe");
 }
@@ -269,5 +277,15 @@ export async function ensureNativeCursorMonitorBinary(): Promise<string> {
 		getNativeCursorMonitorBinaryPath(),
 		"native cursor monitor helper",
 		"recordly-native-cursor-monitor",
+	);
+}
+
+export async function ensureAgentInputBinary(): Promise<string> {
+	await ensureNativeHelperMigration();
+	return ensureSwiftHelperBinary(
+		getAgentInputSourcePath(),
+		getAgentInputBinaryPath(),
+		"native agent input helper",
+		"recordly-agent-input",
 	);
 }

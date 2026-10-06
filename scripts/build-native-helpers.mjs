@@ -42,6 +42,10 @@ const helpers = [
 		source: "NativeCursorMonitor.swift",
 		output: "recordly-native-cursor-monitor",
 	},
+	{
+		source: "AgentInput.swift",
+		output: "recordly-agent-input",
+	},
 ];
 
 const swiftcCheck = spawnSync("swiftc", ["--version"], { encoding: "utf8" });

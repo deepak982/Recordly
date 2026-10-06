@@ -199,6 +199,7 @@ function getExpectedNativeHelperFiles(archTag) {
 				label: "Native cursor monitor helper",
 				executable: true,
 			},
+			{ name: "recordly-agent-input", label: "Agent input helper", executable: true },
 			{ name: "whisper-cli", label: "Whisper CLI runtime", executable: true },
 			{ name: "whisper-runtime.json", label: "Whisper runtime manifest" },
 		];
