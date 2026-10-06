@@ -5,6 +5,8 @@ import CoreGraphics
 import Foundation
 
 let agentTag: Int64 = 0x52434459
+let driftLimit = 8.0
+let driftWindow: TimeInterval = 1
 
 struct Failure: Error {
 	let message: String
@@ -16,6 +18,8 @@ final class SharedState {
 	private var epoch = 0
 	private var armedEpoch: Int?
 	private var lastEmit: TimeInterval = 0
+	private var drift = 0.0
+	private var driftStart: TimeInterval = 0
 	var tap: CFMachPort?
 
 	func currentEpoch() -> Int {
@@ -41,27 +45,38 @@ final class SharedState {
 		defer { lock.unlock() }
 		if armed {
 			armedEpoch = epoch
+			drift = 0
+			driftStart = ProcessInfo.processInfo.systemUptime
 		} else {
 			epoch += 1
 			armedEpoch = nil
 		}
 	}
 
+	func pointerMoved(dx: Double, dy: Double) {
+		lock.lock()
+		let now = ProcessInfo.processInfo.systemUptime
+		if now - driftStart > driftWindow {
+			drift = 0
+			driftStart = now
+		}
+		drift += hypot(dx, dy)
+		let tookOver = drift > driftLimit
+		lock.unlock()
+		if tookOver {
+			userInput(kind: "move", escape: false)
+		}
+	}
+
 	func userInput(kind: String, escape: Bool) {
 		lock.lock()
-		guard armedEpoch != nil else {
-			lock.unlock()
-			return
-		}
+		defer { lock.unlock() }
+		guard armedEpoch != nil else { return }
 		let firstAfterArm = armedEpoch == epoch
 		epoch += 1
 		let now = ProcessInfo.processInfo.systemUptime
-		let shouldEmit = firstAfterArm || escape || now - lastEmit >= 0.25
-		if shouldEmit {
+		if firstAfterArm || escape || now - lastEmit >= 0.25 {
 			lastEmit = now
-		}
-		lock.unlock()
-		if shouldEmit {
 			send(["event": "user-input", "kind": kind, "escape": escape])
 		}
 	}
@@ -671,12 +686,21 @@ let tapCallback: CGEventTapCallBack = { _, type, event, _ in
 		return Unmanaged.passUnretained(event)
 	}
 	switch type {
+	case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
+		state.pointerMoved(
+			dx: Double(event.getIntegerValueField(.mouseEventDeltaX)),
+			dy: Double(event.getIntegerValueField(.mouseEventDeltaY))
+		)
 	case .keyDown, .flagsChanged:
 		state.userInput(kind: "key", escape: type == .keyDown && event.getIntegerValueField(.keyboardEventKeycode) == 53)
 	case .scrollWheel:
-		state.userInput(kind: "scroll", escape: false)
+		let scrolled = event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1) != 0
+			|| event.getIntegerValueField(.scrollWheelEventPointDeltaAxis2) != 0
+		if scrolled, event.getIntegerValueField(.scrollWheelEventMomentumPhase) == 0 {
+			state.userInput(kind: "scroll", escape: false)
+		}
 	default:
-		state.userInput(kind: "mouse", escape: false)
+		state.userInput(kind: "button", escape: false)
 	}
 	return Unmanaged.passUnretained(event)
 }

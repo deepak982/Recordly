@@ -172,8 +172,11 @@ describe("perform", () => {
 		]);
 		await flush();
 		expect(count("click")).toBe(1);
-		events.emit("user-input", { event: "user-input", kind: "mouse", escape: false });
-		await expect(running).rejects.toThrow(TAKEOVER_MESSAGE);
+		events.emit("user-input", { event: "user-input", kind: "move", escape: false });
+		events.emit("user-input", { event: "user-input", kind: "key", escape: false });
+		await expect(running).rejects.toThrow(
+			`${TAKEOVER_MESSAGE} Recordly noticed that the mouse moved.`,
+		);
 		expect(count("click")).toBe(1);
 		expect(count("disarm")).toBe(1);
 		expect(events.listenerCount("user-input")).toBe(0);
@@ -193,7 +196,7 @@ describe("perform", () => {
 		const running = agent.perform([{ action: "click", x: 10, y: 10 }]);
 		await flush();
 		expect(findWindow).toHaveBeenCalledTimes(2);
-		events.emit("user-input", { event: "user-input", kind: "mouse", escape: false });
+		events.emit("user-input", { event: "user-input", kind: "move", escape: false });
 		await expect(running).rejects.toThrow(TAKEOVER_MESSAGE);
 		release({ pid: 42, frame: FRAME });
 		await flush();
@@ -214,7 +217,7 @@ describe("perform", () => {
 			"Another action is still running.",
 		);
 		events.emit("user-input", { event: "user-input", kind: "key", escape: true });
-		await expect(first).rejects.toThrow(TAKEOVER_MESSAGE);
+		await expect(first).rejects.toThrow("Recordly noticed that Esc was pressed.");
 		await expect(agent.perform([{ action: "wait", ms: 1 }])).resolves.toEqual({ performed: 1 });
 	});
 
@@ -480,7 +483,7 @@ describe("keyboard and mouse details", () => {
 		const running = agent.perform([{ action: "drag", fromX: 1, fromY: 1, toX: 50, toY: 50 }]);
 		await flush();
 		expect(count("drag")).toBe(1);
-		events.emit("user-input", { event: "user-input", kind: "mouse", escape: false });
+		events.emit("user-input", { event: "user-input", kind: "move", escape: false });
 		await expect(running).rejects.toThrow(TAKEOVER_MESSAGE);
 		expect(names().at(-1)).toBe("disarm");
 	});

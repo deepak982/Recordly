@@ -101,7 +101,11 @@ export type AgentResponse =
 	| ({ id: number; ok: true } & Record<string, unknown>)
 	| { id: number; ok: false; error: string };
 
-export type AgentEvent = { event: "user-input"; kind: "mouse" | "key" | "scroll"; escape: boolean };
+export type AgentEvent = {
+	event: "user-input";
+	kind: "move" | "button" | "scroll" | "key";
+	escape: boolean;
+};
 
 export const AGENT_KEY_NAMES = [
 	"enter",

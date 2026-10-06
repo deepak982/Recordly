@@ -174,9 +174,9 @@ describe("agent input helper client", () => {
 		input.events.on("user-input", onInput);
 		const disarm = input.request({ cmd: "disarm" });
 		await flush();
-		helpers[0].reply({ event: "user-input", kind: "mouse", escape: false });
+		helpers[0].reply({ event: "user-input", kind: "move", escape: false });
 		await flush();
-		expect(onInput).toHaveBeenCalledWith({ event: "user-input", kind: "mouse", escape: false });
+		expect(onInput).toHaveBeenCalledWith({ event: "user-input", kind: "move", escape: false });
 		input.stop();
 		await expect(disarm).rejects.toThrow(HELPER_STOPPED);
 		expect(helpers[0].proc.kill).toHaveBeenCalledOnce();

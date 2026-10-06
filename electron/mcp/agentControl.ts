@@ -1,7 +1,7 @@
 import { app, shell } from "electron";
 import { findNativeMacWindow, getWindowBoundsFromNativeSource } from "../ipc/cursor/bounds";
 import { selectedSource } from "../ipc/state";
-import { type SelectedSource, type WindowBounds, WINDOW_OFF_SCREEN_MESSAGE } from "../ipc/types";
+import { type SelectedSource, WINDOW_OFF_SCREEN_MESSAGE, type WindowBounds } from "../ipc/types";
 import { getScreen, parseWindowId } from "../ipc/utils";
 import { type AgentInput, agentInput } from "./agentInput";
 import {
@@ -10,6 +10,7 @@ import {
 	AGENT_MODIFIER_ALIASES,
 	type AgentButton,
 	type AgentCommand,
+	type AgentEvent,
 	type AgentModifier,
 	type AgentResults,
 	type AgentWindow,
@@ -64,6 +65,12 @@ const POLL_MS = 250;
 const FIND_LIMIT = 30;
 
 export const TAKEOVER_MESSAGE = "Stopped: the user took over the mouse or keyboard.";
+const TAKEOVER_CAUSES: Record<AgentEvent["kind"], string> = {
+	move: "the mouse moved",
+	button: "a mouse button was pressed",
+	scroll: "the mouse or trackpad scrolled",
+	key: "a key was pressed",
+};
 const MAC_ONLY = "Mouse and keyboard control is available on macOS only for now.";
 const POST_EVENTS_MISSING =
 	"Recordly is not allowed to post mouse and keyboard input. Ask the user to enable Recordly in " +
@@ -412,30 +419,36 @@ export function createAgentControl(
 		}
 		let stopped = false;
 		let tookOver = false;
+		let cause: string | undefined;
+		const takeover = () =>
+			new Error(
+				cause ? `${TAKEOVER_MESSAGE} Recordly noticed that ${cause}.` : TAKEOVER_MESSAGE,
+			);
 		let abort!: () => void;
 		const aborted = new Promise<never>((_, reject) => {
-			abort = () => reject(new Error(TAKEOVER_MESSAGE));
+			abort = () => reject(takeover());
 		});
 		aborted.catch(() => undefined);
-		const onUserInput = () => {
+		const onUserInput = (event: AgentEvent) => {
+			if (!tookOver) cause = event.escape ? "Esc was pressed" : TAKEOVER_CAUSES[event.kind];
 			tookOver = true;
 			stopped = true;
 			abort();
 		};
 		const post: Post = (command) => {
-			if (stopped) return Promise.reject(new Error(TAKEOVER_MESSAGE));
+			if (stopped) return Promise.reject(takeover());
 			return input.request(command);
 		};
 		await input.request({ cmd: "arm" });
 		input.events.on("user-input", onUserInput);
 		try {
 			for (const step of steps) {
-				if (stopped) throw new Error(TAKEOVER_MESSAGE);
+				if (stopped) throw takeover();
 				await Promise.race([runStep(step, start, post), aborted]);
 			}
 		} catch (error) {
 			if (tookOver || (error instanceof Error && error.message === "user-input")) {
-				throw new Error(TAKEOVER_MESSAGE);
+				throw takeover();
 			}
 			throw error;
 		} finally {
