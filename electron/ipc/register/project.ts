@@ -12,6 +12,7 @@ import path from "node:path";
 import { BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { RECORDINGS_DIR } from "../../appPaths";
 import { buildMediaUrl, getMediaServerBaseUrl } from "../../mediaServer";
+import { recordingSignals } from "../../mcp/signals";
 import { LEGACY_PROJECT_FILE_EXTENSIONS, PROJECT_FILE_EXTENSION } from "../constants";
 import { getProjectBackupPath, writeProjectFileAtomically } from "../project/atomicSave";
 import {
@@ -807,7 +808,7 @@ export function registerProjectHandlers() {
 	ipcMain.handle(
 		"set-current-video-path",
 		async (
-			_,
+			event,
 			path: string,
 			options?: { preserveProjectPath?: boolean; hideOverlayCursorByDefault?: boolean },
 		) => {
@@ -846,6 +847,7 @@ export function registerProjectHandlers() {
 				}
 			}
 
+			recordingSignals.emit("videoPath", nextSession.videoPath, event.sender);
 			return { success: true, webcamPath: nextSession.webcamPath ?? null };
 		},
 	);
@@ -853,7 +855,7 @@ export function registerProjectHandlers() {
 	ipcMain.handle(
 		"set-current-recording-session",
 		async (
-			_,
+			event,
 			session: {
 				videoPath: string;
 				webcamPath?: string | null;
@@ -884,6 +886,7 @@ export function registerProjectHandlers() {
 				}
 			}
 
+			recordingSignals.emit("videoPath", normalizedVideoPath, event.sender);
 			return { success: true };
 		},
 	);
