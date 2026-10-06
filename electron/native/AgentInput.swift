@@ -888,6 +888,47 @@ let findAttributes = [
 	"AXPosition", "AXSize", "AXChildren",
 ] as CFArray
 
+let enhancedLock = NSLock()
+var enhancedApps: Set<pid_t> = []
+var activeFinds = 0
+var restoreGeneration = 0
+let enhancedIdle: TimeInterval = 60
+
+func restoreEnhanced() {
+	for pid in enhancedApps {
+		AXUIElementSetAttributeValue(AXUIElementCreateApplication(pid), "AXEnhancedUserInterface" as CFString, kCFBooleanFalse)
+	}
+	enhancedApps.removeAll()
+}
+
+func finishFind() {
+	enhancedLock.withLock {
+		activeFinds -= 1
+		guard !enhancedApps.isEmpty else { return }
+		restoreGeneration += 1
+		let generation = restoreGeneration
+		DispatchQueue.global().asyncAfter(deadline: .now() + enhancedIdle) {
+			enhancedLock.withLock {
+				if generation == restoreGeneration && activeFinds == 0 {
+					restoreEnhanced()
+				}
+			}
+		}
+	}
+}
+
+func isChromium(_ window: AXUIElement) -> Bool {
+	(attribute(window, kAXChildrenAttribute) as? [AXUIElement])?.contains { attribute($0, "ChromeAXNodeId") != nil } == true
+}
+
+func hasWebContent(_ element: AXUIElement, depth: Int = 0) -> Bool {
+	let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] ?? []
+	if (attribute(element, kAXRoleAttribute) as? String) == "AXWebArea" {
+		return !children.isEmpty
+	}
+	return depth < 20 && children.contains { hasWebContent($0, depth: depth + 1) }
+}
+
 func usable(_ value: AnyObject) -> AnyObject? {
 	if CFGetTypeID(value) == AXValueGetTypeID(), AXValueGetType(value as! AXValue) == .axError {
 		return nil
@@ -901,7 +942,7 @@ func walk(_ window: AXUIElement, roles: Set<String>?, text: String, bounds: CGRe
 	var head = 0
 	var matches: [(path: [Int], element: [String: Any])] = []
 	while head < queue.count {
-		if head >= 4000 || ProcessInfo.processInfo.systemUptime > deadline {
+		if head >= 20_000 || ProcessInfo.processInfo.systemUptime > deadline {
 			return (matches, true)
 		}
 		let node = queue[head]
@@ -914,7 +955,7 @@ func walk(_ window: AXUIElement, roles: Set<String>?, text: String, bounds: CGRe
 		let field = values.map(usable)
 		let role = field[0] as? String ?? ""
 		let subrole = field[1] as? String ?? ""
-		if node.depth < 40, let children = field[9] as? [AXUIElement] {
+		if node.depth < 100, let children = field[9] as? [AXUIElement] {
 			for (index, child) in children.enumerated() {
 				queue.append((child, node.depth + 1, node.path + [index]))
 			}
@@ -922,14 +963,15 @@ func walk(_ window: AXUIElement, roles: Set<String>?, text: String, bounds: CGRe
 		if let roles, !roles.contains(role) && !roles.contains(subrole) {
 			continue
 		}
-		let label = [field[2], field[3], field[4], field[5], field[6]]
+		let labels = [field[2], field[3], field[4], field[5], field[6]]
 			.compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) }
-			.first { !$0.isEmpty } ?? ""
-		if !text.isEmpty && !label.lowercased().contains(text) {
+			.filter { !$0.isEmpty }
+		let label = labels.first ?? ""
+		if !text.isEmpty && !labels.contains(where: { $0.lowercased().contains(text) }) {
 			continue
 		}
-		guard let box = rect(position: field[7], size: field[8]), box.width > 0, box.height > 0,
-			bounds.contains(CGPoint(x: box.midX, y: box.midY)) else {
+		guard let box = rect(position: field[7], size: field[8]), box.width > 1, box.height > 1,
+			bounds.contains(CGPoint(x: box.midX, y: box.midY)), !box.contains(bounds) else {
 			continue
 		}
 		matches.append((node.path, [
@@ -964,19 +1006,30 @@ func find(_ request: [String: Any]) throws -> [String: Any] {
 	guard AXIsProcessTrusted() else {
 		throw Failure("accessibility permission is not granted")
 	}
+	enhancedLock.withLock { activeFinds += 1 }
+	defer { finishFind() }
 	let app = AXUIElementCreateApplication(pid)
 	let wasManual = (attribute(app, "AXManualAccessibility") as? Bool) == true
-	let justEnabled = !wasManual
+	var justEnabled = !wasManual
 		&& AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue) == .success
 	guard let window = matchWindow(app, id: windowId(request), frame: bounds, seconds: 1) else {
 		throw Failure("window not found in process \(pid)")
 	}
-	var (matches, exhausted) = walk(window, roles: roles, text: text, bounds: bounds)
-	if justEnabled && matches.isEmpty {
-		usleep(400_000)
-		(matches, exhausted) = walk(window, roles: roles, text: text, bounds: bounds)
+	if !wasManual && !justEnabled && (attribute(app, "AXEnhancedUserInterface") as? Bool) == false && isChromium(window) {
+		justEnabled = enhancedLock.withLock {
+			enhancedApps.insert(pid)
+			AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+			return (attribute(app, "AXEnhancedUserInterface") as? Bool) == true
+		}
 	}
-	matches.sort { $0.path.lexicographicallyPrecedes($1.path) }
+	if justEnabled {
+		let deadline = ProcessInfo.processInfo.systemUptime + 3
+		while !hasWebContent(window) && ProcessInfo.processInfo.systemUptime < deadline {
+			usleep(100_000)
+		}
+	}
+	let (found, exhausted) = walk(window, roles: roles, text: text, bounds: bounds)
+	let matches = found.sorted { $0.path.lexicographicallyPrecedes($1.path) }
 	return [
 		"elements": matches.prefix(limit).map(\.element),
 		"truncated": exhausted || matches.count > limit,
@@ -1011,6 +1064,8 @@ func runInput(_ id: Any, _ prepare: @escaping () throws -> (Int) throws -> Void)
 
 func releaseAndExit() -> Never {
 	held.releaseAll()
+	enhancedLock.lock()
+	restoreEnhanced()
 	exit(0)
 }
 
