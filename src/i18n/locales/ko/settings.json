@@ -52,6 +52,8 @@
 		"connectZoomsDescription": "연속된 확대 구간을 하나의 부드러운 카메라 이동으로 연결합니다.",
 		"autoApplyFreshRecordingZooms": "새 녹화에 확대 자동 적용",
 		"autoApplyFreshRecordingZoomsDescription": "새 녹화를 열면 커서를 따라가는 확대를 자동으로 제안합니다.",
+		"autoApplyAgentEdits": "에이전트 녹화 다듬기",
+		"autoApplyAgentEditsDescription": "AI가 생각하는 동안의 멈춤을 잘라내고 동작하는 곳을 확대합니다. AI 에이전트가 만든 새 녹화에 적용됩니다.",
 		"zoomGeneralTitle": "일반",
 		"zoomGeneralDescription": "모든 확대 전환에 적용되는 전체 모션 설정입니다.",
 		"zoomInTitle": "확대 시작",

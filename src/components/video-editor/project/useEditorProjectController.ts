@@ -62,6 +62,7 @@ type Input = {
 	autoFullTrackClipIdRef: MutableRefObject<string | null>;
 	autoFullTrackClipEndMsRef: MutableRefObject<number | null>;
 	pendingFreshRecordingAutoZoomPathRef: MutableRefObject<string | null>;
+	pendingFreshRecordingAgentEditsPathRef: MutableRefObject<string | null>;
 	pendingFreshRecordingAutoSuggestTelemetryCountRef: MutableRefObject<number>;
 	autoSuggestedVideoPathRef: MutableRefObject<string | null>;
 	applySessionPresentation: (
@@ -122,6 +123,7 @@ export function useEditorProjectController(input: Input) {
 			autoFullTrackClipIdRef: input.autoFullTrackClipIdRef,
 			autoFullTrackClipEndMsRef: input.autoFullTrackClipEndMsRef,
 			pendingFreshRecordingAutoZoomPathRef: input.pendingFreshRecordingAutoZoomPathRef,
+			pendingFreshRecordingAgentEditsPathRef: input.pendingFreshRecordingAgentEditsPathRef,
 			pendingFreshRecordingAutoSuggestTelemetryCountRef:
 				input.pendingFreshRecordingAutoSuggestTelemetryCountRef,
 			autoSuggestedVideoPathRef: input.autoSuggestedVideoPathRef,
@@ -144,6 +146,7 @@ export function useEditorProjectController(input: Input) {
 		devConfig: input.devConfig,
 		videoSourcePath: input.videoSourcePath,
 		pendingFreshRecordingAutoZoomPathRef: input.pendingFreshRecordingAutoZoomPathRef,
+		pendingFreshRecordingAgentEditsPathRef: input.pendingFreshRecordingAgentEditsPathRef,
 		applyLoadedProject: lifecycle.applyLoadedProject,
 		resetSourceScopedEditorState: lifecycle.resetSourceScopedEditorState,
 		applySessionPresentation: input.applySessionPresentation,
@@ -197,6 +200,7 @@ export function useEditorProjectController(input: Input) {
 		appearance: input.appearance,
 		videoPlaybackRef: input.videoPlaybackRef,
 		pendingFreshRecordingAutoZoomPathRef: input.pendingFreshRecordingAutoZoomPathRef,
+		pendingFreshRecordingAgentEditsPathRef: input.pendingFreshRecordingAgentEditsPathRef,
 		hasUnsavedChanges,
 		setIsPlaying: input.setIsPlaying,
 		setCurrentTime: input.setCurrentTime,

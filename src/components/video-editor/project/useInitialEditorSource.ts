@@ -20,6 +20,7 @@ type Input = {
 	devConfig: ReturnType<typeof getDevOpenRecordingConfig>;
 	videoSourcePath: string | null;
 	pendingFreshRecordingAutoZoomPathRef: MutableRefObject<string | null>;
+	pendingFreshRecordingAgentEditsPathRef: MutableRefObject<string | null>;
 	applyLoadedProject: (candidate: unknown, path?: string | null) => Promise<boolean>;
 	resetSourceScopedEditorState: () => void;
 	applySessionPresentation: (session: SessionPresentation | null | undefined) => void;
@@ -33,6 +34,7 @@ export function useInitialEditorSource({
 	devConfig,
 	videoSourcePath,
 	pendingFreshRecordingAutoZoomPathRef,
+	pendingFreshRecordingAgentEditsPathRef,
 	applyLoadedProject,
 	resetSourceScopedEditorState,
 	applySessionPresentation,
@@ -96,6 +98,7 @@ export function useInitialEditorSource({
 					resetSourceScopedEditorState();
 					pendingFreshRecordingAutoZoomPathRef.current =
 						appearance.autoApplyFreshRecordingAutoZooms ? sourceUrl : null;
+					pendingFreshRecordingAgentEditsPathRef.current = sourceUrl;
 					appearance.setWebcam((previous) => ({
 						...previous,
 						visibleRanges: undefined,
@@ -167,6 +170,7 @@ export function useInitialEditorSource({
 					resetSourceScopedEditorState();
 					pendingFreshRecordingAutoZoomPathRef.current =
 						appearance.autoApplyFreshRecordingAutoZooms ? sourceUrl : null;
+					pendingFreshRecordingAgentEditsPathRef.current = sourceUrl;
 					applySessionPresentation(sessionResult.session);
 					appearance.setWebcam((previous) => ({
 						...previous,

@@ -52,6 +52,8 @@
 		"connectZoomsDescription": "Плавный переход между зумами.",
 		"autoApplyFreshRecordingZooms": "Автозум для новых записей",
 		"autoApplyFreshRecordingZoomsDescription": "Автоматически предлагает зум при открытии записи.",
+		"autoApplyAgentEdits": "Сжимать записи агентов",
+		"autoApplyAgentEditsDescription": "Вырезает паузы, пока ИИ думает, и приближает места его действий. Применяется к новым записям ИИ-агента.",
 		"zoomGeneralTitle": "Общее",
 		"zoomGeneralDescription": "Настройки движения зума.",
 		"zoomInTitle": "Приближение",

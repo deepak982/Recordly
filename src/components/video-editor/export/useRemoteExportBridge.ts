@@ -16,6 +16,7 @@ type Input = {
 	duration: number;
 	cursorTelemetrySourcePath: string | null;
 	pendingFreshRecordingAutoZoomPathRef?: MutableRefObject<string | null>;
+	agentEditsSettled?: boolean;
 	videoPlaybackRef: RefObject<VideoPlaybackRef | null>;
 	settings: ReturnType<typeof useExportSettings>;
 	session: ReturnType<typeof useExportSession>;
@@ -34,7 +35,9 @@ export function useRemoteExportBridge(input: Input) {
 		input.isPreviewReady &&
 		input.duration > 0 &&
 		(!videoSourcePath || input.cursorTelemetrySourcePath === videoSourcePath);
-	const autoZoomPending = (pendingRef ? pendingRef.current : videoPath) === videoPath;
+	const autoZoomPending =
+		(pendingRef ? pendingRef.current : videoPath) === videoPath ||
+		input.agentEditsSettled === false;
 	const ready = previewReady && (!autoZoomPending || graceElapsedFor === videoPath);
 
 	const latestRef = useRef({ ...input, ready });

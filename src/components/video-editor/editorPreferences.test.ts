@@ -309,6 +309,7 @@ describe("editorPreferences", () => {
 			customAspectHeight: "5",
 			customWallpapers: ["data:image/jpeg;base64,abc", "data:image/jpeg;base64,abc"],
 			autoApplyFreshRecordingAutoZooms: false,
+			autoApplyAgentEdits: false,
 		});
 
 		expect(loadEditorPreferences()).toMatchObject({
@@ -339,6 +340,7 @@ describe("editorPreferences", () => {
 			customAspectHeight: "5",
 			customWallpapers: ["data:image/jpeg;base64,abc"],
 			autoApplyFreshRecordingAutoZooms: false,
+			autoApplyAgentEdits: false,
 		});
 	});
 

@@ -453,6 +453,8 @@ interface SettingsPanelProps {
 	onConnectZoomsChange?: (enabled: boolean) => void;
 	autoApplyFreshRecordingAutoZooms?: boolean;
 	onAutoApplyFreshRecordingAutoZoomsChange?: (enabled: boolean) => void;
+	autoApplyAgentEdits?: boolean;
+	onAutoApplyAgentEditsChange?: (enabled: boolean) => void;
 	zoomInDurationMs?: number;
 	onZoomInDurationMsChange?: (duration: number) => void;
 	zoomInOverlapMs?: number;
@@ -910,6 +912,8 @@ export function SettingsPanel({
 	onConnectZoomsChange,
 	autoApplyFreshRecordingAutoZooms = true,
 	onAutoApplyFreshRecordingAutoZoomsChange,
+	autoApplyAgentEdits = true,
+	onAutoApplyAgentEditsChange,
 	zoomInDurationMs = DEFAULT_ZOOM_IN_DURATION_MS,
 	onZoomInDurationMsChange,
 	zoomOutDurationMs = DEFAULT_ZOOM_OUT_DURATION_MS,
@@ -2559,6 +2563,25 @@ export function SettingsPanel({
 								)}
 								checked={autoApplyFreshRecordingAutoZooms}
 								onCheckedChange={onAutoApplyFreshRecordingAutoZoomsChange}
+							/>
+						</SettingsRow>
+						<SettingsRow
+							title={tSettings(
+								"effects.autoApplyAgentEdits",
+								"Tighten agent recordings",
+							)}
+							description={tSettings(
+								"effects.autoApplyAgentEditsDescription",
+								"Cut the AI's thinking pauses and zoom where it acts. Applies to new recordings made by an agent.",
+							)}
+						>
+							<Switch
+								aria-label={tSettings(
+									"effects.autoApplyAgentEdits",
+									"Tighten agent recordings",
+								)}
+								checked={autoApplyAgentEdits}
+								onCheckedChange={onAutoApplyAgentEditsChange}
 							/>
 						</SettingsRow>
 						<SettingsRow

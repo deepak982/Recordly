@@ -39,6 +39,7 @@ type Input = {
 	effectiveShowCursor: boolean;
 	cursorTelemetrySourcePath: string | null;
 	pendingFreshRecordingAutoZoomPathRef?: MutableRefObject<string | null>;
+	agentEditsSettled?: boolean;
 	hasCaptionsForSidecar: boolean;
 	captionSidecarPayload?: Parameters<typeof useExportRunner>[0]["captionSidecarPayload"];
 	experimentalNvidiaCudaExport: boolean;

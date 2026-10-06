@@ -52,6 +52,8 @@
 		"connectZoomsDescription": "将连续的缩放区域平滑连接为一次连续的镜头移动。",
 		"autoApplyFreshRecordingZooms": "自动为新录制应用缩放",
 		"autoApplyFreshRecordingZoomsDescription": "打开新录制时自动建议跟随光标的缩放。",
+		"autoApplyAgentEdits": "精简代理录制",
+		"autoApplyAgentEditsDescription": "剪掉 AI 思考时的停顿，并在其操作处放大。适用于 AI 代理录制的新视频。",
 		"zoomGeneralTitle": "全局",
 		"zoomGeneralDescription": "控制所有缩放过渡的整体运动设置。",
 		"zoomInTitle": "进入缩放",

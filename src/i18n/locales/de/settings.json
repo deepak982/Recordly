@@ -52,6 +52,8 @@
 		"connectZoomsDescription": "Füge aufeinanderfolgende Zoom-Bereiche zu einer kontinuierlichen Kamerabewegung zusammen.",
 		"autoApplyFreshRecordingZooms": "Neue Aufzeichnungszooms automatisch anwenden",
 		"autoApplyFreshRecordingZoomsDescription": "Schlägt beim Öffnen einer neuen Aufzeichnung automatisch Zooms zur Randzentrierung vor.",
+		"autoApplyAgentEdits": "Agent-Aufnahmen straffen",
+		"autoApplyAgentEditsDescription": "Schneidet die Denkpausen der KI heraus und zoomt dorthin, wo sie handelt. Gilt für neue Aufnahmen eines KI-Agenten.",
 		"zoomGeneralTitle": "Allgemein",
 		"zoomGeneralDescription": "Globale Bewegungseinstellungen für jeden Zoomübergang.",
 		"zoomInTitle": "Vergrößern",

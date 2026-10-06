@@ -129,6 +129,19 @@ describe("readiness", () => {
 		render(input);
 		expect(lastReady()?.ready).toBe(true);
 	});
+
+	it("waits for agent edits to settle, up to the same grace", () => {
+		render(baseInput({ agentEditsSettled: false }));
+		expect(lastReady()?.ready).toBe(false);
+		render(baseInput({ agentEditsSettled: true }));
+		expect(lastReady()?.ready).toBe(true);
+
+		react.reset();
+		render(baseInput({ agentEditsSettled: false }));
+		vi.advanceTimersByTime(6_000);
+		render(baseInput({ agentEditsSettled: false }));
+		expect(lastReady()?.ready).toBe(true);
+	});
 });
 
 describe("requests", () => {

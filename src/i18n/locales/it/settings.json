@@ -52,6 +52,8 @@
 		"connectZoomsDescription": "Unisce regioni di zoom consecutive in un movimento di camera continuo.",
 		"autoApplyFreshRecordingZooms": "Applica automaticamente zoom alle nuove registrazioni",
 		"autoApplyFreshRecordingZoomsDescription": "Suggerisci automaticamente zoom con ricentratura ai bordi quando apri una nuova registrazione.",
+		"autoApplyAgentEdits": "Compatta le registrazioni degli agenti",
+		"autoApplyAgentEditsDescription": "Taglia le pause in cui l'IA riflette e ingrandisce dove agisce. Si applica alle nuove registrazioni create da un agente IA.",
 		"zoomGeneralTitle": "Generale",
 		"zoomGeneralDescription": "Impostazioni di movimento globali per ogni transizione di zoom.",
 		"zoomInTitle": "Zoom in",

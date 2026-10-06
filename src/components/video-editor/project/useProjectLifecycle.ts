@@ -63,6 +63,7 @@ type Input = {
 		autoFullTrackClipIdRef: MutableRefObject<string | null>;
 		autoFullTrackClipEndMsRef: MutableRefObject<number | null>;
 		pendingFreshRecordingAutoZoomPathRef: MutableRefObject<string | null>;
+		pendingFreshRecordingAgentEditsPathRef: MutableRefObject<string | null>;
 		pendingFreshRecordingAutoSuggestTelemetryCountRef: MutableRefObject<number>;
 		autoSuggestedVideoPathRef: MutableRefObject<string | null>;
 	};
@@ -104,6 +105,7 @@ export function useProjectLifecycle(input: Input) {
 		project.setError(null);
 
 		refs.pendingFreshRecordingAutoZoomPathRef.current = null;
+		refs.pendingFreshRecordingAgentEditsPathRef.current = null;
 		if (editor.webcam.sourcePath) {
 			const result = await window.electronAPI.setCurrentRecordingSession?.(
 				{
