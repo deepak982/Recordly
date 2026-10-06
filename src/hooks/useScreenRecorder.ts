@@ -319,6 +319,144 @@ export async function stopAndDiscardNativeCapture({
 	}
 }
 
+export type RemoteActionOutcome = { ok: boolean; error?: string };
+
+export type RemoteRecorderState = {
+	recording: boolean;
+	paused: boolean;
+	starting: boolean;
+	countdownActive: boolean;
+	finalizing: boolean;
+	startInFlight: boolean;
+};
+
+export type RemoteRecorderActions = {
+	reply: (result: RemoteCommandResult) => void;
+	start: (options: { remoteCommandId: string; countdownSeconds?: number }) => void;
+	stop: (commandId: string) => void;
+	pause: () => Promise<RemoteActionOutcome>;
+	resume: () => Promise<RemoteActionOutcome>;
+	cancel: () => void;
+};
+
+export function handleRemoteRecordingCommand(
+	command: RemoteRecordingCommand,
+	state: RemoteRecorderState,
+	actions: RemoteRecorderActions,
+	now = Date.now(),
+) {
+	const reply = (error?: string) => actions.reply({ id: command.id, ok: !error, error });
+	const replyWhenDone = (action: Promise<RemoteActionOutcome>, failure: string) =>
+		void action.then(
+			(outcome) =>
+				reply(outcome.ok ? undefined : [failure, outcome.error].filter(Boolean).join(" ")),
+			(error: unknown) => reply(`${failure} ${getErrorMessage(error)}`),
+		);
+	if (command.expiresAt < now) {
+		reply("The command expired before Recordly could handle it.");
+		return;
+	}
+	switch (command.action) {
+		case "start":
+			if (
+				state.recording ||
+				state.starting ||
+				state.countdownActive ||
+				state.finalizing ||
+				state.startInFlight
+			) {
+				reply("Recordly is already recording or starting.");
+				return;
+			}
+			actions.start({
+				remoteCommandId: command.id,
+				countdownSeconds: command.countdownSeconds,
+			});
+			return;
+		case "stop":
+			if (!state.recording) {
+				reply("Recordly is not recording.");
+				return;
+			}
+			actions.stop(command.id);
+			return;
+		case "pause":
+			if (!state.recording || state.paused) {
+				reply("Recordly is not recording, or is already paused.");
+				return;
+			}
+			replyWhenDone(actions.pause(), "Recordly could not pause the recording.");
+			return;
+		case "resume":
+			if (!state.recording || !state.paused) {
+				reply("The recording is not paused.");
+				return;
+			}
+			replyWhenDone(actions.resume(), "Recordly could not resume the recording.");
+			return;
+		case "cancel":
+			if (!state.recording) {
+				reply("Recordly is not recording.");
+				return;
+			}
+			actions.cancel();
+			reply();
+			return;
+	}
+}
+
+export function createRemoteStopTracker(send: (result: RemoteCommandResult) => void) {
+	let commandId: string | null = null;
+	return {
+		begin(id: string) {
+			commandId = id;
+		},
+		fail(message: string) {
+			if (!commandId) return;
+			send({ id: commandId, ok: false, error: message });
+			commandId = null;
+		},
+		settle() {
+			commandId = null;
+		},
+	};
+}
+
+export async function persistFinalizedRecording(
+	api: Pick<Window["electronAPI"], "setCurrentRecordingSession" | "setCurrentVideoPath">,
+	session: {
+		videoPath: string;
+		webcamPath: string | null;
+		timeOffsetMs: number;
+		hideOverlayCursorByDefault: boolean;
+	},
+): Promise<string | null> {
+	const { videoPath, webcamPath, timeOffsetMs, hideOverlayCursorByDefault } = session;
+	try {
+		if (webcamPath) {
+			await api.setCurrentRecordingSession({
+				videoPath,
+				webcamPath,
+				timeOffsetMs,
+				hideOverlayCursorByDefault,
+			});
+		} else {
+			await api.setCurrentVideoPath(videoPath, { hideOverlayCursorByDefault });
+		}
+		return null;
+	} catch (error) {
+		console.error("Failed to persist recording session metadata:", error);
+
+		try {
+			await api.setCurrentVideoPath(videoPath, { hideOverlayCursorByDefault });
+			return null;
+		} catch (fallbackError) {
+			console.error("Failed to persist fallback video path:", fallbackError);
+			return `Failed to save the recording. ${getErrorMessage(fallbackError)}`;
+		}
+	}
+}
+
 function createMicrophoneTrackSettingsSnapshot(
 	stream: MediaStream,
 ): MicrophoneTrackSettingsSnapshot | null {
@@ -408,7 +546,9 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 	const recordingStartGeneration = useRef(0);
 	const nativeStopRequestInFlight = useRef(false);
 	const startInFlight = useRef(false);
-	const remoteStopCommandId = useRef<string | null>(null);
+	const [remoteStop] = useState(() =>
+		createRemoteStopTracker((result) => window.electronAPI.sendRemoteRecordingResult(result)),
+	);
 	const remoteStartedRun = useRef(false);
 	const remoteCommandHandler = useRef<(command: RemoteRecordingCommand) => void>(() => undefined);
 	const hasPromptedForReselect = useRef(false);
@@ -439,23 +579,13 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 	const requestedBrowserMicrophoneProfile = useRef<string | null>(null);
 	const hideEditorOverlayCursorByDefault = useRef(false);
 
-	const failRemoteStop = useCallback((message: string) => {
-		if (!remoteStopCommandId.current) return;
-		window.electronAPI.sendRemoteRecordingResult({
-			id: remoteStopCommandId.current,
-			ok: false,
-			error: message,
-		});
-		remoteStopCommandId.current = null;
-	}, []);
-
 	const notifyRecordingFinalizationFailure = useCallback(
 		async (message: string) => {
 			setFinalizing(false);
 			toast.error(message, { duration: 10000 });
-			failRemoteStop(message);
+			remoteStop.fail(message);
 		},
-		[failRemoteStop],
+		[remoteStop],
 	);
 
 	const logNativeCaptureDiagnostics = useCallback(async (context: string) => {
@@ -759,32 +889,14 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 		async (videoPath: string, webcamPath: string | null) => {
 			const start = performance.now();
 			console.log("[PERF:RENDERER] Finalize Session & Switch to Editor: STARTED");
-			const shouldHideOverlayCursor = hideEditorOverlayCursorByDefault.current;
-			remoteStopCommandId.current = null;
-			try {
-				if (webcamPath) {
-					await window.electronAPI.setCurrentRecordingSession({
-						videoPath,
-						webcamPath,
-						timeOffsetMs: webcamTimeOffsetMs.current,
-						hideOverlayCursorByDefault: shouldHideOverlayCursor,
-					});
-				} else {
-					await window.electronAPI.setCurrentVideoPath(videoPath, {
-						hideOverlayCursorByDefault: shouldHideOverlayCursor,
-					});
-				}
-			} catch (error) {
-				console.error("Failed to persist recording session metadata:", error);
-
-				try {
-					await window.electronAPI.setCurrentVideoPath(videoPath, {
-						hideOverlayCursorByDefault: shouldHideOverlayCursor,
-					});
-				} catch (fallbackError) {
-					console.error("Failed to persist fallback video path:", fallbackError);
-				}
-			}
+			const saveError = await persistFinalizedRecording(window.electronAPI, {
+				videoPath,
+				webcamPath,
+				timeOffsetMs: webcamTimeOffsetMs.current,
+				hideOverlayCursorByDefault: hideEditorOverlayCursorByDefault.current,
+			});
+			if (saveError) remoteStop.fail(saveError);
+			remoteStop.settle();
 
 			setFinalizing(false);
 			await window.electronAPI.switchToEditor();
@@ -792,7 +904,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 				`[PERF:RENDERER] Finalize Session & Switch to Editor: COMPLETED in ${(performance.now() - start).toFixed(2)}ms`,
 			);
 		},
-		[],
+		[remoteStop],
 	);
 
 	const closeMicFallbackPauseInterval = useCallback((now = performance.now()) => {
@@ -1797,6 +1909,10 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 								"Failed to start native screen recording",
 						);
 					} else {
+						remoteError =
+							nativeResult.message ??
+							nativeResult.error ??
+							"Failed to start native screen recording";
 						setRecording(false);
 						cleanupCapturedMedia();
 						await stopWebcamRecorder();
@@ -2211,7 +2327,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 				cleanupCapturedMedia();
 				if (chunks.current.length === 0) {
 					setFinalizing(false);
-					failRemoteStop("The recording captured no video data, so nothing was saved.");
+					remoteStop.fail("The recording captured no video data, so nothing was saved.");
 					return;
 				}
 
@@ -2343,8 +2459,8 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 		}
 	};
 
-	const pauseRecording = useCallback((): Promise<boolean> => {
-		if (!recording || paused) return Promise.resolve(false);
+	const pauseRecording = useCallback((): Promise<RemoteActionOutcome> => {
+		if (!recording || paused) return Promise.resolve({ ok: false });
 		if (nativeScreenRecording.current) {
 			return (async () => {
 				const result = await window.electronAPI.pauseNativeScreenRecording();
@@ -2353,7 +2469,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 						"Failed to pause native screen recording:",
 						result.error ?? result.message,
 					);
-					return false;
+					return { ok: false, error: result.error ?? result.message };
 				}
 
 				if (webcamRecorder.current?.state === "recording") {
@@ -2368,7 +2484,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 				} catch (error) {
 					console.warn("Failed to pause cursor capture:", error);
 				}
-				return true;
+				return { ok: true };
 			})();
 		}
 		if (mediaRecorder.current?.state === "recording") {
@@ -2385,14 +2501,14 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 				} catch (error) {
 					console.warn("Failed to pause cursor capture:", error);
 				}
-				return true;
+				return { ok: true };
 			})();
 		}
-		return Promise.resolve(false);
+		return Promise.resolve({ ok: false });
 	}, [markRecordingPaused, pauseMicFallbackRecorder, paused, recording]);
 
-	const resumeRecording = useCallback((): Promise<boolean> => {
-		if (!recording || !paused) return Promise.resolve(false);
+	const resumeRecording = useCallback((): Promise<RemoteActionOutcome> => {
+		if (!recording || !paused) return Promise.resolve({ ok: false });
 		if (nativeScreenRecording.current) {
 			return (async () => {
 				const result = await window.electronAPI.resumeNativeScreenRecording();
@@ -2401,7 +2517,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 						"Failed to resume native screen recording:",
 						result.error ?? result.message,
 					);
-					return false;
+					return { ok: false, error: result.error ?? result.message };
 				}
 
 				if (webcamRecorder.current?.state === "paused") {
@@ -2416,7 +2532,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 				} catch (error) {
 					console.warn("Failed to resume cursor capture:", error);
 				}
-				return true;
+				return { ok: true };
 			})();
 		}
 		if (mediaRecorder.current?.state === "paused") {
@@ -2433,10 +2549,10 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 				} catch (error) {
 					console.warn("Failed to resume cursor capture:", error);
 				}
-				return true;
+				return { ok: true };
 			})();
 		}
-		return Promise.resolve(false);
+		return Promise.resolve({ ok: false });
 	}, [markRecordingResumed, paused, recording, resumeMicFallbackRecorder]);
 
 	const cancelRecording = useCallback(() => {
@@ -2484,67 +2600,29 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 		stopMicFallbackRecorder,
 	]);
 
-	remoteCommandHandler.current = (command) => {
-		const reply = (error?: string) =>
-			window.electronAPI.sendRemoteRecordingResult({ id: command.id, ok: !error, error });
-		const replyWhenDone = (action: Promise<boolean>, failure: string) =>
-			void action.then(
-				(done) => reply(done ? undefined : failure),
-				(error: unknown) => reply(`${failure} ${getErrorMessage(error)}`),
-			);
-		if (command.expiresAt < Date.now()) {
-			reply("The command expired before Recordly could handle it.");
-			return;
-		}
-		switch (command.action) {
-			case "start":
-				if (
-					recording ||
-					starting ||
-					countdownActive ||
-					finalizing ||
-					startInFlight.current
-				) {
-					reply("Recordly is already recording or starting.");
-					return;
-				}
-				void startRecording({
-					remoteCommandId: command.id,
-					countdownSeconds: command.countdownSeconds,
-				});
-				return;
-			case "stop":
-				if (!recording) {
-					reply("Recordly is not recording.");
-					return;
-				}
-				remoteStopCommandId.current = command.id;
-				stopRecording.current();
-				return;
-			case "pause":
-				if (!recording || paused) {
-					reply("Recordly is not recording, or is already paused.");
-					return;
-				}
-				replyWhenDone(pauseRecording(), "Recordly could not pause the recording.");
-				return;
-			case "resume":
-				if (!recording || !paused) {
-					reply("The recording is not paused.");
-					return;
-				}
-				replyWhenDone(resumeRecording(), "Recordly could not resume the recording.");
-				return;
-			case "cancel":
-				if (!recording) {
-					reply("Recordly is not recording.");
-					return;
-				}
-				cancelRecording();
-				reply();
-				return;
-		}
-	};
+	remoteCommandHandler.current = (command) =>
+		handleRemoteRecordingCommand(
+			command,
+			{
+				recording,
+				paused,
+				starting,
+				countdownActive,
+				finalizing,
+				startInFlight: startInFlight.current,
+			},
+			{
+				reply: (result) => window.electronAPI.sendRemoteRecordingResult(result),
+				start: (options) => void startRecording(options),
+				stop: (commandId) => {
+					remoteStop.begin(commandId);
+					stopRecording.current();
+				},
+				pause: pauseRecording,
+				resume: resumeRecording,
+				cancel: cancelRecording,
+			},
+		);
 
 	const toggleRecording = async () => {
 		if (starting || countdownActive || finalizing) {

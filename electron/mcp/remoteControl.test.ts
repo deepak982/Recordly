@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("electron", () => ({ BrowserWindow: {}, ipcMain: {}, systemPreferences: {} }));
+vi.mock("../ipc/cursor/bounds", () => ({ isMacWindowOnScreen: vi.fn() }));
 vi.mock("../ipc/cursor/telemetry", () => ({}));
 vi.mock("../ipc/register/sources", () => ({}));
 vi.mock("../ipc/state", () => ({}));
@@ -40,7 +41,7 @@ async function flush() {
 
 function createHud() {
 	const send = vi.fn();
-	const webContents = Object.assign(new EventEmitter(), { send });
+	const webContents = Object.assign(new EventEmitter(), { send, isCrashed: vi.fn(() => false) });
 	return Object.assign(new EventEmitter(), { webContents, isDestroyed: () => false });
 }
 
@@ -68,10 +69,20 @@ function setup(overrides: Partial<RemoteControlDeps> = {}, { ready = true } = {}
 		cancelCountdown: vi.fn(),
 		listSources: async () => SOURCES,
 		selectSource: vi.fn(async () => undefined),
+		isWindowOnScreen: vi.fn(async () => true),
+		platform: "darwin" as NodeJS.Platform,
+		isWayland: () => false,
 		ipc,
 		signals,
 		createId: () => `cmd-${++nextId}`,
-		timeouts: { hudReadyMs: 1000, ackMs: 1000, startMs: 1000, stopMs: 1000 },
+		timeouts: {
+			hudReadyMs: 1000,
+			ackMs: 1000,
+			startMs: 1000,
+			stopMs: 1000,
+			onScreenMs: 2000,
+			waylandStartMs: 5000,
+		},
 		...overrides,
 	} satisfies Partial<RemoteControlDeps>;
 	const remote = createRemoteControl(deps);
@@ -157,7 +168,7 @@ describe("start_recording", () => {
 		vi.useFakeTimers();
 		const { remote } = setup();
 		const started = remote.startRecording({ countdownSeconds: 2 });
-		const outcome = expect(started).rejects.toThrow(/did not confirm "start"/);
+		const outcome = expect(started).rejects.toThrow(/did not confirm "start".*call get_status/);
 		await vi.advanceTimersByTimeAsync(2999);
 		expect(remote.getStatus().state).toBe("starting");
 		await vi.advanceTimersByTimeAsync(1);
@@ -195,11 +206,11 @@ describe("HUD readiness", () => {
 		await first;
 	});
 
-	it("waits for an existing HUD that is still loading, without reopening it", async () => {
+	it("shows an existing HUD that is still loading and waits for it", async () => {
 		const { remote, deps, markReady, commands } = setup({}, { ready: false });
 		const started = remote.startRecording();
 		await flush();
-		expect(deps.showHud).not.toHaveBeenCalled();
+		expect(deps.showHud).toHaveBeenCalledOnce();
 		expect(commands()).toHaveLength(0);
 		markReady();
 		await flush();
@@ -378,6 +389,7 @@ describe("select_source", () => {
 			name: "Slack",
 			type: "window",
 			appName: "Slack",
+			onScreen: true,
 		});
 		expect(deps.selectSource).toHaveBeenCalledWith({
 			id: "window:2",
@@ -429,5 +441,243 @@ describe("select_source", () => {
 		const listed = await remote.listSources();
 		expect(listed).toHaveLength(SOURCES.length);
 		expect(JSON.stringify(listed)).not.toContain("data:");
+	});
+
+	it("lists windows with pid, title, on-screen flag and bounds", async () => {
+		const chrome = {
+			id: "window:5:0",
+			name: "Google Chrome — Docs",
+			appName: "Google Chrome",
+			windowTitle: "Docs",
+			sourceType: "window" as const,
+			pid: 42,
+			onScreen: false,
+			x: 10,
+			y: 20,
+			width: 800,
+			height: 600,
+			thumbnail: "data:",
+			bundleId: "com.google.Chrome",
+		};
+		const { remote } = setup({ listSources: async () => [SOURCES[0], chrome] });
+		await expect(remote.listSources()).resolves.toEqual([
+			{ id: "screen:1", name: "Screen 1 (Primary)", type: "screen" },
+			{
+				id: "window:5:0",
+				name: "Google Chrome — Docs",
+				type: "window",
+				appName: "Google Chrome",
+				windowTitle: "Docs",
+				pid: 42,
+				onScreen: false,
+				x: 10,
+				y: 20,
+				width: 800,
+				height: 600,
+			},
+		]);
+	});
+
+	it("raises the window, then waits until it is on screen", async () => {
+		vi.useFakeTimers();
+		const onScreen = [false, false, true];
+		const order: string[] = [];
+		const { remote } = setup({
+			selectSource: vi.fn(async () => {
+				order.push("select");
+			}),
+			isWindowOnScreen: vi.fn(async () => {
+				order.push("check");
+				return onScreen.shift() ?? true;
+			}),
+		});
+		const selected = remote.selectSource({ name: "slack" });
+		await vi.advanceTimersByTimeAsync(400);
+		await expect(selected).resolves.toEqual({
+			id: "window:2",
+			name: "Slack",
+			type: "window",
+			appName: "Slack",
+			onScreen: true,
+		});
+		expect(order).toEqual(["select", "check", "check", "check"]);
+	});
+
+	it("gives up waiting after 2 s and says the window is on another desktop", async () => {
+		vi.useFakeTimers();
+		const { remote } = setup({ isWindowOnScreen: vi.fn(async () => false) });
+		const selected = remote.selectSource({ name: "slack" });
+		await vi.advanceTimersByTimeAsync(2200);
+		await expect(selected).resolves.toMatchObject({
+			onScreen: false,
+			warning: expect.stringMatching(/another desktop/),
+		});
+	});
+});
+
+describe("start_recording window checks", () => {
+	it("refuses a window that is not on this desktop, before touching the HUD", async () => {
+		const { remote, state, commands, deps } = setup({
+			isWindowOnScreen: vi.fn(async () => false),
+		});
+		state.source = { id: "window:2", name: "Slack" };
+		await expect(remote.startRecording()).rejects.toThrow(/minimized or on another desktop/);
+		expect(commands()).toHaveLength(0);
+		expect(deps.showHud).not.toHaveBeenCalled();
+		expect(deps.isWindowOnScreen).toHaveBeenCalledWith("window:2");
+	});
+
+	it("does not check screens", async () => {
+		const fixture = setup();
+		await startRecording(fixture);
+		expect(fixture.deps.isWindowOnScreen).not.toHaveBeenCalled();
+	});
+});
+
+describe("Linux", () => {
+	const PORTAL = {
+		id: "screen:linux-portal",
+		name: "Screen (chosen in the system share dialog)",
+		type: "screen",
+		needsUser: true,
+	};
+
+	it("lists only the share-dialog screen on Wayland, without enumerating sources", async () => {
+		const listSources = vi.fn(async () => SOURCES);
+		const { remote, deps } = setup({ platform: "linux", isWayland: () => true, listSources });
+		await expect(remote.listSources()).resolves.toEqual([PORTAL]);
+		await expect(remote.selectSource({ id: "screen:1" })).rejects.toThrow(/No capture source/);
+		await expect(remote.selectSource({ name: "screen" })).resolves.toEqual(PORTAL);
+		expect(deps.selectSource).toHaveBeenCalledWith({
+			id: "screen:linux-portal",
+			name: PORTAL.name,
+			sourceType: "screen",
+		});
+		expect(listSources).not.toHaveBeenCalled();
+	});
+
+	it("puts the unattended screen first on X11 and drops fallback entries", async () => {
+		const { remote } = setup({
+			platform: "linux",
+			listSources: async () => [
+				{ id: "screen:fallback:1", name: "Screen 2", sourceType: "screen" as const },
+				SOURCES[1],
+			],
+		});
+		const listed = await remote.listSources();
+		expect(listed.map((source) => source.id)).toEqual(["screen:linux-portal", "window:1"]);
+		expect(listed[0]).not.toHaveProperty("needsUser");
+		expect(listed[1]).not.toHaveProperty("onScreen");
+	});
+
+	it("starts without a selected source, since the HUD falls back to the system screen", async () => {
+		const fixture = setup({ platform: "linux" });
+		fixture.state.source = null;
+		await startRecording(fixture);
+		expect(fixture.lastCommand()?.action).toBe("start");
+	});
+
+	it("keeps a Wayland start pending past the timeout and lets a retry wait for it", async () => {
+		vi.useFakeTimers();
+		const { remote, commands } = setup({ platform: "linux", isWayland: () => true });
+		const started = remote.startRecording({ countdownSeconds: 0 });
+		const outcome = expect(started).rejects.toThrow(/system share dialog/);
+		await vi.advanceTimersByTimeAsync(5000);
+		await outcome;
+		expect(remote.getStatus().state).toBe("starting");
+		const retry = remote.startRecording({ countdownSeconds: 0 });
+		await vi.advanceTimersByTimeAsync(1000);
+		remote.onRecordingStateChange(true);
+		await expect(retry).resolves.toMatchObject({ state: "recording" });
+		expect(commands()).toHaveLength(1);
+
+		const cancelled = setup({ platform: "linux", isWayland: () => true });
+		const pending = cancelled.remote.startRecording({ countdownSeconds: 0 });
+		const pendingOutcome = expect(pending).rejects.toThrow(/system share dialog/);
+		await vi.advanceTimersByTimeAsync(5000);
+		await pendingOutcome;
+		cancelled.ack({ ok: false, error: "Permission denied" });
+		expect(cancelled.remote.getStatus().state).toBe("idle");
+	});
+
+	it("leaves onScreen out of select_source off macOS", async () => {
+		const { remote, deps } = setup({ platform: "win32" });
+		await expect(remote.selectSource({ name: "slack" })).resolves.not.toHaveProperty(
+			"onScreen",
+		);
+		expect(deps.isWindowOnScreen).not.toHaveBeenCalled();
+	});
+
+	it("names the id when several sources share it", async () => {
+		const { remote } = setup({ listSources: async () => [SOURCES[1], SOURCES[1]] });
+		await expect(remote.selectSource({ id: "window:1" })).rejects.toThrow(
+			'2 sources match "window:1"',
+		);
+	});
+});
+
+describe("HUD lifecycle", () => {
+	it("shows a hidden HUD that is already ready before starting", async () => {
+		const fixture = setup();
+		await startRecording(fixture);
+		expect(fixture.deps.showHud).toHaveBeenCalledOnce();
+	});
+
+	it("only treats the HUD as finalizing after a remote stop, and not forever", async () => {
+		vi.useFakeTimers({ now: 0 });
+		const cancelled = setup();
+		await startRecording(cancelled);
+		const cancelling = cancelled.remote.cancelRecording();
+		cancelled.remote.onRecordingStateChange(false);
+		cancelled.ack({ ok: true });
+		await cancelling;
+		cancelled.savePath("/rec/opened-from-hud.mp4");
+		expect(cancelled.remote.getStatus().state).toBe("idle");
+
+		const failed = setup();
+		await startRecording(failed);
+		const stopping = failed.remote.stopRecording();
+		failed.ack({ ok: false, error: "The recording captured no video data" });
+		await expect(stopping).rejects.toThrow("no video data");
+		failed.remote.onRecordingStateChange(false);
+		failed.savePath("/rec/opened-from-hud.mp4");
+		expect(failed.remote.getStatus().state).toBe("idle");
+
+		const stopped = setup();
+		await startRecording(stopped);
+		const saving = stopped.remote.stopRecording();
+		stopped.remote.onRecordingStateChange(false);
+		stopped.savePath("/rec/recording-3.mp4");
+		await saving;
+		expect(stopped.remote.getStatus().state).toBe("finalizing");
+		await expect(stopped.remote.selectSource({ name: "slack" })).rejects.toThrow(
+			"while Recordly is finalizing",
+		);
+		vi.setSystemTime(300_000);
+		expect(stopped.remote.getStatus().state).toBe("idle");
+	});
+
+	it("releases the pending command when the HUD cannot be reached", async () => {
+		const { remote, hud, commands } = setup();
+		hud.webContents.send.mockImplementationOnce(() => {
+			throw new Error("Object has been destroyed");
+		});
+		await expect(remote.startRecording()).rejects.toThrow(/could not reach/);
+		expect(remote.getStatus().state).toBe("idle");
+		const retry = remote.startRecording({ countdownSeconds: 0 });
+		await flush();
+		expect(commands().at(-1)?.action).toBe("start");
+		remote.onRecordingStateChange(true);
+		await retry;
+	});
+
+	it("drops the recording when the HUD crashes and refuses a crashed HUD at once", async () => {
+		const fixture = setup();
+		await startRecording(fixture);
+		fixture.hud.webContents.isCrashed.mockReturnValue(true);
+		fixture.hud.webContents.emit("render-process-gone");
+		expect(fixture.remote.getStatus().state).toBe("idle");
+		await expect(fixture.remote.startRecording()).rejects.toThrow(/crashed/);
+		expect(fixture.commands()).toHaveLength(1);
 	});
 });

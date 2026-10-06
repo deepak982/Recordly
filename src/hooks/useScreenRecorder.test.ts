@@ -3,7 +3,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	createBrowserRecordingOptions,
 	createProcessedMicrophoneConstraints,
+	createRemoteStopTracker,
+	handleRemoteRecordingCommand,
 	normalizeBrowserMicrophoneProfile,
+	persistFinalizedRecording,
+	type RemoteActionOutcome,
+	type RemoteRecorderState,
 	resolveBrowserCaptureCursorPolicy,
 	shouldUseNativeWindowsCaptureForSource,
 	stopAndDiscardNativeCapture,
@@ -924,5 +929,211 @@ describe("useScreenRecorder state machine", () => {
 			expect(recorder.state).toBe("inactive");
 			expect(webcam.state).toBe("inactive");
 		});
+	});
+});
+
+describe("handleRemoteRecordingCommand", () => {
+	const idle: RemoteRecorderState = {
+		recording: false,
+		paused: false,
+		starting: false,
+		countdownActive: false,
+		finalizing: false,
+		startInFlight: false,
+	};
+	const recording: RemoteRecorderState = { ...idle, recording: true };
+
+	function run(
+		action: RemoteRecordingAction,
+		state: RemoteRecorderState,
+		overrides: {
+			pause?: Promise<RemoteActionOutcome>;
+			resume?: Promise<RemoteActionOutcome>;
+		} = {},
+		extra: Partial<RemoteRecordingCommand> = {},
+	) {
+		const actions = {
+			reply: vi.fn(),
+			start: vi.fn(),
+			stop: vi.fn(),
+			pause: vi.fn(() => overrides.pause ?? Promise.resolve({ ok: true })),
+			resume: vi.fn(() => overrides.resume ?? Promise.resolve({ ok: true })),
+			cancel: vi.fn(),
+		};
+		handleRemoteRecordingCommand(
+			{ id: "cmd", action, expiresAt: 2000, ...extra },
+			state,
+			actions,
+			1000,
+		);
+		return actions;
+	}
+
+	it("starts with the command id and countdown override when idle", () => {
+		const actions = run("start", idle, {}, { countdownSeconds: 0 });
+		expect(actions.start).toHaveBeenCalledWith({ remoteCommandId: "cmd", countdownSeconds: 0 });
+		expect(actions.reply).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		"recording",
+		"starting",
+		"countdownActive",
+		"finalizing",
+		"startInFlight",
+	] as const)("refuses start while %s", (flag) => {
+		const actions = run("start", { ...idle, [flag]: true });
+		expect(actions.start).not.toHaveBeenCalled();
+		expect(actions.reply).toHaveBeenCalledWith({
+			id: "cmd",
+			ok: false,
+			error: "Recordly is already recording or starting.",
+		});
+	});
+
+	it("refuses an expired command without acting on it", () => {
+		const actions = run("stop", recording, {}, { expiresAt: 999 });
+		expect(actions.stop).not.toHaveBeenCalled();
+		expect(actions.reply).toHaveBeenCalledWith({
+			id: "cmd",
+			ok: false,
+			error: "The command expired before Recordly could handle it.",
+		});
+	});
+
+	it("stops only while recording, leaving the ack to the save outcome", () => {
+		const idleStop = run("stop", idle);
+		expect(idleStop.stop).not.toHaveBeenCalled();
+		expect(idleStop.reply).toHaveBeenCalledWith({
+			id: "cmd",
+			ok: false,
+			error: "Recordly is not recording.",
+		});
+		const stop = run("stop", recording);
+		expect(stop.stop).toHaveBeenCalledWith("cmd");
+		expect(stop.reply).not.toHaveBeenCalled();
+	});
+
+	it("acks pause only after it settles", async () => {
+		let finish!: (outcome: RemoteActionOutcome) => void;
+		const actions = run("pause", recording, {
+			pause: new Promise((resolve) => {
+				finish = resolve;
+			}),
+		});
+		await Promise.resolve();
+		expect(actions.reply).not.toHaveBeenCalled();
+		finish({ ok: true });
+		await vi.waitFor(() =>
+			expect(actions.reply).toHaveBeenCalledWith({ id: "cmd", ok: true, error: undefined }),
+		);
+	});
+
+	it("carries the native pause and resume failure reasons", async () => {
+		const pause = run("pause", recording, {
+			pause: Promise.resolve({ ok: false, error: "helper not running" }),
+		});
+		const resume = run(
+			"resume",
+			{ ...recording, paused: true },
+			{
+				resume: Promise.reject(new Error("IPC closed")),
+			},
+		);
+		await vi.waitFor(() => {
+			expect(pause.reply).toHaveBeenCalledWith({
+				id: "cmd",
+				ok: false,
+				error: "Recordly could not pause the recording. helper not running",
+			});
+			expect(resume.reply).toHaveBeenCalledWith({
+				id: "cmd",
+				ok: false,
+				error: "Recordly could not resume the recording. IPC closed",
+			});
+		});
+	});
+
+	it("refuses pause and resume in the wrong state", () => {
+		expect(run("pause", { ...recording, paused: true }).pause).not.toHaveBeenCalled();
+		expect(run("resume", recording).resume).not.toHaveBeenCalled();
+		expect(run("pause", idle).reply).toHaveBeenCalledWith(
+			expect.objectContaining({ ok: false }),
+		);
+	});
+
+	it("cancels only while recording", () => {
+		const cancel = run("cancel", recording);
+		expect(cancel.cancel).toHaveBeenCalledOnce();
+		expect(cancel.reply).toHaveBeenCalledWith({ id: "cmd", ok: true, error: undefined });
+		const idleCancel = run("cancel", idle);
+		expect(idleCancel.cancel).not.toHaveBeenCalled();
+		expect(idleCancel.reply).toHaveBeenCalledWith(expect.objectContaining({ ok: false }));
+	});
+});
+
+describe("remote stop failure acks", () => {
+	it("acks a failed stop once, e.g. when no video data was captured", () => {
+		const send = vi.fn();
+		const tracker = createRemoteStopTracker(send);
+		tracker.fail("ignored: no remote stop pending");
+		tracker.begin("stop-1");
+		tracker.fail("The recording captured no video data, so nothing was saved.");
+		tracker.fail("a second failure is not sent");
+		expect(send).toHaveBeenCalledOnce();
+		expect(send).toHaveBeenCalledWith({
+			id: "stop-1",
+			ok: false,
+			error: "The recording captured no video data, so nothing was saved.",
+		});
+	});
+
+	it("sends nothing after the save succeeded", () => {
+		const send = vi.fn();
+		const tracker = createRemoteStopTracker(send);
+		tracker.begin("stop-1");
+		tracker.settle();
+		tracker.fail("late UI failure");
+		expect(send).not.toHaveBeenCalled();
+	});
+
+	const session = {
+		videoPath: "/rec/a.mp4",
+		webcamPath: null,
+		timeOffsetMs: 0,
+		hideOverlayCursorByDefault: false,
+	};
+
+	it("reports a finalize failure when the session and the fallback path both fail", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => undefined);
+		const api = {
+			setCurrentRecordingSession: vi.fn(async () => {
+				throw new Error("manifest write failed");
+			}),
+			setCurrentVideoPath: vi.fn(async () => {
+				throw new Error("disk full");
+			}),
+		};
+		await expect(
+			persistFinalizedRecording(api, { ...session, webcamPath: "/rec/a-webcam.webm" }),
+		).resolves.toBe("Failed to save the recording. disk full");
+		expect(api.setCurrentVideoPath).toHaveBeenCalledWith("/rec/a.mp4", {
+			hideOverlayCursorByDefault: false,
+		});
+	});
+
+	it("succeeds through the fallback path", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => undefined);
+		const api = {
+			setCurrentRecordingSession: vi.fn(async () => {
+				throw new Error("manifest write failed");
+			}),
+			setCurrentVideoPath: vi.fn(async () => ({ success: true, webcamPath: null })),
+		};
+		await expect(
+			persistFinalizedRecording(api, { ...session, webcamPath: "/rec/a-webcam.webm" }),
+		).resolves.toBeNull();
+		await expect(persistFinalizedRecording(api, session)).resolves.toBeNull();
+		expect(api.setCurrentVideoPath).toHaveBeenCalledTimes(2);
 	});
 });

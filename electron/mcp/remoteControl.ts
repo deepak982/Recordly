@@ -1,9 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { BrowserWindow, ipcMain, systemPreferences } from "electron";
+import { isMacWindowOnScreen } from "../ipc/cursor/bounds";
 import { isCursorCapturePaused } from "../ipc/cursor/telemetry";
+import {
+	isLikelyLinuxWaylandSession,
+	LINUX_PORTAL_SCREEN_SOURCE_ID,
+} from "../ipc/register/sourceMapping";
 import { getSources, selectSource, showRecordingHud } from "../ipc/register/sources";
 import { countdownInProgress, currentVideoPath, selectedSource } from "../ipc/state";
-import type { SelectedSource } from "../ipc/types";
+import { type SelectedSource, WINDOW_OFF_SCREEN_MESSAGE } from "../ipc/types";
 import { closeCountdownWindow, getHudOverlayWindow } from "../windows";
 import { recordingSignals } from "./signals";
 
@@ -17,7 +22,13 @@ export type RemoteRecordingState =
 	| "finalizing";
 
 export const MAX_COUNTDOWN_SECONDS = 10;
-const SAVE_WINDOW_MS = 120_000;
+const CLOSING_LIMIT_MS = 300_000;
+const HUD_CRASHED =
+	"The Recordly recording controls crashed. Ask the user to quit and reopen Recordly.";
+const ON_SCREEN_POLL_MS = 200;
+const SHARE_DIALOG_WAITING =
+	"Waiting for the user to choose a screen in the system share dialog — ask them to pick one; " +
+	"get_status shows when recording starts.";
 const ACCESSIBILITY_MISSING =
 	"Recordly does not have Accessibility permission (needed for cursor tracking). Ask the user " +
 	"to enable Recordly in System Settings > Privacy & Security > Accessibility, then quit and " +
@@ -29,6 +40,14 @@ type RawSource = {
 	name: string;
 	sourceType?: "screen" | "window";
 	appName?: string;
+	windowTitle?: string;
+	pid?: number;
+	onScreen?: boolean;
+	needsUser?: boolean;
+	x?: number;
+	y?: number;
+	width?: number;
+	height?: number;
 	[key: string]: unknown;
 };
 type Listener = (...args: never[]) => void;
@@ -37,7 +56,10 @@ type Emitter = {
 	once(event: string, listener: Listener): unknown;
 	removeListener(event: string, listener: Listener): unknown;
 };
-type Contents = Emitter & { send(channel: string, command: RemoteRecordingCommand): void };
+type Contents = Emitter & {
+	send(channel: string, command: RemoteRecordingCommand): void;
+	isCrashed(): boolean;
+};
 type Hud = Emitter & { webContents: Contents; isDestroyed(): boolean };
 type IpcListener = (event: { sender: unknown }, ...args: never[]) => void;
 type Ipc = {
@@ -55,10 +77,20 @@ export type RemoteControlDeps = {
 	cancelCountdown: () => void;
 	listSources: () => Promise<RawSource[]>;
 	selectSource: (source: SelectedSource) => Promise<unknown>;
+	isWindowOnScreen: (sourceId: string) => Promise<boolean>;
+	platform: NodeJS.Platform;
+	isWayland: () => boolean;
 	ipc: Ipc;
 	signals: typeof recordingSignals;
 	createId: () => string;
-	timeouts: { hudReadyMs: number; ackMs: number; startMs: number; stopMs: number };
+	timeouts: {
+		hudReadyMs: number;
+		ackMs: number;
+		startMs: number;
+		stopMs: number;
+		onScreenMs: number;
+		waylandStartMs: number;
+	};
 };
 
 function readMacPermissions(): MacPermissions | undefined {
@@ -85,19 +117,41 @@ const defaultDeps = (): RemoteControlDeps => ({
 	isCountdownActive: () => countdownInProgress,
 	isCapturePaused: () => isCursorCapturePaused(),
 	getHud: () => getHudOverlayWindow() as unknown as Hud | null,
-	showHud: () => showRecordingHud(findEditorWindow()),
+	showHud: () => showRecordingHud(findEditorWindow(), { focus: false }),
 	cancelCountdown: () => closeCountdownWindow(),
 	listSources: () =>
 		getSources({
 			types: ["screen", "window"],
 			thumbnailSize: { width: 0, height: 0 },
+			allSpaces: true,
 		}) as Promise<RawSource[]>,
 	selectSource: (source) => selectSource(source, { focusApp: false }),
+	isWindowOnScreen: isMacWindowOnScreen,
+	platform: process.platform,
+	isWayland: () => isLikelyLinuxWaylandSession(process.env),
 	ipc: ipcMain as unknown as Ipc,
 	signals: recordingSignals,
 	createId: randomUUID,
-	timeouts: { hudReadyMs: 10_000, ackMs: 5_000, startMs: 30_000, stopMs: 120_000 },
+	timeouts: {
+		hudReadyMs: 10_000,
+		ackMs: 5_000,
+		startMs: 30_000,
+		stopMs: 120_000,
+		onScreenMs: 2_000,
+		waylandStartMs: 120_000,
+	},
 });
+
+const WINDOW_FIELDS = [
+	"windowTitle",
+	"pid",
+	"onScreen",
+	"needsUser",
+	"x",
+	"y",
+	"width",
+	"height",
+] as const;
 
 function summarize(source: RawSource) {
 	return {
@@ -105,6 +159,12 @@ function summarize(source: RawSource) {
 		name: source.name,
 		type: source.sourceType ?? (source.id.startsWith("window:") ? "window" : "screen"),
 		...(source.appName ? { appName: source.appName } : {}),
+		...Object.fromEntries(
+			WINDOW_FIELDS.filter((field) => source[field] !== undefined).map((field) => [
+				field,
+				source[field],
+			]),
+		),
 	};
 }
 
@@ -122,14 +182,15 @@ type Pending = {
 	hud: Hud;
 	done: Promise<string | null>;
 	finish: (result: Error | string | null) => void;
+	linger: boolean;
 };
 
 export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) {
 	const deps = { ...defaultDeps(), ...overrides };
 	let recording = false;
 	let recordingHud: Hud | null = null;
-	let stoppedAt: number | null = null;
 	let closingHud: Hud | null = null;
+	let closingSince = 0;
 	let pending: Pending | null = null;
 	let hudReady: Promise<Hud> | null = null;
 	let onHudReady: (() => void) | null = null;
@@ -141,7 +202,8 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 		if (pending?.action === "stop") return "stopping";
 		if (recording) return deps.isCapturePaused() ? "paused" : "recording";
 		if (pending?.action === "start") return "starting";
-		if (closingHud && !closingHud.isDestroyed()) return "finalizing";
+		if (closingHud && !closingHud.isDestroyed() && Date.now() - closingSince < CLOSING_LIMIT_MS)
+			return "finalizing";
 		return "idle";
 	}
 
@@ -178,10 +240,10 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 	deps.signals.on("videoPath", (path, sender) => {
 		const hud = deps.getHud();
 		if (!hud || sender !== hud.webContents) return;
-		if (pending?.action === "stop") pending.finish(path);
-		if (stoppedAt === null || Date.now() - stoppedAt > SAVE_WINDOW_MS) return;
-		stoppedAt = null;
+		if (pending?.action !== "stop") return;
+		pending.finish(path);
 		closingHud = hud;
+		closingSince = Date.now();
 		hud.once("closed", () => {
 			if (closingHud === hud) closingHud = null;
 		});
@@ -197,21 +259,27 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 		action: RemoteRecordingAction,
 		timeoutMs: number,
 		extra: Partial<RemoteRecordingCommand> = {},
+		linger = false,
 	) {
 		if (pending)
 			throw new Error(`Recordly is still handling "${pending.action}". Try again shortly.`);
 		const id = deps.createId();
 		let finish!: Pending["finish"];
 		const done = new Promise<string | null>((resolve, reject) => {
-			const timer = setTimeout(
-				() =>
-					finish(
-						new Error(
-							`Recordly did not confirm "${action}" within ${Math.round(timeoutMs / 1000)} s.`,
-						),
-					),
-				timeoutMs,
-			);
+			const timer = linger
+				? undefined
+				: setTimeout(
+						() =>
+							finish(
+								new Error(
+									`Recordly did not confirm "${action}" within ${Math.round(timeoutMs / 1000)} s.` +
+										(action === "start"
+											? " It may still start — call get_status."
+											: ""),
+								),
+							),
+						timeoutMs,
+					);
 			const onGone = () =>
 				finish(
 					new Error(
@@ -231,23 +299,29 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 				else resolve(result);
 			};
 		});
-		pending = { id, action, hud, done, finish };
-		hud.webContents.send("remote-recording-command", {
-			...extra,
-			id,
-			action,
-			expiresAt: Date.now() + timeoutMs,
-		});
+		pending = { id, action, hud, done, finish, linger };
+		try {
+			hud.webContents.send("remote-recording-command", {
+				...extra,
+				id,
+				action,
+				expiresAt: Date.now() + timeoutMs,
+			});
+		} catch {
+			finish(new Error(`Recordly could not reach its recording controls to "${action}".`));
+		}
 		return done;
 	}
 
 	function requireHud() {
 		const hud = deps.getHud();
 		if (!hud) throw new Error("The Recordly recording controls are not open.");
+		if (hud.webContents.isCrashed()) throw new Error(HUD_CRASHED);
 		return hud;
 	}
 
 	function ensureHud() {
+		if (deps.getHud()?.webContents.isCrashed()) return Promise.reject(new Error(HUD_CRASHED));
 		hudReady ??= new Promise<Hud>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				onHudReady = null;
@@ -261,17 +335,54 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 				resolve(hud);
 				return true;
 			};
+			deps.showHud();
 			if (check()) return;
 			onHudReady = check;
-			if (!deps.getHud()) deps.showHud();
 		}).finally(() => {
 			hudReady = null;
 		});
 		return hudReady;
 	}
 
+	function waitForShareDialog(done: Promise<unknown>) {
+		return new Promise<void>((resolve, reject) => {
+			const timer = setTimeout(
+				() => reject(new Error(SHARE_DIALOG_WAITING)),
+				deps.timeouts.waylandStartMs,
+			);
+			done.then(
+				() => {
+					clearTimeout(timer);
+					resolve();
+				},
+				(error) => {
+					clearTimeout(timer);
+					reject(error);
+				},
+			);
+		});
+	}
+
+	const isWayland = () => deps.platform === "linux" && deps.isWayland();
+
+	async function rawSources(): Promise<RawSource[]> {
+		if (deps.platform !== "linux") return deps.listSources();
+		const portal: RawSource = {
+			id: LINUX_PORTAL_SCREEN_SOURCE_ID,
+			name: isWayland() ? "Screen (chosen in the system share dialog)" : "Entire screen",
+			sourceType: "screen",
+			...(isWayland() ? { needsUser: true } : {}),
+		};
+		if (isWayland()) return [portal];
+		const sources = await deps.listSources();
+		return [
+			portal,
+			...sources.filter((source) => !/^(screen|window):fallback:/.test(source.id)),
+		];
+	}
+
 	function preflight() {
-		if (!deps.getSelectedSource()) {
+		if (!deps.getSelectedSource() && deps.platform !== "linux") {
 			throw new Error(
 				"No capture source is selected. Call list_sources, then select_source.",
 			);
@@ -288,6 +399,15 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 		}
 	}
 
+	async function waitUntilOnScreen(sourceId: string) {
+		const deadline = Date.now() + deps.timeouts.onScreenMs;
+		while (!(await deps.isWindowOnScreen(sourceId))) {
+			if (Date.now() >= deadline) return false;
+			await new Promise((resolve) => setTimeout(resolve, ON_SCREEN_POLL_MS));
+		}
+		return true;
+	}
+
 	function getStatus() {
 		const source = deps.getSelectedSource();
 		return {
@@ -300,14 +420,17 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 
 	return {
 		onRecordingStateChange(next: boolean) {
-			if (recording && !next) stoppedAt = Date.now();
 			if (next) {
-				stoppedAt = null;
 				const hud = deps.getHud();
 				if (hud !== recordingHud) {
 					recordingHud?.removeListener("closed", onRecordingHudClosed);
+					recordingHud?.webContents.removeListener(
+						"render-process-gone",
+						onRecordingHudClosed,
+					);
 					recordingHud = hud;
 					hud?.on("closed", onRecordingHudClosed);
+					hud?.webContents.on("render-process-gone", onRecordingHudClosed);
 				}
 			}
 			recording = next;
@@ -315,14 +438,17 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 		},
 		getStatus,
 		async listSources() {
-			return (await deps.listSources()).map(summarize);
+			return (await rawSources()).map(summarize);
 		},
 		async selectSource({ id, name }: { id?: string; name?: string }) {
 			const needle = name?.trim().toLowerCase();
 			if (name !== undefined && !needle) throw new Error("The name must not be empty.");
 			if (!id === !needle) throw new Error("Pass exactly one of id or name.");
-			if (getState() !== "idle") throw new Error("The source cannot change while recording.");
-			const sources = await deps.listSources();
+			const state = getState();
+			if (state !== "idle") {
+				throw new Error(`The source cannot change while Recordly is ${state}.`);
+			}
+			const sources = await rawSources();
 			let matches = sources.filter((source) =>
 				id
 					? source.id === id
@@ -342,10 +468,15 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 					.map((source) => `${source.name} (id: ${source.id})`)
 					.join("; ");
 				throw new Error(
-					`${matches.length} sources match "${name}": ${candidates}. Use a more specific name or the id.`,
+					`${matches.length} sources match "${id ?? name}": ${candidates}. Use a more specific name or the id.`,
 				);
 			}
-			const { thumbnail: _thumbnail, appIcon: _appIcon, ...source } = matches[0];
+			const {
+				thumbnail: _thumbnail,
+				appIcon: _appIcon,
+				needsUser: _needsUser,
+				...source
+			} = matches[0];
 			if (
 				source.id.startsWith("window:") &&
 				deps.getPermissions()?.accessibility === "denied"
@@ -353,7 +484,15 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 				throw new Error(ACCESSIBILITY_MISSING);
 			}
 			await deps.selectSource(source);
-			return summarize(matches[0]);
+			if (deps.platform !== "darwin" || !source.id.startsWith("window:")) {
+				return summarize(matches[0]);
+			}
+			const onScreen = await waitUntilOnScreen(source.id);
+			return {
+				...summarize(matches[0]),
+				onScreen,
+				...(onScreen ? {} : { warning: WINDOW_OFF_SCREEN_MESSAGE }),
+			};
 		},
 		async startRecording({ countdownSeconds }: { countdownSeconds?: number } = {}) {
 			const state = getState();
@@ -362,22 +501,37 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 					"A recording is already running. Call stop_recording or cancel_recording first.",
 				);
 			}
-			if (state === "starting" || state === "countdown")
+			if (state === "starting" || state === "countdown") {
+				if (pending?.action === "start" && pending.linger) {
+					await waitForShareDialog(pending.done);
+					return getStatus();
+				}
 				throw new Error("A recording is already starting.");
+			}
 			if (state === "stopping" || state === "finalizing") {
 				throw new Error(
 					"The previous recording is still being saved. Try again in a few seconds.",
 				);
 			}
 			preflight();
+			const sourceId = deps.getSelectedSource()?.id;
+			if (
+				deps.platform === "darwin" &&
+				sourceId?.startsWith("window:") &&
+				!(await deps.isWindowOnScreen(sourceId))
+			) {
+				throw new Error(WINDOW_OFF_SCREEN_MESSAGE);
+			}
 			const hud = await ensureHud();
 			const countdownMs = (countdownSeconds ?? MAX_COUNTDOWN_SECONDS) * 1000;
-			await send(
-				hud,
-				"start",
-				deps.timeouts.startMs + countdownMs,
-				countdownSeconds === undefined ? {} : { countdownSeconds },
-			);
+			const extra = countdownSeconds === undefined ? {} : { countdownSeconds };
+			if (isWayland()) {
+				await waitForShareDialog(
+					send(hud, "start", deps.timeouts.waylandStartMs + countdownMs, extra, true),
+				);
+			} else {
+				await send(hud, "start", deps.timeouts.startMs + countdownMs, extra);
+			}
 			return getStatus();
 		},
 		async stopRecording() {
@@ -421,7 +575,6 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 			if (state !== "recording" && state !== "paused")
 				throw new Error("Recordly is not recording.");
 			await send(requireHud(), "cancel", deps.timeouts.ackMs);
-			stoppedAt = null;
 		},
 	};
 }
