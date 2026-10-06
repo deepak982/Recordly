@@ -1127,11 +1127,8 @@ export function SettingsPanel({
 	};
 
 	const copyMcpSetupCommand = async () => {
-		if (!mcpServer) return;
 		try {
-			await navigator.clipboard.writeText(
-				`claude mcp add --transport http recordly ${mcpServer.url} --header "Authorization: Bearer ${mcpServer.token}"`,
-			);
+			await window.electronAPI.copyMcpSetupCommand();
 			toast.success(tSettings("mcp.setupCopied", "Setup command copied"));
 		} catch {
 			toast.error(tSettings("mcp.copyFailed", "Couldn't copy the setup command."));

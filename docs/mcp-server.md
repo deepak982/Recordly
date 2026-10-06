@@ -46,7 +46,7 @@ Every example needs two values from the settings panel: the **address** and the 
 The **Copy setup command** button produces exactly this:
 
 ```bash
-claude mcp add --transport http recordly http://127.0.0.1:43831/mcp \
+claude mcp add --scope user --transport http recordly http://127.0.0.1:43831/mcp \
   --header "Authorization: Bearer YOUR_TOKEN"
 ```
 

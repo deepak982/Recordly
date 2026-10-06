@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { app, ipcMain } from "electron";
+import { app, clipboard, ipcMain } from "electron";
 import { USER_DATA_PATH } from "../appPaths";
 import type { RemoteControl } from "./remoteControl";
 import { createRemoteExport } from "./remoteExport";
@@ -76,7 +76,6 @@ export function setupMcpServer({ isDev, remote }: { isDev: boolean; remote: Remo
 			enabled: settings.enabled,
 			running: server.isRunning(),
 			url,
-			token: settings.token,
 			error,
 		};
 	}
@@ -99,6 +98,14 @@ export function setupMcpServer({ isDev, remote }: { isDev: boolean; remote: Remo
 	ipcMain.handle("mcp-server:regenerate-token", () => {
 		save({ ...settings, token: createToken() });
 		return getState();
+	});
+	ipcMain.handle("mcp-server:copy-setup-command", () => {
+		if (!settings.enabled || !settings.token) {
+			throw new Error("Turn on AI agent control first.");
+		}
+		clipboard.writeText(
+			`claude mcp add --scope user --transport http recordly ${url} --header "Authorization: Bearer ${settings.token}"`,
+		);
 	});
 
 	void apply();
