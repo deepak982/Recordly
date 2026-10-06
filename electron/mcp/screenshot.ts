@@ -1,10 +1,15 @@
-import { desktopCapturer } from "electron";
+import { type Display, desktopCapturer, type Size } from "electron";
 import { WINDOW_OFF_SCREEN_MESSAGE, type WindowBounds } from "../ipc/types";
 import { getScreen } from "../ipc/utils";
 
 export const MAX_IMAGE_EDGE = 1568;
 export const MAX_IMAGE_PIXELS = 1_150_000;
 const JPEG_QUALITY = 80;
+const SAMPLE_EDGE = 320;
+const SAMPLE_INTERVAL_MS = 150;
+const SAMPLE_QUIET_MS = 400;
+const SAMPLE_NOISE_LEVEL = 16;
+const SAMPLE_CHANGED_FRACTION = 0.003;
 const REGION_OFF_SCREEN_MESSAGE =
 	"That part of the window is off screen. Move the window fully onto a display, then try again.";
 
@@ -17,6 +22,8 @@ export type WindowShot = {
 	originX: number;
 	originY: number;
 };
+
+export type WindowSample = { width: number; height: number; pixels: Uint8Array };
 
 export function clampRegion(window: WindowBounds, region: WindowBounds): WindowBounds {
 	const { x, y, width, height } = region;
@@ -78,24 +85,24 @@ export function planWindowCrop(
 	};
 }
 
-export async function captureWindow(
-	frame: WindowBounds,
-	region?: WindowBounds,
-): Promise<WindowShot> {
-	const area = region ? clampRegion(frame, region) : frame;
-	const display = getScreen().getDisplayMatching({
+function displayFor(area: WindowBounds) {
+	return getScreen().getDisplayMatching({
 		x: Math.round(area.x),
 		y: Math.round(area.y),
 		width: Math.round(area.width),
 		height: Math.round(area.height),
 	});
-	const sources = await desktopCapturer.getSources({
-		types: ["screen"],
-		thumbnailSize: {
-			width: Math.round(display.size.width * display.scaleFactor),
-			height: Math.round(display.size.height * display.scaleFactor),
-		},
-	});
+}
+
+function physicalSize(display: Display): Size {
+	return {
+		width: Math.round(display.size.width * display.scaleFactor),
+		height: Math.round(display.size.height * display.scaleFactor),
+	};
+}
+
+async function captureDisplay(display: Display, thumbnailSize: Size) {
+	const sources = await desktopCapturer.getSources({ types: ["screen"], thumbnailSize });
 	const source =
 		sources.find((candidate) => candidate.display_id === String(display.id)) ??
 		(sources.length === 1 ? sources[0] : undefined);
@@ -104,9 +111,19 @@ export async function captureWindow(
 			"Recordly could not capture the screen. Check its Screen Recording permission in System Settings > Privacy & Security.",
 		);
 	}
-	const plan = planWindowCrop(area, display.bounds, source.thumbnail.getSize());
+	return source.thumbnail;
+}
+
+export async function captureWindow(
+	frame: WindowBounds,
+	region?: WindowBounds,
+): Promise<WindowShot> {
+	const area = region ? clampRegion(frame, region) : frame;
+	const display = displayFor(area);
+	const thumbnail = await captureDisplay(display, physicalSize(display));
+	const plan = planWindowCrop(area, display.bounds, thumbnail.getSize());
 	if (!plan) throw new Error(region ? REGION_OFF_SCREEN_MESSAGE : WINDOW_OFF_SCREEN_MESSAGE);
-	const image = source.thumbnail.crop(plan.crop).resize({ ...plan.output, quality: "best" });
+	const image = thumbnail.crop(plan.crop).resize({ ...plan.output, quality: "best" });
 	return {
 		data: image.toJPEG(JPEG_QUALITY).toString("base64"),
 		mimeType: "image/jpeg",
@@ -116,4 +133,85 @@ export async function captureWindow(
 		originX: plan.originX + area.x - frame.x,
 		originY: plan.originY + area.y - frame.y,
 	};
+}
+
+export function windowSampleChanged(a: WindowSample, b: WindowSample) {
+	if (a.width !== b.width || a.height !== b.height) return true;
+	const limit = a.width * a.height * SAMPLE_CHANGED_FRACTION;
+	let changed = 0;
+	for (let i = 0; i < a.pixels.length; i += 4) {
+		if (
+			Math.abs(a.pixels[i] - b.pixels[i]) > SAMPLE_NOISE_LEVEL ||
+			Math.abs(a.pixels[i + 1] - b.pixels[i + 1]) > SAMPLE_NOISE_LEVEL ||
+			Math.abs(a.pixels[i + 2] - b.pixels[i + 2]) > SAMPLE_NOISE_LEVEL
+		) {
+			changed += 1;
+			if (changed > limit) return true;
+		}
+	}
+	return false;
+}
+
+async function sampleWindow(frame: WindowBounds): Promise<WindowSample> {
+	const display = displayFor(frame);
+	const physical = physicalSize(display);
+	const full = planWindowCrop(frame, display.bounds, physical, SAMPLE_EDGE);
+	if (!full) throw new Error(WINDOW_OFF_SCREEN_MESSAGE);
+	const fit = full.output.width / full.crop.width;
+	const thumbnail = await captureDisplay(display, {
+		width: Math.max(1, Math.round(physical.width * fit)),
+		height: Math.max(1, Math.round(physical.height * fit)),
+	});
+	const plan = planWindowCrop(frame, display.bounds, thumbnail.getSize(), SAMPLE_EDGE);
+	if (!plan) throw new Error(WINDOW_OFF_SCREEN_MESSAGE);
+	const { width, height } = plan.crop;
+	return { width, height, pixels: thumbnail.crop(plan.crop).toBitmap() };
+}
+
+export async function waitForStillWindow(
+	frame: WindowBounds,
+	options: { timeoutMs: number; quietMs?: number; intervalMs?: number; signal?: AbortSignal },
+): Promise<{ settled: boolean; elapsedMs: number }> {
+	const {
+		timeoutMs,
+		quietMs = SAMPLE_QUIET_MS,
+		intervalMs = SAMPLE_INTERVAL_MS,
+		signal,
+	} = options;
+	signal?.throwIfAborted();
+	let onAbort!: () => void;
+	const aborted = new Promise<never>((_, reject) => {
+		onAbort = () => reject(signal?.reason);
+	});
+	aborted.catch(() => undefined);
+	signal?.addEventListener("abort", onAbort, { once: true });
+	try {
+		const started = Date.now();
+		const deadline = started + timeoutMs;
+		const sampleBefore = (time: number) =>
+			Promise.race([
+				sampleWindow(frame),
+				aborted,
+				new Promise<null>((resolve) => setTimeout(() => resolve(null), time - Date.now())),
+			]);
+		const unsettled = () => ({ settled: false, elapsedMs: Date.now() - started });
+		let sampledAt = started;
+		let stillSince = started;
+		let previous = await sampleBefore(deadline);
+		if (!previous) return unsettled();
+		for (;;) {
+			const now = Date.now();
+			if (now - stillSince >= quietMs) return { settled: true, elapsedMs: now - started };
+			if (now >= deadline) return { settled: false, elapsedMs: now - started };
+			const wait = Math.min(sampledAt + intervalMs, deadline) - now;
+			await Promise.race([new Promise((resolve) => setTimeout(resolve, wait)), aborted]);
+			sampledAt = Date.now();
+			const next = await sampleBefore(deadline);
+			if (!next) return unsettled();
+			if (windowSampleChanged(previous, next)) stillSince = sampledAt;
+			previous = next;
+		}
+	} finally {
+		signal?.removeEventListener("abort", onAbort);
+	}
 }
