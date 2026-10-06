@@ -69,11 +69,11 @@ These tools exist only on macOS for now. On Windows and Linux they aren't offere
 | `scroll` | Scrolls whatever is under a point, in pixels: positive `deltaY` scrolls down, positive `deltaX` scrolls right. Modifiers are held while it scrolls and need the recorded window frontmost; shift-scroll scrolls sideways in many apps. | `x`, `y`, `deltaY`, `deltaX`, `modifiers` |
 | `type_text` | Types text into the focused field, a character at a time at a natural pace. Any text works — other languages, emoji, symbols — whatever your keyboard layout. A newline (`\n` or `\r\n`) presses Return and a tab (`\t`) presses Tab; nothing else is pressed, so end the text with `\n` to submit it. | `text` |
 | `press_key` | Presses one key or shortcut, optionally several times in a row, about 35 ms apart. See [Keys and modifiers](#keys-and-modifiers). | `key`, `modifiers`, `repeat` (1–100) |
-| `perform` | Runs a list of steps — `move`, `click`, `drag`, `scroll`, `type`, `key` and `wait` — back to back with exact timing. Up to 200 steps, waits of up to 30 seconds, and 10 minutes per call. | `steps` |
+| `perform` | Runs a list of steps — `move`, `click`, `drag`, `scroll`, `type`, `key` and `wait` — back to back with exact timing. Up to 200 steps, waits of up to 30 seconds, and 10 minutes per call. An optional `title` names the scene and becomes an on-screen caption. | `steps`, `title` (optional) |
 
 **Coordinates are window-relative points.** `0, 0` is the top-left corner of the selected window, whatever desktop or display it is on, and a point is the unit macOS uses for window sizes, not a screen pixel. `find_elements` already answers in points; for a spot picked off a screenshot, multiply its image pixel position by `scale`. Every target, including both ends of a drag, must fall inside the selected window, which Recordly re-measures before each step, so the pointer cannot wander onto anything else.
 
-**Use `perform` while recording.** Each separate tool call waits for the agent to think, which shows up in the video as uneven pauses. One `perform` per scene — click, wait two or three seconds for the page to settle, type, scroll — keeps the pacing even. Each step takes the same arguments as the matching single tool, plus `action`; `wait` takes `ms`:
+**Use `perform` while recording.** Each separate tool call waits for the agent to think. Recordly cuts that time from the video, but a scene split across many calls turns into many small cuts. One `perform` per scene — click, wait two seconds or so for the page to settle, type, scroll — keeps the motion continuous and the pacing even. Each step takes the same arguments as the matching single tool, plus `action`; `wait` takes `ms`:
 
 ```json
 {
@@ -138,7 +138,7 @@ With both switches on, an agent can produce a finished demo of any website or de
 2. **`screenshot`** and **`find_elements`** to learn the screen and plan every target. Nothing is being recorded yet, so this can take as long as it needs.
 3. **`move_pointer`** to where the first scene begins, then **`start_recording`**, once the plan is ready.
 4. **`perform`**, once per scene: the steps for that scene, with waits so a viewer can follow. Between scenes the agent takes another `screenshot` to check the result and find the next targets.
-5. **`stop_recording`**. The editor opens with automatic zooms on every click.
+5. **`stop_recording`**. The editor opens with the agent's thinking time already cut and zooms on its clicks (see [Automatic edits](#automatic-edits-for-agent-recordings)).
 6. **`export_video`** with the destination and format you asked for.
 
 Keep your hands off the mouse and keyboard while it runs: touching either stops the agent (see [Mouse and keyboard control](#mouse-and-keyboard-control)). If you do take over, the agent asks you before carrying on from a fresh screenshot.
@@ -165,10 +165,23 @@ These habits make a clean video of any app or site, whether you ask in plain wor
 - **Plan before recording.** The agent looks with `screenshot` and `find_elements` first, while nothing is recorded, and avoids steps with side effects — submitting, deleting — until the take.
 - **Aim from exact positions.** `find_elements` gives each control's exact frame. For a control it does not list, the agent screenshots a small region around it (about 300 × 200 points), which comes back at the display's full resolution, instead of guessing from the whole-window image.
 - **Start with the cursor in place.** The agent moves the pointer to where the first scene begins before `start_recording`, so the video does not open with the cursor somewhere else.
-- **One `perform` per scene, with room to breathe.** Each click zooms in for about a second around it, so the agent glides to each target in 0.6 to 1 second, makes one click per beat with at least 2.5 seconds between clicks, and waits 1.5 to 3 seconds after a click or anything that loads. Recordly rests the pointer on the target briefly before pressing, so the drawn cursor is on it when the click lands.
+- **One `perform` per scene, with room to breathe.** The agent glides to each target in 0.6 to 1 second and waits 1.5 to 2.5 seconds after a click or anything that loads; those waits stay in the video as reading time. Recordly rests the pointer on the target briefly before pressing, so the drawn cursor is on it when the click lands.
+- **Captions only when you want them.** Ask for captions or a step-by-step tutorial and the agent gives each scene a `title`, shown at the bottom of the video as the scene starts.
 - **Look again after every change.** Navigation, dialogs and scrolling move everything, so coordinates from an earlier screenshot are stale. The agent takes a new screenshot between scenes and checks that the last one did what it should.
 - **Words with `type_text`, shortcuts with `press_key`.** Typed text appears at a natural pace in any language; shortcuts read as instant actions.
 - **Recover, don't push on.** If a step fails, the steps before it have already happened; the agent looks at the screen and continues from there, or uses `cancel_recording` and starts the take again.
+
+## Automatic edits for agent recordings
+
+While an agent drives the window, Recordly notes what it does and when. When the recording opens in the editor, Recordly uses those notes to edit it:
+
+- **Thinking time is cut.** The time between the agent's tool calls — while it looks at the screen and decides the next step — is removed, as is the wait before the first action. A short lead and tail are kept around every action so the cuts don't feel abrupt.
+- **Waiting is shortened.** A window coming to the front shrinks to a brief beat.
+- **Actions and reading time stay.** Every movement, click, scroll, keystroke and the agent's own `wait` steps are kept in full.
+- **Zooms follow the actions.** Each click zooms in from the moment the pointer heads for it until the result has been on screen, close clicks share one zoom, and nothing zooms on a large target or while scrolling.
+- **An interrupted take is removed.** If you take over during a scene and the agent redoes it, the interrupted attempt is cut. When a step fails, the steps before it stay, since the agent carries on from there.
+
+The edits are ordinary clips, zooms and captions on the timeline, so you can change or undo any of them, and `export_video` exports them. Recordings you make yourself are not affected. To turn this off, clear **Tighten agent recordings** in the editor settings.
 
 ## Adding Recordly to your AI tool
 
