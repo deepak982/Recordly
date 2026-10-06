@@ -4,13 +4,13 @@ Recordly can expose its recorder to local AI tools over the Model Context Protoc
 
 ## Platform support
 
-Recording works everywhere; driving the window is macOS-only for now.
+Recording works everywhere; driving the window works on macOS, Windows and Linux with X11.
 
 | | macOS | Windows | Linux |
 | --- | --- | --- | --- |
 | Record, pause, stop, export | Yes | Yes | Yes. Unattended on X11; on Wayland a person confirms the share dialog |
-| Driving the window (`open_url`, `screenshot`, `find_elements`, input tools, `perform`) and its switch | Yes — see [macOS](#macos-available-now) | Not yet — planned, see [Windows](#windows-not-available-yet-planned) | Not yet — planned, X11 first, see [Linux](#linux-not-available-yet-planned) |
-| The `record_demo` prompt | Plans a demo the agent drives itself | Plans a demo the user performs while Recordly records | Plans a demo the user performs while Recordly records |
+| Driving the window (`open_url`, `screenshot`, `find_elements`, input tools, `perform`) and its switch | Yes — see [macOS](#macos) | Yes — see [Windows](#windows) | Yes on X11 — see [Linux](#linux); not yet on Wayland |
+| The `record_demo` prompt | Plans a demo the agent drives itself | Plans a demo the agent drives itself | On X11, a demo the agent drives itself; on Wayland, one the user performs while Recordly records |
 | `list_sources` fields | `id`, `name`, `type`, `appName`, `pid`, `windowTitle`, `onScreen`, bounds; windows on every desktop | `id`, `name`, `type` | `id`, `name`, `type`; on Wayland only the **Screen** entry |
 | How a window is captured | The display cropped to the window, so keep the window uncovered | The window itself, through Windows Graphics Capture | The screen entry `screen:linux-portal`, listed first (**Entire screen** on X11; **Screen (chosen in the system share dialog)** on Wayland) |
 
@@ -38,7 +38,7 @@ Settings always shows the address the running app is actually using — prefer i
 
 ## What an agent can do
 
-Two groups of tools — nine for recording on every platform, and ten more for driving the window on macOS — plus one prompt, [`record_demo`](#the-record_demo-prompt). The tools return plain JSON (`screenshot` also returns an image) and refuse with an explanatory message instead of opening a dialog, so an agent never leaves a prompt waiting for a human to click something.
+Two groups of tools — ten for recording and reviewing on every platform, and eleven more for driving the window on macOS — plus one prompt, [`record_demo`](#the-record_demo-prompt). The tools return plain JSON (`screenshot` and `review_recording` also return an image) and refuse with an explanatory message instead of opening a dialog, so an agent never leaves a prompt waiting for a human to click something.
 
 ### Recording
 
@@ -52,24 +52,28 @@ Two groups of tools — nine for recording on every platform, and ten more for d
 | `resume_recording` | Resumes a paused recording. | — |
 | `stop_recording` | Stops and saves, returning the saved video path once it is written. The editor then opens with automatic zooms already applied. | — |
 | `cancel_recording` | Discards the running recording, or aborts the countdown before capture starts. | — |
+| `review_recording` | Checks the edited video before export, once the editor shows the latest recording: a contact sheet of up to nine frames (the start, the last frame before each cut and the end, left to right and top to bottom) and a summary — each frame's time and label, raw and final duration, time removed, cuts, zooms, captions, scenes, failed scenes and the longest still stretch left. | — |
 | `export_video` | Exports the last recording with no save dialog, using the editor's current look — automatic zooms, cursor smoothing, background and frame — and returns the saved path. A long export returns `{ "status": "still-exporting" }`; poll `get_status` until `export.state` is `done` or `failed`. Reports progress to clients that ask for it. | `outputPath`, `format` (`mp4`, `gif`), `quality` (`medium`, `good`, `high`, `source`), `overwrite` |
 
 ### Driving the window
 
-These tools exist only on macOS for now. On Windows and Linux they aren't offered, so the agent never sees them; [Mouse and keyboard control](#mouse-and-keyboard-control) describes what is planned. `open_url` and the input tools — everything from `click` down — refuse while **Let agents use the mouse and keyboard** is off.
+These tools are offered on macOS, Windows and Linux with X11. On Wayland they aren't offered, so the agent never sees them; [Mouse and keyboard control](#mouse-and-keyboard-control) describes each platform. `open_url` and the input tools — everything from `click` down — refuse while **Let agents use the mouse and keyboard** is off.
 
 | Tool | What it does | Arguments |
 | --- | --- | --- |
 | `open_url` | Opens an `http` or `https` address in your default browser — the one you are already signed in to — and selects the window showing it, so the next step can be `screenshot`. Refused while recording; the agent navigates inside the page with `perform` instead. | `url` |
 | `screenshot` | A picture of the selected window, exactly the pixels a recording would capture, plus `width` and `height` of the image and `scale`, the number of window points per image pixel. If part of the window is off screen it also returns `originX` and `originY`. With `region`, it shows only that rectangle of the window at up to the display's full resolution, for aiming at small controls, and always returns `originX` and `originY`: window point = origin + image pixel × `scale`. Read-only. | `region` (optional: `x`, `y`, `width`, `height` in window points) |
 | `find_elements` | Finds buttons, links, fields and other controls in the selected window by visible text or accessibility role, and returns each one's `role`, `label` and frame (`x`, `y`, `width`, `height`) in window points. Apps that draw their own interface, such as canvas editors and games, may expose few elements; the agent then picks points off a screenshot. Read-only. | `text`, `role`, `limit` (all optional) |
-| `click` | Glides the pointer to a point and clicks there. `count` 2 double-clicks and 3 triple-clicks, which selects a line or paragraph in most apps. Modifiers are held during the click, so `["cmd"]` makes a cmd-click; a modifier click needs the recorded window frontmost. | `x`, `y`, `button` (`left`, `right`, `middle`), `count` (1–3), `modifiers`, `durationMs` |
-| `drag` | Glides to the start point, presses the button, holds, moves to the end point with easing and releases — to move or reorder items, resize a pane, draw, or select a range. Takes 900 ms unless `durationMs` says otherwise. Both points must be inside the window, and the button is always released, even when you take over. A drag with modifiers needs the recorded window frontmost. | `fromX`, `fromY`, `toX`, `toY`, `button`, `modifiers`, `durationMs` |
-| `move_pointer` | Glides the pointer to a point without clicking, for hovering. | `x`, `y`, `durationMs` |
-| `scroll` | Scrolls whatever is under a point, in pixels: positive `deltaY` scrolls down, positive `deltaX` scrolls right. Modifiers are held while it scrolls and need the recorded window frontmost; shift-scroll scrolls sideways in many apps. | `x`, `y`, `deltaY`, `deltaX`, `modifiers` |
-| `type_text` | Types text into the focused field, a character at a time at a natural pace. Any text works — other languages, emoji, symbols — whatever your keyboard layout. A newline (`\n` or `\r\n`) presses Return and a tab (`\t`) presses Tab; nothing else is pressed, so end the text with `\n` to submit it. | `text` |
+| `click` | Glides the pointer to a point — or to a `target`, an element found by its text when the step runs — and clicks there. `count` 2 double-clicks and 3 triple-clicks, which selects a line or paragraph in most apps. Modifiers are held during the click, so `["cmd"]` makes a cmd-click; a modifier click needs the recorded window frontmost. | `x`, `y` or `target`, `button` (`left`, `right`, `middle`), `count` (1–3), `modifiers`, `durationMs` |
+| `drag` | Glides to the start point, presses the button, holds, moves to the end point with easing and releases — to move or reorder items, resize a pane, draw, or select a range. Its speed follows the distance unless `durationMs` says otherwise. Each end can be a point or an element (`from`, `to`), and both must be inside the window, and the button is always released, even when you take over. A drag with modifiers needs the recorded window frontmost. | `fromX`, `fromY` or `from`, `toX`, `toY` or `to`, `button`, `modifiers`, `durationMs` |
+| `move_pointer` | Glides the pointer to a point or element without clicking, for hovering. | `x`, `y` or `target`, `durationMs` |
+| `scroll` | Scrolls whatever is under a point, in pixels: positive `deltaY` scrolls down, positive `deltaX` scrolls right. Modifiers are held while it scrolls and need the recorded window frontmost; shift-scroll scrolls sideways in many apps. | `x`, `y` or `target`, `deltaY`, `deltaX`, `modifiers` |
+| `type_text` | Types text into the focused field, a character at a time at a natural pace. Any text works — other languages, emoji, symbols — whatever your keyboard layout. A newline (`\n` or `\r\n`) presses Return and a tab (`\t`) presses Tab; nothing else is pressed, so end the text with `\n` to submit it. With `into`, it first clicks that field. | `text`, `into` |
 | `press_key` | Presses one key or shortcut, optionally several times in a row, about 35 ms apart. See [Keys and modifiers](#keys-and-modifiers). | `key`, `modifiers`, `repeat` (1–100) |
-| `perform` | Runs a list of steps — `move`, `click`, `drag`, `scroll`, `type`, `key` and `wait` — back to back with exact timing. Up to 200 steps, waits of up to 30 seconds, and 10 minutes per call. An optional `title` names the scene and becomes an on-screen caption. | `steps`, `title` (optional) |
+| `wait_for` | Waits until an element appears (`text`, `role`), disappears (`gone`), or the screen stops changing (`settled`). Element waits fail after `timeoutMs` (10 seconds by default); `settled` carries on. | `text`, `role`, `gone`, `settled`, `timeoutMs` |
+| `perform` | Runs a list of steps — `move`, `click`, `drag`, `scroll`, `type`, `key`, `wait` and `waitFor` — back to back with exact timing. Targets let one call cross several pages. Left without durations, Recordly glides at a natural speed and, after a click or Enter, waits for the screen to settle and holds the result for reading; `pace` makes that brisk, normal or relaxed. `dryRun` checks the current page's targets without acting and reports each step, numbered from 1 like `Step n`, and `then: "elements"` returns the visible controls afterwards. Up to 200 steps, waits of up to 30 seconds, and 10 minutes per call. An optional `title` names the scene and becomes an on-screen caption. A failed step's message starts with `Step n`. | `steps`, `title`, `pace`, `dryRun`, `then` (all but `steps` optional) |
+
+**Targets are found when the step runs.** A target is `{ "text": …, "role": …, "index": … }`: part of the element's label or text in any case, optionally its kind (`button`, `link`, `textfield`, `checkbox`, `tab`, `menuitem` and so on) and, when several match, which one counting from 0 top to bottom. Recordly waits up to 5 seconds for it to appear, scrolls it into view if it is hidden below or above, and refuses with the candidates when it is ambiguous. Because the element is looked up at that moment, one `perform` can click a link, land on the next page and carry on there.
 
 **Coordinates are window-relative points.** `0, 0` is the top-left corner of the selected window, whatever desktop or display it is on, and a point is the unit macOS uses for window sizes, not a screen pixel. `find_elements` already answers in points; for a spot picked off a screenshot, multiply its image pixel position by `scale`. Every target, including both ends of a drag, must fall inside the selected window, which Recordly re-measures before each step, so the pointer cannot wander onto anything else.
 
@@ -135,11 +139,11 @@ To enter words, use `type_text` rather than one `press_key` per character.
 With both switches on, an agent can produce a finished demo of any website or desktop app with no browser automation tool of its own. Ask for it in plain words, for example *"Record a demo of signing up at https://example.com and changing the profile photo, and save it to ~/Movies"*. The agent then works through these steps:
 
 1. **`open_url`** with the page — or, for a desktop app, **`list_sources`** and **`select_source`**. A page opens in your default browser, already signed in, and its window becomes the selected source.
-2. **`screenshot`** and **`find_elements`** to learn the screen and plan every target. Nothing is being recorded yet, so this can take as long as it needs.
+2. **`screenshot`** and **`find_elements`** to learn the screen and plan every target, then `perform` with `dryRun` to check the first scene's targets. Nothing is being recorded yet, so this can take as long as it needs.
 3. **`move_pointer`** to where the first scene begins, then **`start_recording`**, once the plan is ready.
-4. **`perform`**, once per scene: the steps for that scene, with waits so a viewer can follow. Between scenes the agent takes another `screenshot` to check the result and find the next targets.
+4. **`perform`**, once per scene or once for a whole flow, aimed at targets. Recordly paces the motion and holds each result for reading. Between calls the agent takes another `screenshot` when it needs to check the result.
 5. **`stop_recording`**. The editor opens with the agent's thinking time already cut and zooms on its clicks (see [Automatic edits](#automatic-edits-for-agent-recordings)).
-6. **`export_video`** with the destination and format you asked for.
+6. **`review_recording`** to check the contact sheet and summary, then **`export_video`** with the destination and format you asked for.
 
 Keep your hands off the mouse and keyboard while it runs: touching either stops the agent (see [Mouse and keyboard control](#mouse-and-keyboard-control)). If you do take over, the agent asks you before carrying on from a fresh screenshot.
 
@@ -154,7 +158,7 @@ Recordly also offers an MCP prompt, `record_demo`, that hands the agent this pla
 | `app` | No | The desktop app or window to record, when it isn't a web page |
 | `output_path` | No | Where to save the video: an absolute path ending in `.mp4` or `.gif` |
 
-On macOS the plan has the agent drive the window itself. On Windows and Linux it is a recording-only plan: the agent selects the source and records while you perform the demo, and on Wayland it asks you to confirm the share dialog.
+Where driving the window is available, the plan has the agent drive it itself. On Wayland it is a recording-only plan: the agent selects the source and records while you perform the demo, and asks you to confirm the share dialog.
 
 ## Writing a good demo
 
@@ -163,11 +167,11 @@ These habits make a clean video of any app or site, whether you ask in plain wor
 - **Tell one story.** One goal per video, split into a few scenes that each show one thing. Say in the request what the viewer should come away knowing.
 - **Prepare the window.** Make it landscape — at least 1.2 times as wide as tall — so automatic zooms work, and keep it uncovered. Sign in, load any sample data, and close what you don't want seen before the agent starts.
 - **Plan before recording.** The agent looks with `screenshot` and `find_elements` first, while nothing is recorded, and avoids steps with side effects — submitting, deleting — until the take.
-- **Aim from exact positions.** `find_elements` gives each control's exact frame. For a control it does not list, the agent screenshots a small region around it (about 300 × 200 points), which comes back at the display's full resolution, instead of guessing from the whole-window image.
+- **Aim by text.** Targets name the element to click, so the click lands on its centre wherever the page puts it. For a control with no label, the agent screenshots a small region around it (about 300 × 200 points), which comes back at the display's full resolution, instead of guessing from the whole-window image.
 - **Start with the cursor in place.** The agent moves the pointer to where the first scene begins before `start_recording`, so the video does not open with the cursor somewhere else.
-- **One `perform` per scene, with room to breathe.** The agent glides to each target in 0.6 to 1 second and waits 1.5 to 2.5 seconds after a click or anything that loads; those waits stay in the video as reading time. Recordly rests the pointer on the target briefly before pressing, so the drawn cursor is on it when the click lands.
+- **Leave the timing to Recordly.** Glides follow the distance, each click or Enter waits for the screen to settle and then holds the result for reading, and the pointer rests on the target briefly before pressing so the drawn cursor is on it when the click lands. A `wait` or `waitFor` straight after a click replaces that hold, so the agent adds a `wait` only for longer reading time and a `waitFor` only for slow content.
 - **Captions only when you want them.** Ask for captions or a step-by-step tutorial and the agent gives each scene a `title`, shown at the bottom of the video as the scene starts.
-- **Look again after every change.** Navigation, dialogs and scrolling move everything, so coordinates from an earlier screenshot are stale. The agent takes a new screenshot between scenes and checks that the last one did what it should.
+- **Check the result before exporting.** `review_recording` shows the edited video as a contact sheet, so the agent can spot an error page or a covered window and offer to record that part again.
 - **Words with `type_text`, shortcuts with `press_key`.** Typed text appears at a natural pace in any language; shortcuts read as instant actions.
 - **Recover, don't push on.** If a step fails, the steps before it have already happened; the agent looks at the screen and continues from there, or uses `cancel_recording` and starts the take again.
 
@@ -289,46 +293,46 @@ Treat the token like a password. If you paste it somewhere public, press **Regen
 
 ### Mouse and keyboard control
 
-Driving your mouse and keyboard is far more powerful than recording, so it has its own switch and its own limits. Today it exists only on macOS; on Windows and Linux it is planned, and the sections below say what is built and what is not.
+Driving your mouse and keyboard is far more powerful than recording, so it has its own switch and its own limits. It works on macOS, Windows and Linux with X11; the sections below describe each platform.
 
-#### macOS: available now
-
-[Platform support](#platform-support): driving the window, its switch and every control tool are available on macOS today.
+#### Every platform
 
 - **Let agents use the mouse and keyboard** is off by default and stored with the connection settings. While it is off, `open_url` and every input tool refuse; `screenshot` and `find_elements` still work.
-- Recordly needs two macOS permissions: **Screen Recording**, to record and to take screenshots, and **Accessibility**, to post input and read controls for `find_elements`. macOS grants both to the app, not to the agent, and when one is missing the tools say so instead of failing silently.
-- Input goes only into the selected window. Pointer targets must fall inside it, re-measured before every step, and typing and key presses go to it only while its app is frontmost — never to Recordly's own editor or to whatever happened to be in front. The window must also stay uncovered, because the recording is the display cropped to the window.
+- Input goes only into the selected window. Pointer targets must fall inside it, re-measured before every step, and typing and key presses go to it only while its app is frontmost — never to Recordly's own editor or to whatever happened to be in front.
 - You can always take back control. Moving the mouse, clicking, scrolling or pressing any key yourself stops the running action or `perform` at once, and pressing **Esc** does the same. A pointer drift of a few points, such as a hand resting on the trackpad, does not count, and neither do two fingers resting on it without scrolling. The agent is told *stopped: the user took over*, along with what Recordly noticed, and is instructed to ask you before continuing.
 - Clicks are real posted events, not simulated inside a page, so the recording shows the cursor moving and the editor adds automatic zooms where the agent clicked.
 - `open_url` accepts only `http` and `https` addresses.
 - `perform` is capped at 200 steps, 30 seconds per wait and 10 minutes per call; a key may repeat at most 100 times.
+
+#### macOS
+
+- Recordly needs two macOS permissions: **Screen Recording**, to record and to take screenshots, and **Accessibility**, to post input and read controls for `find_elements`. macOS grants both to the app, not to the agent, and when one is missing the tools say so instead of failing silently.
+- The window must stay uncovered, because the recording is the display cropped to the window.
 - In a development build (`npm run dev`) macOS checks the Accessibility permission of the terminal app that started Recordly, not Recordly itself, so input fails there even when Recordly is allowed. Use the installed app to test agent control.
 
-#### Windows: not available yet (planned)
+#### Windows
 
-[Platform support](#platform-support): on Windows, recording works today and driving the window does not.
+[Platform support](#platform-support): driving the window works on Windows with the same tools and the same switch.
 
-Today the control tools aren't offered and the **Let agents use the mouse and keyboard** switch is hidden. Recording, export and every recording tool work.
+- A native helper posts input with `SendInput` and tags every event, so Recordly can tell its own input from yours. Text is typed as Unicode characters, so any language and emoji work whatever the keyboard layout; single-character keys follow the layout of the window in front.
+- `find_elements` and targets read controls through UI Automation. Roles come back as UI Automation names such as `Button`, `Edit` and `Heading`; the role names used on macOS are accepted too. Browsers built on Chromium expose their page to UI Automation once Recordly asks for it, which the first lookup in a window does. Text inside rich-edit documents, such as Notepad's page, is not searchable.
+- The helper works with the foreground rules to raise the selected window, restoring it if it is minimized.
+- Low-level mouse and keyboard hooks detect when you take over, with the same tolerance as on macOS.
+- No special permission is needed. Windows blocks input from a normal process into windows that run as administrator, so the tools refuse an elevated window with a clear message unless Recordly itself runs elevated.
+- `cmd` is the Windows key here: shortcuts use `ctrl`, for example `{"key":"c","modifiers":["ctrl"]}`.
+- The recording captures the window itself, but clicks land wherever the window is on screen, so keep it in front and uncovered while the agent acts.
 
-The plan, not yet built:
+#### Linux
 
-- A native helper posts mouse and keyboard input with `SendInput`, typing text as Unicode characters through `KEYEVENTF_UNICODE`, so it is independent of the keyboard layout.
-- `find_elements` reads controls through UI Automation.
-- The helper handles foreground rules so it can raise the selected window before acting.
-- Low-level mouse and keyboard hooks detect when you take over, as on macOS.
+[Platform support](#platform-support): on Linux, driving the window works on X11. On Wayland it is refused with a clear message, and recording works as described above.
 
-No special permission will be needed. One limitation will apply: Windows blocks input from a normal process into windows that run as administrator, so a Recordly that is not itself elevated will not be able to drive an elevated window.
-
-#### Linux: not available yet (planned)
-
-[Platform support](#platform-support): on Linux, recording works today and driving the window does not.
-
-Today the control tools aren't offered and the switch is hidden. Recording works: unattended on X11, and on Wayland after a person confirms the system share dialog, as described above.
-
-The plan, not yet built:
-
-- **X11 first.** A helper will post input through XTest, read controls for `find_elements` through AT-SPI, and detect takeover through XInput2.
-- **Wayland later.** Wayland blocks synthetic input by design; it needs the RemoteDesktop portal, which asks the user for permission in a dialog every session. Until that is supported, the control tools will refuse on Wayland with a clear message.
+- A native helper posts input through XTest and detects takeover through XInput2. XTest events can't carry a tag, so the helper keeps a short record of what it just posted and treats any other input as yours, with the same tolerance as on macOS.
+- `find_elements` and targets read controls through AT-SPI, the Linux accessibility bus, which most desktops run. Chromium-based browsers and Electron apps join it only when started with `ACCESSIBILITY_ENABLED=1`, for example `ACCESSIBILITY_ENABLED=1 google-chrome`; otherwise the agent aims with region screenshots instead.
+- The whole screen is recorded. `open_url`, or `select_source` with a window's `id`, picks the window the agent acts on; the recording stays on the screen. With no window picked, the control tools refuse rather than type into whatever is in front.
+- A window manager that follows the EWMH standard raises the selected window; GNOME, KDE, Xfce, Cinnamon and most others do.
+- No special permission is needed.
+- `cmd` is the Super key here: shortcuts use `ctrl`, for example `{"key":"c","modifiers":["ctrl"]}`.
+- **Wayland later.** Wayland blocks synthetic input by design; it needs the RemoteDesktop portal, which asks the user for permission in a dialog every session. Until that is supported, **Let agents use the mouse and keyboard** is turned off there with the reason shown, and the control tools aren't offered.
 
 ## Troubleshooting
 
@@ -346,7 +350,9 @@ The plan, not yet built:
 
 **`start_recording` waits on Linux.** On Wayland, the system share dialog has to be confirmed by a person; the agent asks you to, and the start gives up after 120 seconds. On X11, the **Entire screen** entry records with no prompt.
 
-**The agent has no `open_url`, `screenshot` or input tools.** On Windows and Linux they aren't offered yet (see [Mouse and keyboard control](#mouse-and-keyboard-control)); the agent can still record while you perform the demo.
+**The agent has no `open_url`, `screenshot` or input tools.** They aren't offered on Wayland, or while the Recordly build lacks its mouse and keyboard helper for this platform (see [Mouse and keyboard control](#mouse-and-keyboard-control)); the agent can still record while you perform the demo. On Linux, check that the session is X11.
+
+**`find_elements` finds nothing in a browser on Linux.** Chromium-based browsers and Electron apps join the accessibility bus only when started with `ACCESSIBILITY_ENABLED=1`. Quit the browser and start it that way, or let the agent aim with region screenshots.
 
 **"The window is on another desktop or minimized."** On macOS, capture can only see windows on the current desktop. Un-minimize the window, or have the agent call `select_source` again, which switches to the window's desktop. If the same app has two windows, select by `id` and use `windowTitle` and `pid` from `list_sources` to pick the right one.
 
