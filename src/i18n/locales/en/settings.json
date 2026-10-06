@@ -19,7 +19,10 @@
 		"tokenHint": "Keep the token private — anyone with it can control recording.",
 		"saveFailed": "Failed to change AI agent control.",
 		"errorPortInUse": "Port {{port}} is already in use. Close the other app using it, then turn this off and on again.",
-		"errorStartFailed": "Couldn't start the AI agent connection. Turn it off and on again."
+		"errorPortUnavailable": "Port {{port}} can't be used on this computer — the system has reserved it. Free the port or restart the computer, then turn this off and on again.",
+		"errorStartFailed": "Couldn't start the AI agent connection. Turn it off and on again.",
+		"control": "Let agents use the mouse and keyboard",
+		"controlDescription": "Lets the agent open web pages, move the pointer, click and type in the window it records. Move the mouse or press Esc at any time to take back control."
 	},
 	"zoom": {
 		"level": "Zoom Level",

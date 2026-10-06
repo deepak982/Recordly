@@ -273,6 +273,9 @@
 		"tokenHint": "Mantieni il token privato: chiunque lo possieda può controllare la registrazione.",
 		"saveFailed": "Impossibile modificare il controllo tramite agenti IA.",
 		"errorPortInUse": "La porta {{port}} è già in uso. Chiudi l'altra app che la usa, poi disattiva e riattiva questa opzione.",
-		"errorStartFailed": "Impossibile avviare la connessione per gli agenti IA. Disattivala e riattivala."
+		"errorPortUnavailable": "La porta {{port}} non può essere usata su questo computer: il sistema l'ha riservata. Libera la porta o riavvia il computer, poi disattiva e riattiva questa opzione.",
+		"errorStartFailed": "Impossibile avviare la connessione per gli agenti IA. Disattivala e riattivala.",
+		"control": "Consenti agli agenti di usare mouse e tastiera",
+		"controlDescription": "Consente all'agente di aprire pagine web, spostare il puntatore, fare clic e digitare nella finestra che registra. Muovi il mouse o premi Esc in qualsiasi momento per riprendere il controllo."
 	}
 }

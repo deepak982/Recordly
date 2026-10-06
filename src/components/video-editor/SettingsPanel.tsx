@@ -1091,12 +1091,54 @@ export function SettingsPanel({
 		};
 	}, [advanced]);
 
+	const mcpServerStarting = Boolean(
+		mcpServer?.enabled && !mcpServer.running && !mcpServer.error && !savingMcpServer,
+	);
+
+	useEffect(() => {
+		if (!advanced || !mcpServerStarting) return;
+		let cancelled = false;
+		let attempts = 0;
+		const timer = window.setInterval(() => {
+			attempts += 1;
+			if (attempts >= 10) window.clearInterval(timer);
+			void window.electronAPI
+				.getMcpServerState()
+				.then((state) => {
+					if (!cancelled) setMcpServer(state);
+				})
+				.catch((error) => {
+					console.error("Failed to load MCP server state:", error);
+				});
+		}, 1000);
+		return () => {
+			cancelled = true;
+			window.clearInterval(timer);
+		};
+	}, [advanced, mcpServerStarting]);
+
 	const updateMcpServerEnabled = async (enabled: boolean) => {
 		const previousState = mcpServer;
 		setMcpServer((state) => (state ? { ...state, enabled } : state));
 		setSavingMcpServer(true);
 		try {
 			setMcpServer(await window.electronAPI.setMcpServerEnabled(enabled));
+		} catch (error) {
+			setMcpServer(previousState);
+			toast.error(
+				`${tSettings("mcp.saveFailed", "Failed to change AI agent control.")} ${String(error)}`,
+			);
+		} finally {
+			setSavingMcpServer(false);
+		}
+	};
+
+	const updateMcpControlEnabled = async (controlEnabled: boolean) => {
+		const previousState = mcpServer;
+		setMcpServer((state) => (state ? { ...state, controlEnabled } : state));
+		setSavingMcpServer(true);
+		try {
+			setMcpServer(await window.electronAPI.setMcpControlEnabled(controlEnabled));
 		} catch (error) {
 			setMcpServer(previousState);
 			toast.error(
@@ -2430,15 +2472,45 @@ export function SettingsPanel({
 													"Port {{port}} is already in use. Close the other app using it, then turn this off and on again.",
 													{ port: new URL(mcpServer.url).port },
 												)
-											: tSettings(
-													"mcp.errorStartFailed",
-													"Couldn't start the AI agent connection. Turn it off and on again.",
-												)}
+											: mcpServer.error === "port-unavailable"
+												? tSettings(
+														"mcp.errorPortUnavailable",
+														"Port {{port}} can't be used on this computer — the system has reserved it. Free the port or restart the computer, then turn this off and on again.",
+														{ port: new URL(mcpServer.url).port },
+													)
+												: tSettings(
+														"mcp.errorStartFailed",
+														"Couldn't start the AI agent connection. Turn it off and on again.",
+													)}
 									</p>
 								)
 							)}
 							{mcpServer?.enabled && (
 								<>
+									{mcpServer.controlSupported && (
+										<SettingsRow
+											title={tSettings(
+												"mcp.control",
+												"Let agents use the mouse and keyboard",
+											)}
+											description={tSettings(
+												"mcp.controlDescription",
+												"Lets the agent open web pages, move the pointer, click and type in the window it records. Move the mouse or press Esc at any time to take back control.",
+											)}
+										>
+											<Switch
+												checked={mcpServer.controlEnabled}
+												disabled={savingMcpServer}
+												onCheckedChange={(enabled) =>
+													void updateMcpControlEnabled(enabled)
+												}
+												aria-label={tSettings(
+													"mcp.control",
+													"Let agents use the mouse and keyboard",
+												)}
+											/>
+										</SettingsRow>
+									)}
 									<div className="flex flex-wrap gap-2">
 										<Button
 											variant="secondary"

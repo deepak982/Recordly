@@ -273,6 +273,9 @@
 		"tokenHint": "請妥善保管權杖——任何擁有它的人都能控制錄製。",
 		"saveFailed": "無法變更 AI 代理控制。",
 		"errorPortInUse": "連接埠 {{port}} 已被使用。請關閉正在使用該連接埠的其他應用程式，然後關閉並重新開啟此選項。",
-		"errorStartFailed": "無法啟動 AI 代理連線。請關閉後重新開啟。"
+		"errorPortUnavailable": "此電腦無法使用連接埠 {{port}}——系統已保留該連接埠。請釋放該連接埠或重新啟動電腦，然後關閉並重新開啟此選項。",
+		"errorStartFailed": "無法啟動 AI 代理連線。請關閉後重新開啟。",
+		"control": "允許代理使用滑鼠和鍵盤",
+		"controlDescription": "允許代理開啟網頁、移動指標，並在其錄製的視窗中點按和輸入。隨時移動滑鼠或按下 Esc 鍵即可收回控制權。"
 	}
 }

@@ -273,6 +273,9 @@
 		"tokenHint": "Houd het token privé — iedereen die het heeft, kan de opname besturen.",
 		"saveFailed": "Kan de besturing door AI-agents niet wijzigen.",
 		"errorPortInUse": "Poort {{port}} is al in gebruik. Sluit de andere app die deze gebruikt en zet deze optie daarna uit en weer aan.",
-		"errorStartFailed": "Kan de verbinding voor AI-agents niet starten. Zet deze uit en weer aan."
+		"errorPortUnavailable": "Poort {{port}} kan op deze computer niet worden gebruikt: het systeem heeft hem gereserveerd. Maak de poort vrij of start de computer opnieuw op en zet dit daarna uit en weer aan.",
+		"errorStartFailed": "Kan de verbinding voor AI-agents niet starten. Zet deze uit en weer aan.",
+		"control": "Agents de muis en het toetsenbord laten gebruiken",
+		"controlDescription": "Hiermee kan de agent webpagina's openen, de aanwijzer bewegen en klikken en typen in het venster dat wordt opgenomen. Beweeg de muis of druk op Esc om op elk moment de controle terug te nemen."
 	}
 }

@@ -273,6 +273,9 @@
 		"tokenHint": "Gardez le jeton secret : toute personne qui le possède peut contrôler l'enregistrement.",
 		"saveFailed": "Impossible de modifier le contrôle par agents IA.",
 		"errorPortInUse": "Le port {{port}} est déjà utilisé. Fermez l'autre application qui l'utilise, puis désactivez et réactivez cette option.",
-		"errorStartFailed": "Impossible de démarrer la connexion pour les agents IA. Désactivez-la puis réactivez-la."
+		"errorPortUnavailable": "Le port {{port}} ne peut pas être utilisé sur cet ordinateur : le système l'a réservé. Libérez le port ou redémarrez l'ordinateur, puis désactivez et réactivez cette option.",
+		"errorStartFailed": "Impossible de démarrer la connexion pour les agents IA. Désactivez-la puis réactivez-la.",
+		"control": "Autoriser les agents à utiliser la souris et le clavier",
+		"controlDescription": "Permet à l'agent d'ouvrir des pages web, de déplacer le pointeur, de cliquer et de saisir du texte dans la fenêtre qu'il enregistre. Bougez la souris ou appuyez sur Échap à tout moment pour reprendre le contrôle."
 	}
 }

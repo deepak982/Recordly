@@ -273,6 +273,9 @@
 		"tokenHint": "Mantenha o token em sigilo — qualquer pessoa com ele pode controlar a gravação.",
 		"saveFailed": "Não foi possível alterar o controle por agentes de IA.",
 		"errorPortInUse": "A porta {{port}} já está em uso. Feche o outro app que a está usando e depois desative e ative esta opção novamente.",
-		"errorStartFailed": "Não foi possível iniciar a conexão para agentes de IA. Desative e ative novamente."
+		"errorPortUnavailable": "A porta {{port}} não pode ser usada neste computador: o sistema a reservou. Libere a porta ou reinicie o computador e depois desative e ative esta opção novamente.",
+		"errorStartFailed": "Não foi possível iniciar a conexão para agentes de IA. Desative e ative novamente.",
+		"control": "Permitir que agentes usem o mouse e o teclado",
+		"controlDescription": "Permite que o agente abra páginas da web, mova o ponteiro, clique e digite na janela que está gravando. Mova o mouse ou pressione Esc a qualquer momento para retomar o controle."
 	}
 }

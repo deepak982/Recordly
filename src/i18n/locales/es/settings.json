@@ -273,6 +273,9 @@
 		"tokenHint": "Mantén el token en privado: cualquiera que lo tenga puede controlar la grabación.",
 		"saveFailed": "No se pudo cambiar el control por agentes de IA.",
 		"errorPortInUse": "El puerto {{port}} ya está en uso. Cierra la otra aplicación que lo usa y luego desactiva y vuelve a activar esta opción.",
-		"errorStartFailed": "No se pudo iniciar la conexión para agentes de IA. Desactívala y vuelve a activarla."
+		"errorPortUnavailable": "No se puede usar el puerto {{port}} en este equipo: el sistema lo ha reservado. Libera el puerto o reinicia el equipo y luego desactiva y vuelve a activar esta opción.",
+		"errorStartFailed": "No se pudo iniciar la conexión para agentes de IA. Desactívala y vuelve a activarla.",
+		"control": "Permitir que los agentes usen el ratón y el teclado",
+		"controlDescription": "Permite al agente abrir páginas web, mover el puntero, hacer clic y escribir en la ventana que graba. Mueve el ratón o pulsa Esc en cualquier momento para recuperar el control."
 	}
 }
