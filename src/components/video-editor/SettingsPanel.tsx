@@ -1015,6 +1015,8 @@ export function SettingsPanel({
 	);
 	const [experimentalUpdatesEnabled, setExperimentalUpdatesEnabled] = useState(false);
 	const [savingExperimentalUpdates, setSavingExperimentalUpdates] = useState(false);
+	const [mcpServer, setMcpServer] = useState<McpServerState | null>(null);
+	const [savingMcpServer, setSavingMcpServer] = useState(false);
 	const { openConfig: openShortcutsConfig } = useShortcuts();
 	const [internalActiveEffectSection] = useState<EditorEffectSection>("scene");
 	const activeEffectSection = activeEffectSectionProp ?? internalActiveEffectSection;
@@ -1070,6 +1072,69 @@ export function SettingsPanel({
 			);
 		} finally {
 			setSavingExperimentalUpdates(false);
+		}
+	};
+
+	useEffect(() => {
+		if (!advanced) return;
+		let cancelled = false;
+		void window.electronAPI
+			.getMcpServerState()
+			.then((state) => {
+				if (!cancelled) setMcpServer(state);
+			})
+			.catch((error) => {
+				console.error("Failed to load MCP server state:", error);
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [advanced]);
+
+	const updateMcpServerEnabled = async (enabled: boolean) => {
+		const previousState = mcpServer;
+		setMcpServer((state) => (state ? { ...state, enabled } : state));
+		setSavingMcpServer(true);
+		try {
+			setMcpServer(await window.electronAPI.setMcpServerEnabled(enabled));
+		} catch (error) {
+			setMcpServer(previousState);
+			toast.error(
+				`${tSettings("mcp.saveFailed", "Failed to change AI agent control.")} ${String(error)}`,
+			);
+		} finally {
+			setSavingMcpServer(false);
+		}
+	};
+
+	const regenerateMcpServerToken = async () => {
+		setSavingMcpServer(true);
+		try {
+			setMcpServer(await window.electronAPI.regenerateMcpServerToken());
+			toast.success(
+				tSettings(
+					"mcp.tokenRegenerated",
+					"New token created. Copy the setup command again and re-add Recordly in your AI tools.",
+				),
+			);
+		} catch (error) {
+			toast.error(
+				`${tSettings("mcp.regenerateFailed", "Failed to regenerate the token.")} ${String(error)}`,
+			);
+		} finally {
+			setSavingMcpServer(false);
+		}
+	};
+
+	const copyMcpSetupCommand = async () => {
+		if (!mcpServer) return;
+		try {
+			await navigator.clipboard.writeText(
+				`claude mcp add --transport http recordly ${mcpServer.url} --header "Authorization: Bearer ${mcpServer.token}"`,
+			);
+			toast.success(tSettings("mcp.setupCopied", "Setup command copied"));
+		} catch {
+			toast.error(tSettings("mcp.copyFailed", "Couldn't copy the setup command."));
 		}
 	};
 
@@ -2326,6 +2391,83 @@ export function SettingsPanel({
 									)}
 								/>
 							</SettingsRow>
+						</section>
+					)}
+					{advanced && (
+						<section className="flex flex-col gap-4">
+							<SectionLabel>
+								{tSettings("mcp.title", "AI agent control (MCP)")}
+							</SectionLabel>
+							<SettingsRow
+								title={tSettings("mcp.enable", "Let AI agents control Recordly")}
+								description={tSettings(
+									"mcp.enableDescription",
+									"Lets local AI tools such as Claude Code start, stop and export recordings through a private connection on this computer.",
+								)}
+							>
+								<Switch
+									checked={mcpServer?.enabled ?? false}
+									disabled={savingMcpServer}
+									onCheckedChange={(enabled) =>
+										void updateMcpServerEnabled(enabled)
+									}
+									aria-label={tSettings(
+										"mcp.enable",
+										"Let AI agents control Recordly",
+									)}
+								/>
+							</SettingsRow>
+							{mcpServer?.running ? (
+								<p className="text-xs text-muted-foreground">
+									{tSettings("mcp.runningAt", "Running at {{url}}", {
+										url: mcpServer.url,
+									})}
+								</p>
+							) : (
+								mcpServer?.enabled &&
+								mcpServer.error && (
+									<p role="alert" className="text-xs text-danger">
+										{mcpServer.error === "port-in-use"
+											? tSettings(
+													"mcp.errorPortInUse",
+													"Port {{port}} is already in use. Close the other app using it, then turn this off and on again.",
+													{ port: new URL(mcpServer.url).port },
+												)
+											: tSettings(
+													"mcp.errorStartFailed",
+													"Couldn't start the AI agent connection. Turn it off and on again.",
+												)}
+									</p>
+								)
+							)}
+							{mcpServer?.enabled && (
+								<>
+									<div className="flex flex-wrap gap-2">
+										<Button
+											variant="secondary"
+											size="sm"
+											disabled={savingMcpServer}
+											onClick={() => void copyMcpSetupCommand()}
+										>
+											{tSettings("mcp.copySetup", "Copy setup command")}
+										</Button>
+										<Button
+											variant="secondary"
+											size="sm"
+											disabled={savingMcpServer}
+											onClick={() => void regenerateMcpServerToken()}
+										>
+											{tSettings("mcp.regenerateToken", "Regenerate token")}
+										</Button>
+									</div>
+									<p className="text-xs text-muted-foreground">
+										{tSettings(
+											"mcp.tokenHint",
+											"Keep the token private — anyone with it can control recording.",
+										)}
+									</p>
+								</>
+							)}
 						</section>
 					)}
 				</SettingsCategory>

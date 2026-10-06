@@ -5,6 +5,22 @@
 		"experimentalDescription": "You've opted into experimental updates so you have the choice to test the latest update of Recordly before it's widely available.",
 		"saveFailed": "Failed to change the update channel."
 	},
+	"mcp": {
+		"title": "AI agent control (MCP)",
+		"enable": "Let AI agents control Recordly",
+		"enableDescription": "Lets local AI tools such as Claude Code start, stop and export recordings through a private connection on this computer.",
+		"runningAt": "Running at {{url}}",
+		"copySetup": "Copy setup command",
+		"setupCopied": "Setup command copied",
+		"copyFailed": "Couldn't copy the setup command.",
+		"regenerateToken": "Regenerate token",
+		"tokenRegenerated": "New token created. Copy the setup command again and re-add Recordly in your AI tools.",
+		"regenerateFailed": "Failed to regenerate the token.",
+		"tokenHint": "Keep the token private — anyone with it can control recording.",
+		"saveFailed": "Failed to change AI agent control.",
+		"errorPortInUse": "Port {{port}} is already in use. Close the other app using it, then turn this off and on again.",
+		"errorStartFailed": "Couldn't start the AI agent connection. Turn it off and on again."
+	},
 	"zoom": {
 		"level": "Zoom Level",
 		"selectRegion": "Select a zoom region to adjust",

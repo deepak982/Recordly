@@ -258,5 +258,21 @@
 		"title": "Mises à jour",
 		"experimental": "Mises à jour expérimentales",
 		"saveFailed": "Impossible de changer le canal de mise à jour."
+	},
+	"mcp": {
+		"title": "Contrôle par agents IA (MCP)",
+		"enable": "Autoriser les agents IA à contrôler Recordly",
+		"enableDescription": "Permet aux outils d'IA locaux comme Claude Code de démarrer, d'arrêter et d'exporter des enregistrements via une connexion privée sur cet ordinateur.",
+		"runningAt": "Actif sur {{url}}",
+		"copySetup": "Copier la commande de configuration",
+		"setupCopied": "Commande de configuration copiée",
+		"copyFailed": "Impossible de copier la commande de configuration.",
+		"regenerateToken": "Régénérer le jeton",
+		"tokenRegenerated": "Nouveau jeton créé. Copiez à nouveau la commande de configuration et ajoutez de nouveau Recordly dans vos outils d'IA.",
+		"regenerateFailed": "Impossible de régénérer le jeton.",
+		"tokenHint": "Gardez le jeton secret : toute personne qui le possède peut contrôler l'enregistrement.",
+		"saveFailed": "Impossible de modifier le contrôle par agents IA.",
+		"errorPortInUse": "Le port {{port}} est déjà utilisé. Fermez l'autre application qui l'utilise, puis désactivez et réactivez cette option.",
+		"errorStartFailed": "Impossible de démarrer la connexion pour les agents IA. Désactivez-la puis réactivez-la."
 	}
 }

@@ -258,5 +258,21 @@
 		"title": "更新",
 		"experimental": "實驗性更新",
 		"saveFailed": "無法變更更新頻道。"
+	},
+	"mcp": {
+		"title": "AI 代理控制 (MCP)",
+		"enable": "允許 AI 代理控制 Recordly",
+		"enableDescription": "允許 Claude Code 等本機 AI 工具透過這台電腦上的私人連線開始、停止及匯出錄製內容。",
+		"runningAt": "正在執行：{{url}}",
+		"copySetup": "複製設定指令",
+		"setupCopied": "已複製設定指令",
+		"copyFailed": "無法複製設定指令。",
+		"regenerateToken": "重新產生權杖",
+		"tokenRegenerated": "已建立新權杖。請重新複製設定指令，並在 AI 工具中重新加入 Recordly。",
+		"regenerateFailed": "無法重新產生權杖。",
+		"tokenHint": "請妥善保管權杖——任何擁有它的人都能控制錄製。",
+		"saveFailed": "無法變更 AI 代理控制。",
+		"errorPortInUse": "連接埠 {{port}} 已被使用。請關閉正在使用該連接埠的其他應用程式，然後關閉並重新開啟此選項。",
+		"errorStartFailed": "無法啟動 AI 代理連線。請關閉後重新開啟。"
 	}
 }

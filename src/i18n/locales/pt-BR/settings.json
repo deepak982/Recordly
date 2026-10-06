@@ -258,5 +258,21 @@
 		"title": "Atualizações",
 		"experimental": "Atualizações experimentais",
 		"saveFailed": "Falha ao alterar o canal de atualização."
+	},
+	"mcp": {
+		"title": "Controle por agentes de IA (MCP)",
+		"enable": "Permitir que agentes de IA controlem o Recordly",
+		"enableDescription": "Permite que ferramentas de IA locais, como o Claude Code, iniciem, parem e exportem gravações por uma conexão privada neste computador.",
+		"runningAt": "Em execução em {{url}}",
+		"copySetup": "Copiar comando de configuração",
+		"setupCopied": "Comando de configuração copiado",
+		"copyFailed": "Não foi possível copiar o comando de configuração.",
+		"regenerateToken": "Gerar novo token",
+		"tokenRegenerated": "Novo token criado. Copie o comando de configuração novamente e adicione o Recordly de novo nas suas ferramentas de IA.",
+		"regenerateFailed": "Não foi possível gerar um novo token.",
+		"tokenHint": "Mantenha o token em sigilo — qualquer pessoa com ele pode controlar a gravação.",
+		"saveFailed": "Não foi possível alterar o controle por agentes de IA.",
+		"errorPortInUse": "A porta {{port}} já está em uso. Feche o outro app que a está usando e depois desative e ative esta opção novamente.",
+		"errorStartFailed": "Não foi possível iniciar a conexão para agentes de IA. Desative e ative novamente."
 	}
 }

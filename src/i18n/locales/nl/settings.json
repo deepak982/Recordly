@@ -258,5 +258,21 @@
 		"title": "Updates",
 		"experimental": "Experimentele updates",
 		"saveFailed": "Kan het updatekanaal niet wijzigen."
+	},
+	"mcp": {
+		"title": "Besturing door AI-agents (MCP)",
+		"enable": "AI-agents Recordly laten besturen",
+		"enableDescription": "Laat lokale AI-tools zoals Claude Code opnames starten, stoppen en exporteren via een privéverbinding op deze computer.",
+		"runningAt": "Actief op {{url}}",
+		"copySetup": "Installatieopdracht kopiëren",
+		"setupCopied": "Installatieopdracht gekopieerd",
+		"copyFailed": "Kan de installatieopdracht niet kopiëren.",
+		"regenerateToken": "Token opnieuw genereren",
+		"tokenRegenerated": "Nieuw token aangemaakt. Kopieer de installatieopdracht opnieuw en voeg Recordly opnieuw toe in je AI-tools.",
+		"regenerateFailed": "Kan het token niet opnieuw genereren.",
+		"tokenHint": "Houd het token privé — iedereen die het heeft, kan de opname besturen.",
+		"saveFailed": "Kan de besturing door AI-agents niet wijzigen.",
+		"errorPortInUse": "Poort {{port}} is al in gebruik. Sluit de andere app die deze gebruikt en zet deze optie daarna uit en weer aan.",
+		"errorStartFailed": "Kan de verbinding voor AI-agents niet starten. Zet deze uit en weer aan."
 	}
 }
