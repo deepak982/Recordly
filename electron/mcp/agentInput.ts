@@ -1,22 +1,24 @@
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createInterface } from "node:readline";
-import { ensureAgentInputBinary } from "../ipc/paths/binaries";
+import { AGENT_INPUT_MISSING, ensureAgentInputBinary } from "../ipc/paths/binaries";
 import type { AgentCommand, AgentEvent, AgentResults } from "./agentProtocol";
 
 export const HELPER_STOPPED = "Recordly's input helper stopped.";
 
 export class HelperUnavailableError extends Error {
-	constructor() {
-		super("Recordly's input helper could not start.");
+	constructor(message = "Recordly's input helper could not start.") {
+		super(message);
 		this.name = "HelperUnavailableError";
 	}
 }
 const ACTION_MARGIN_MS = 5000;
+const STOP_GRACE_MS = 500;
 
 export type HelperProcess = {
 	stdin: {
 		write(chunk: string): unknown;
+		end(): unknown;
 		on(event: "error", listener: () => void): unknown;
 	} | null;
 	stdout: NodeJS.ReadableStream | null;
@@ -46,7 +48,8 @@ function timeoutFor(command: AgentCommand, fallbackMs: number) {
 export function createAgentInput(overrides: Partial<AgentInputDeps> = {}) {
 	const deps: AgentInputDeps = {
 		resolveBinary: ensureAgentInputBinary,
-		spawn: (binaryPath) => spawn(binaryPath, [], { stdio: ["pipe", "pipe", "ignore"] }),
+		spawn: (binaryPath) =>
+			spawn(binaryPath, [], { stdio: ["pipe", "pipe", "ignore"], windowsHide: true }),
 		timeoutMs: 15_000,
 		...overrides,
 	};
@@ -98,8 +101,11 @@ export function createAgentInput(overrides: Partial<AgentInputDeps> = {}) {
 		let proc: HelperProcess;
 		try {
 			proc = deps.spawn(await deps.resolveBinary());
-		} catch {
-			throw new HelperUnavailableError();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "";
+			throw new HelperUnavailableError(
+				message.startsWith(AGENT_INPUT_MISSING) ? message : undefined,
+			);
 		}
 		proc.on("exit", () => drop(proc));
 		proc.on("error", () => drop(proc));
@@ -136,7 +142,7 @@ export function createAgentInput(overrides: Partial<AgentInputDeps> = {}) {
 					new Error(`Recordly's input helper did not answer "${command.cmd}" in time.`),
 				);
 				drop(proc, new Error(HELPER_STOPPED));
-				proc.kill();
+				close(proc);
 			}, options.timeoutMs ?? timeoutFor(command, deps.timeoutMs));
 			pending.set(id, {
 				resolve: resolve as Pending["resolve"],
@@ -147,10 +153,17 @@ export function createAgentInput(overrides: Partial<AgentInputDeps> = {}) {
 		});
 	}
 
+	function close(proc: HelperProcess) {
+		const timer = setTimeout(() => proc.kill(), STOP_GRACE_MS);
+		timer.unref?.();
+		proc.on("exit", () => clearTimeout(timer));
+		proc.stdin?.end();
+	}
+
 	function kill(proc: HelperProcess) {
 		if (child !== proc) return;
 		drop(proc, new Error(HELPER_STOPPED));
-		proc.kill();
+		close(proc);
 	}
 
 	function stop() {

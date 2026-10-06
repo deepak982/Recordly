@@ -1,62 +1,96 @@
 import { app, shell } from "electron";
-import { findNativeMacWindow, getWindowBoundsFromNativeSource } from "../ipc/cursor/bounds";
+import { clamp } from "../ipc/cursor/telemetry";
 import { selectedSource } from "../ipc/state";
 import { type SelectedSource, WINDOW_OFF_SCREEN_MESSAGE, type WindowBounds } from "../ipc/types";
 import { getScreen, parseWindowId } from "../ipc/utils";
-import { type AgentActivityTarget, beginScene, beginSpan } from "./agentActivity";
+import {
+	type AgentActivityAction,
+	type AgentActivitySpanKind,
+	type AgentActivityTarget,
+	beginScene,
+	beginSpan,
+} from "./agentActivity";
 import { type AgentInput, agentInput } from "./agentInput";
+import { type AgentPlatform, agentPlatform, isActionableRole } from "./agentPlatform";
 import {
 	AGENT_KEY_ALIASES,
 	AGENT_KEY_NAMES,
 	AGENT_MODIFIER_ALIASES,
 	type AgentButton,
 	type AgentCommand,
+	type AgentElement,
 	type AgentEvent,
+	type AgentFrame,
 	type AgentModifier,
 	type AgentResults,
 	type AgentWindow,
 } from "./agentProtocol";
 import type { RemoteControl } from "./remoteControl";
-import { captureWindow, type WindowShot } from "./screenshot";
+import { captureWindow, type WindowShot, waitForStillWindow } from "./screenshot";
+
+export type AgentTarget = { text: string; role?: string; index?: number };
+type At = { x?: number; y?: number; target?: AgentTarget };
 
 export type AgentStep =
-	| { action: "move"; x: number; y: number; durationMs?: number }
-	| {
+	| ({ action: "move"; durationMs?: number } & At)
+	| ({
 			action: "click";
-			x: number;
-			y: number;
 			button?: AgentButton;
 			count?: 1 | 2 | 3;
 			modifiers?: string[];
 			durationMs?: number;
-	  }
+	  } & At)
 	| {
 			action: "drag";
-			fromX: number;
-			fromY: number;
-			toX: number;
-			toY: number;
+			fromX?: number;
+			fromY?: number;
+			from?: AgentTarget;
+			toX?: number;
+			toY?: number;
+			to?: AgentTarget;
 			button?: AgentButton;
 			modifiers?: string[];
 			durationMs?: number;
 	  }
-	| {
-			action: "scroll";
-			x: number;
-			y: number;
-			deltaY: number;
-			deltaX?: number;
-			modifiers?: string[];
-	  }
-	| { action: "type"; text: string }
+	| ({ action: "scroll"; deltaY: number; deltaX?: number; modifiers?: string[] } & At)
+	| { action: "type"; text: string; into?: AgentTarget }
 	| { action: "key"; key: string; modifiers?: string[]; repeat?: number }
-	| { action: "wait"; ms: number };
+	| { action: "wait"; ms: number }
+	| {
+			action: "waitFor";
+			text?: string;
+			role?: string;
+			gone?: boolean;
+			settled?: boolean;
+			timeoutMs?: number;
+	  };
+
+export type AgentPace = "brisk" | "normal" | "relaxed";
+export type PerformOptions = {
+	title?: string;
+	pace?: AgentPace;
+	dryRun?: boolean;
+	then?: "elements";
+};
+export type AgentElementView = AgentElement;
+export type AgentDryRunStep = {
+	index: number;
+	action: AgentStep["action"];
+	found: boolean;
+	label?: string;
+	x?: number;
+	y?: number;
+	candidates?: number;
+};
+export type PerformResult = {
+	performed: number;
+	durationMs: number;
+	elements?: AgentElementView[];
+	dryRun?: AgentDryRunStep[];
+};
 
 export const AGENT_LIMITS = { steps: 200, waitMs: 30_000, totalMs: 600_000 };
-const MOVE_MS = 700;
-const CLICK_MS = 600;
 const SCROLL_MS = 600;
-const DRAG_MS = 900;
 const KEY_REPEAT_MS = 35;
 const KEY_REPEAT_MAX = 100;
 const TYPE_CPS = 25;
@@ -64,6 +98,31 @@ const SETTLE_MS = 250;
 const OPEN_URL_WAIT_MS = 5000;
 const POLL_MS = 250;
 const FIND_LIMIT = 30;
+const GLIDE_BASE_MS = 350;
+const GLIDE_MS_PER_POINT = 0.45;
+const GLIDE_MIN_MS = 450;
+const GLIDE_MAX_MS = 1100;
+const AUTO_SETTLE_MS = 4000;
+const READ_HOLD_MS = 1200;
+const WAIT_FOR_MS = 10_000;
+const TARGET_WAIT_MS = 5000;
+const TARGET_FIND_LIMIT = 200;
+const TARGET_SCROLLS = 6;
+const TARGET_STALLS = 2;
+const AUTO_QUIET_MS = 700;
+const CENTRE_MARGIN = 0.15;
+const SCROLL_REACH = 2;
+const TARGET_TEXT_MAX = 200;
+const SCROLL_INSET = 24;
+const SCROLL_PAGE = 0.8;
+const LISTED = 5;
+
+type Pace = { glide: number; hold: number };
+const PACES = new Map<string, Pace>([
+	["brisk", { glide: 0.8, hold: 0.6 }],
+	["normal", { glide: 1, hold: 1 }],
+	["relaxed", { glide: 1.2, hold: 1.6 }],
+]);
 
 export const TAKEOVER_MESSAGE = "Stopped: the user took over the mouse or keyboard.";
 const TAKEOVER_CAUSES: Record<AgentEvent["kind"], string> = {
@@ -72,12 +131,20 @@ const TAKEOVER_CAUSES: Record<AgentEvent["kind"], string> = {
 	scroll: "the mouse or trackpad scrolled",
 	key: "a key was pressed",
 };
-const MAC_ONLY = "Mouse and keyboard control is available on macOS only for now.";
 const POST_EVENTS_MISSING =
 	"Recordly is not allowed to post mouse and keyboard input. Ask the user to enable Recordly in " +
 	"System Settings > Privacy & Security > Accessibility, then quit and reopen Recordly. When " +
 	"Recordly runs from `npm run dev`, macOS checks the terminal app's Accessibility permission " +
 	"instead: use the installed app, or grant Accessibility to that terminal.";
+const INPUT_UNAVAILABLE =
+	"Recordly cannot post mouse and keyboard input on this system. On Linux it needs an X11 session " +
+	"with the XTest extension.";
+const LINUX_ACCESSIBILITY_OFF =
+	"Recordly cannot read this window's controls. On Linux, Chromium-based browsers and Electron " +
+	"apps expose them only when started with ACCESSIBILITY_ENABLED=1 (e.g. ACCESSIBILITY_ENABLED=1 " +
+	"google-chrome): ask the user to restart the app that way, or aim with region screenshots " +
+	"instead of targets.";
+const OWN_WINDOW = "Recordly cannot control its own windows. Select another window.";
 const NO_WINDOW =
 	"Select a window first (open_url, or list_sources then select_source). Mouse and keyboard " +
 	"control works on windows, not whole screens.";
@@ -92,17 +159,31 @@ const KNOWN_BROWSERS = [
 	"com.vivaldi.Vivaldi",
 	"org.chromium.Chromium",
 ];
+const LIMIT_PASSED = "the perform passed its 10-minute limit. Split the demo into shorter scenes.";
 const BROWSER_NOT_FOUND =
 	"The page opened, but Recordly could not find the browser window. Call list_sources, then " +
 	"select_source.";
 
-type TargetWindow = { pid: number; windowId: number; frame: WindowBounds };
+type TargetWindow = {
+	pid: number;
+	windowId: number;
+	frame: WindowBounds;
+	recorded?: WindowBounds;
+};
 type Post = <C extends AgentCommand>(command: C) => Promise<AgentResults[C["cmd"]]>;
+type Run = {
+	start: TargetWindow;
+	post: Post;
+	pace: Pace;
+	aborted: Promise<never>;
+	signal: AbortSignal;
+	deadline: number;
+};
+type Probe = Omit<AgentDryRunStep, "index" | "action">;
 
 export type AgentControlDeps = {
 	input: Pick<AgentInput, "request" | "events">;
-	platform: NodeJS.Platform;
-	ownPid: number;
+	platform: AgentPlatform;
 	getSelectedSource: () => SelectedSource | null;
 	findWindow: (sourceId: string) => Promise<{ pid?: number; frame: WindowBounds | null } | null>;
 	capture: (frame: WindowBounds, region?: WindowBounds) => Promise<WindowShot>;
@@ -110,17 +191,15 @@ export type AgentControlDeps = {
 	getBrowserName: (url: string) => string;
 	getDisplays: () => WindowBounds[];
 	sleep: (ms: number) => Promise<void>;
+	waitForStill: typeof waitForStillWindow;
+	now: () => number;
 };
 
 const defaultDeps = (): AgentControlDeps => ({
 	input: agentInput,
-	platform: process.platform,
-	ownPid: process.pid,
+	platform: agentPlatform,
 	getSelectedSource: () => selectedSource,
-	findWindow: async (sourceId) => {
-		const entry = await findNativeMacWindow(sourceId, { maxAgeMs: 250 });
-		return entry && { pid: entry.pid, frame: getWindowBoundsFromNativeSource(entry) };
-	},
+	findWindow: (sourceId) => agentPlatform.findWindow(sourceId),
 	capture: captureWindow,
 	openExternal: (url) => shell.openExternal(url, { activate: true }),
 	getBrowserName: (url) => app.getApplicationNameForProtocol(url),
@@ -129,6 +208,8 @@ const defaultDeps = (): AgentControlDeps => ({
 			.getAllDisplays()
 			.map((display) => display.bounds),
 	sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+	waitForStill: waitForStillWindow,
+	now: Date.now,
 });
 
 const normalizeAppName = (name: string) =>
@@ -197,8 +278,82 @@ export function normalizeKey(key: string) {
 	);
 }
 
+type PointerStep = Extract<AgentStep, { action: "move" | "click" | "drag" | "scroll" }>;
+type Point = { x: number; y: number };
+type Spot = { x?: number; y?: number; target?: AgentTarget; names: [string, string, string] };
+
+function spotsOf(step: AgentStep): Spot[] {
+	switch (step.action) {
+		case "move":
+		case "click":
+		case "scroll":
+			return [{ x: step.x, y: step.y, target: step.target, names: ["x", "y", "target"] }];
+		case "drag":
+			return [
+				{
+					x: step.fromX,
+					y: step.fromY,
+					target: step.from,
+					names: ["fromX", "fromY", "from"],
+				},
+				{ x: step.toX, y: step.toY, target: step.to, names: ["toX", "toY", "to"] },
+			];
+		case "type":
+			return step.into ? [{ target: step.into, names: ["", "", "into"] }] : [];
+		default:
+			return [];
+	}
+}
+
+const pointsOf = (step: AgentStep): Point[] =>
+	spotsOf(step).flatMap(({ x, y, target }) =>
+		target || x === undefined || y === undefined ? [] : [{ x, y }],
+	);
+
+function stepError(index: number, step: AgentStep, error: unknown) {
+	const message = error instanceof Error ? error.message : String(error);
+	return new Error(`Step ${index + 1} (${step.action}): ${message}`);
+}
+
+function checkText(text: unknown, owner: string) {
+	if (typeof text !== "string" || !text.trim() || text.length > TARGET_TEXT_MAX) {
+		throw new Error(`${owner} needs a text of 1 to ${TARGET_TEXT_MAX} characters.`);
+	}
+}
+
+function checkSpot({ x, y, target, names: [xName, yName, targetName] }: Spot) {
+	if (target) {
+		if (x !== undefined || y !== undefined) {
+			throw new Error(`Give either ${xName} and ${yName} or ${targetName}, not both.`);
+		}
+		checkText(target.text, `A ${targetName}`);
+		if (target.index !== undefined && !(Number.isInteger(target.index) && target.index >= 0)) {
+			throw new Error(`A ${targetName}'s index must be a whole number from 0.`);
+		}
+	} else if (x === undefined || y === undefined) {
+		throw new Error(`Give ${xName} and ${yName}, or a ${targetName}.`);
+	}
+}
+
+function checkWaitFor(step: Extract<AgentStep, { action: "waitFor" }>) {
+	const element = Boolean(step.text?.trim() || step.role?.trim());
+	if (element === Boolean(step.settled) || (step.settled && step.gone)) {
+		throw new Error(
+			"A waitFor needs text and/or role (add gone: true to wait for it to disappear), or settled: true on its own.",
+		);
+	}
+	if (step.text !== undefined) checkText(step.text, "A waitFor");
+	const { timeoutMs } = step;
+	if (timeoutMs !== undefined && !(timeoutMs > 0 && timeoutMs <= AGENT_LIMITS.waitMs)) {
+		throw new Error(
+			`A waitFor's timeoutMs must be more than 0 and at most ${AGENT_LIMITS.waitMs}.`,
+		);
+	}
+}
+
 function checkStep(step: AgentStep) {
 	if ("modifiers" in step) normalizeModifiers(step.modifiers);
+	spotsOf(step).forEach(checkSpot);
 	if (step.action === "click" && ![undefined, 1, 2, 3].includes(step.count)) {
 		throw new Error("A click's count must be 1, 2 or 3.");
 	}
@@ -209,6 +364,10 @@ function checkStep(step: AgentStep) {
 			throw new Error(`A key's repeat must be a whole number from 1 to ${KEY_REPEAT_MAX}.`);
 		}
 	}
+	if (step.action === "wait" && step.ms > AGENT_LIMITS.waitMs) {
+		throw new Error(`A wait step may last at most ${AGENT_LIMITS.waitMs / 1000} s.`);
+	}
+	if (step.action === "waitFor") checkWaitFor(step);
 }
 
 const needsFrontmost = (step: AgentStep) =>
@@ -216,59 +375,58 @@ const needsFrontmost = (step: AgentStep) =>
 	step.action === "key" ||
 	("modifiers" in step && (step.modifiers?.length ?? 0) > 0);
 
-function pointsOf(step: AgentStep) {
+function readsAfter(steps: AgentStep[], index: number) {
+	const step = steps[index];
+	const next = steps[index + 1];
+	const submits =
+		step.action === "click" || (step.action === "key" && normalizeKey(step.key) === "enter");
+	if (!submits || next?.action === "wait" || next?.action === "waitFor") return false;
+	return !(step.action === "click" && (next?.action === "type" || next?.action === "key"));
+}
+
+const pacedGlideMs = (distance: number, pace: Pace) =>
+	Math.round(
+		clamp(GLIDE_BASE_MS + GLIDE_MS_PER_POINT * distance, GLIDE_MIN_MS, GLIDE_MAX_MS) *
+			pace.glide,
+	);
+
+function stepBudgetMs(step: AgentStep, glideMs: number) {
 	switch (step.action) {
 		case "move":
 		case "click":
-		case "scroll":
-			return [step];
 		case "drag":
-			return [
-				{ x: step.fromX, y: step.fromY },
-				{ x: step.toX, y: step.toY },
-			];
-		default:
-			return [];
-	}
-}
-
-function targetOf(
-	step: AgentStep,
-	{ width, height }: WindowBounds,
-): AgentActivityTarget | undefined {
-	const points = pointsOf(step);
-	const point = points[points.length - 1];
-	return point && { cx: point.x / width, cy: point.y / height };
-}
-
-function stepDurationMs(step: AgentStep) {
-	switch (step.action) {
-		case "move":
-			return step.durationMs ?? MOVE_MS;
-		case "click":
-			return step.durationMs ?? CLICK_MS;
-		case "drag":
-			return step.durationMs ?? DRAG_MS;
+			return step.durationMs ?? glideMs;
 		case "scroll":
 			return SCROLL_MS;
 		case "type":
-			return (step.text.length / TYPE_CPS) * 1000;
+			return (step.text.length / TYPE_CPS) * 1000 + (step.into ? glideMs : 0);
 		case "key":
 			return (step.repeat ?? 1) * KEY_REPEAT_MS;
 		case "wait":
 			return step.ms;
+		case "waitFor":
+			return step.timeoutMs ?? WAIT_FOR_MS;
 	}
 }
 
-function checkLimits(steps: AgentStep[]) {
+function checkLimits(steps: AgentStep[], pace: Pace) {
 	if (steps.length === 0 || steps.length > AGENT_LIMITS.steps) {
 		throw new Error(`perform takes 1 to ${AGENT_LIMITS.steps} steps.`);
 	}
-	if (steps.some((step) => step.action === "wait" && step.ms > AGENT_LIMITS.waitMs)) {
-		throw new Error(`A wait step may last at most ${AGENT_LIMITS.waitMs / 1000} s.`);
-	}
-	steps.forEach(checkStep);
-	const totalMs = steps.reduce((sum, step) => sum + stepDurationMs(step), 0);
+	steps.forEach((step, index) => {
+		try {
+			checkStep(step);
+		} catch (error) {
+			throw stepError(index, step, error);
+		}
+	});
+	const glideMs = GLIDE_MAX_MS * pace.glide;
+	const readMs = AUTO_SETTLE_MS + READ_HOLD_MS * pace.hold;
+	const totalMs = steps.reduce(
+		(sum, step, index) =>
+			sum + stepBudgetMs(step, glideMs) + (readsAfter(steps, index) ? readMs : 0),
+		0,
+	);
 	if (totalMs > AGENT_LIMITS.totalMs) {
 		throw new Error(
 			"A perform call may run at most 10 minutes. Split the demo into shorter scenes.",
@@ -276,13 +434,211 @@ function checkLimits(steps: AgentStep[]) {
 	}
 }
 
+const centreOf = (frame: AgentFrame): Point => ({
+	x: frame.x + frame.width / 2,
+	y: frame.y + frame.height / 2,
+});
+
+function readingOrder(a: AgentElement, b: AgentElement) {
+	const rows = centreOf(a).y - centreOf(b).y;
+	return Math.abs(rows) < Math.min(a.height, b.height) / 2 ? a.x - b.x : rows;
+}
+
+const isActionable = (element: AgentElement) => isActionableRole(element.role);
+
+const sameFrame = (a?: AgentFrame, b?: AgentFrame) =>
+	a === b ||
+	(a !== undefined &&
+		b !== undefined &&
+		Math.abs(a.x - b.x) <= 1 &&
+		Math.abs(a.y - b.y) <= 1 &&
+		Math.abs(a.width - b.width) <= 1 &&
+		Math.abs(a.height - b.height) <= 1);
+
+function dedupe(elements: AgentElement[]) {
+	const kept: AgentElement[] = [];
+	for (const element of elements) {
+		const twin = kept.findIndex(
+			(other) => other.label === element.label && sameFrame(other, element),
+		);
+		if (twin < 0) kept.push(element);
+		else if (isActionable(element) && !isActionable(kept[twin])) kept[twin] = element;
+	}
+	return kept;
+}
+
+type Ranked = { element: AgentElement; grade: number }[];
+const BEST_GRADE = 7;
+
+function rank(elements: AgentElement[], text: string): Ranked {
+	const unique = dedupe(elements);
+	const web = unique.some((element) => element.web);
+	const wanted = text.trim().toLowerCase();
+	return unique
+		.filter((element) => !web || element.web)
+		.map((element) => ({
+			element,
+			grade:
+				(element.label.trim().toLowerCase() === wanted ? 4 : 0) +
+				(isActionable(element) ? 2 : 0) +
+				(element.visible === false ? 0 : 1),
+		}))
+		.sort((a, b) => b.grade - a.grade || readingOrder(a.element, b.element));
+}
+
+const describeTarget = ({ text, role }: { text?: string; role?: string }) =>
+	text ? `"${text}"${role ? ` (${role})` : ""}` : `a ${role}`;
+
+function listElements(elements: AgentElement[], numbered: boolean) {
+	const listed = elements.slice(0, LISTED).map((element, index) => {
+		const { x, y } = centreOf(element);
+		const where =
+			element.visible === false ? "off screen" : `at (${Math.round(x)}, ${Math.round(y)})`;
+		const at = `"${element.label}" (${element.role}) ${where}`;
+		return numbered ? `${index}: ${at}` : at;
+	});
+	return listed.join(", ") + (elements.length > LISTED ? ", …" : "");
+}
+
+function choose(ranked: Ranked, target: AgentTarget) {
+	if (target.index !== undefined) return ranked[target.index]?.element;
+	const tied = ranked.filter(({ grade }) => grade === ranked[0].grade).length;
+	if (tied > 1) {
+		throw new Error(
+			`${tied} elements match ${describeTarget(target)} equally well. Add an index ` +
+				`(0-based, best match first, then top to bottom): ` +
+				`${listElements(
+					ranked.map(({ element }) => element),
+					true,
+				)}.`,
+		);
+	}
+	return ranked[0]?.element;
+}
+
+const isStrip = (element: AgentElement) => Math.min(element.width, element.height) <= 1;
+
+function intersect(a: AgentFrame, b: AgentFrame): AgentFrame | null {
+	const x = Math.max(a.x, b.x);
+	const y = Math.max(a.y, b.y);
+	const width = Math.min(a.x + a.width, b.x + b.width) - x;
+	const height = Math.min(a.y + a.height, b.y + b.height) - y;
+	return width > 1 && height > 1 ? { x, y, width, height } : null;
+}
+
+function revealScroll(element: AgentElement, view: AgentFrame, contained: boolean) {
+	const centre = centreOf(element);
+	const strip = isStrip(element);
+	const axis = (value: number, start: number, size: number, thin: boolean) => {
+		const offset = value - (start + size / 2);
+		const page = Math.sign(offset) * size * SCROLL_PAGE;
+		const inset = Math.min(SCROLL_INSET, size / 4);
+		if (value >= start && value < start + size) {
+			const delta = thin ? page : 0;
+			return {
+				delta,
+				at: clamp(
+					value - Math.sign(delta) * SCROLL_INSET,
+					start + inset,
+					start + size - inset,
+				),
+			};
+		}
+		return {
+			delta: strip ? page : clamp(offset, -size * SCROLL_REACH, size * SCROLL_REACH),
+			at: contained ? clamp(value, start + inset, start + size - inset) : start + size / 2,
+		};
+	};
+	const x = axis(centre.x, view.x, view.width, strip && element.width <= 1);
+	const y = axis(centre.y, view.y, view.height, strip && element.height <= 1);
+	if (x.delta === 0 && y.delta === 0) {
+		y.delta = (centre.y < view.y + view.height / 2 ? -1 : 1) * view.height * SCROLL_PAGE;
+	}
+	return { at: { x: x.at, y: y.at }, dx: Math.round(x.delta), dy: Math.round(y.delta) };
+}
+
+function centringScroll(element: AgentElement, view: AgentFrame, axes: { x: boolean; y: boolean }) {
+	const centre = centreOf(element);
+	const axis = (value: number, start: number, size: number) => {
+		const margin = size * CENTRE_MARGIN;
+		const near = value < start + margin || value > start + size - margin;
+		return near ? Math.round(value - (start + size / 2)) : 0;
+	};
+	return {
+		at: centre,
+		dx: axes.x ? axis(centre.x, view.x, view.width) : 0,
+		dy: axes.y ? axis(centre.y, view.y, view.height) : 0,
+	};
+}
+
+function bigrams(text: string) {
+	const lower = text.toLowerCase();
+	return Array.from({ length: Math.max(0, lower.length - 1) }, (_, index) =>
+		lower.slice(index, index + 2),
+	);
+}
+
+function similarity(a: string, b: string) {
+	const left = bigrams(a);
+	const right = bigrams(b);
+	const total = left.length + right.length;
+	let shared = 0;
+	for (const pair of left) {
+		const at = right.indexOf(pair);
+		if (at >= 0) {
+			shared += 1;
+			right.splice(at, 1);
+		}
+	}
+	return total === 0 ? 0 : (2 * shared) / total;
+}
+
 export function createAgentControl(
 	remote: Pick<RemoteControl, "getStatus" | "listSources" | "selectSource">,
 	overrides: Partial<AgentControlDeps> = {},
 ) {
 	const deps = { ...defaultDeps(), ...overrides };
-	const { input } = deps;
+	const { input, platform } = deps;
+	const webWindows = new Map<number, boolean>();
 	let busy = false;
+	let controlWindowId: number | null = null;
+
+	function toHelper(command: AgentCommand): AgentCommand {
+		const point = platform.toHelperPoint;
+		switch (command.cmd) {
+			case "move":
+			case "click":
+			case "scroll":
+				return { ...command, ...point(command) };
+			case "drag": {
+				const from = point({ x: command.fromX, y: command.fromY });
+				const to = point({ x: command.toX, y: command.toY });
+				return { ...command, fromX: from.x, fromY: from.y, toX: to.x, toY: to.y };
+			}
+			case "raise":
+			case "find":
+				return { ...command, frame: platform.toHelperRect(command.frame) };
+			default:
+				return command;
+		}
+	}
+
+	function fromHelper(cmd: AgentCommand["cmd"], result: unknown) {
+		if (cmd === "cursor") return platform.fromHelperPoint(result as Point);
+		if (cmd !== "find") return result;
+		const found = result as AgentResults["find"];
+		return {
+			...found,
+			elements: found.elements.map(({ container, ...element }) => ({
+				...element,
+				...platform.fromHelperRect(element),
+				...(container ? { container: platform.fromHelperRect(container) } : {}),
+			})),
+		};
+	}
+
+	const request: Post = async (command) =>
+		fromHelper(command.cmd, await input.request(toHelper(command))) as never;
 
 	async function exclusive<T>(run: () => Promise<T>) {
 		if (busy) throw new Error("Another action is still running.");
@@ -319,30 +675,58 @@ export function createAgentControl(
 		return point;
 	}
 
-	function requireMac() {
-		if (deps.platform !== "darwin") throw new Error(MAC_ONLY);
+	function requireSupported() {
+		const { supported, reason } = platform.support();
+		if (!supported) throw new Error(reason);
+	}
+
+	async function controlSourceId() {
+		if (controlWindowId !== null) return `window:${controlWindowId}:0`;
+		const { window } = await request({ cmd: "frontmost_window" });
+		const front =
+			window && !platform.isOwnWindow(window)
+				? ` The window in front is "${window.title}" (id window:${window.windowId}:0).`
+				: "";
+		throw new Error(
+			"Choose the window for the mouse and keyboard first: open_url, or select_source with a " +
+				`window id from list_sources. On Linux Recordly records the whole screen.${front}`,
+		);
 	}
 
 	async function requireTarget(): Promise<TargetWindow> {
 		const source = deps.getSelectedSource();
-		const windowId = parseWindowId(source?.id);
-		if (!source?.id || !windowId) throw new Error(NO_WINDOW);
-		const found = await deps.findWindow(source.id);
+		const sourceId = platform.recordsScreen ? await controlSourceId() : source?.id;
+		const windowId = parseWindowId(sourceId);
+		if (!sourceId || !windowId) throw new Error(NO_WINDOW);
+		const found = await deps.findWindow(sourceId);
 		if (!found?.frame) throw new Error(WINDOW_OFF_SCREEN_MESSAGE);
-		const pid = found.pid ?? source.pid;
+		const pid = found.pid ?? (platform.recordsScreen ? undefined : source?.pid);
 		if (!pid) {
 			throw new Error(
 				"Recordly could not tell which app owns the selected window. Call select_source again.",
 			);
 		}
-		if (pid === deps.ownPid) {
-			throw new Error("Recordly cannot control its own windows. Select another window.");
-		}
-		return { pid, windowId, frame: found.frame };
+		if (platform.isOwnWindow({ pid, windowId })) throw new Error(OWN_WINDOW);
+		return platform.recordsScreen
+			? { pid, windowId, frame: found.frame, recorded: platform.recordedFrame(source) }
+			: { pid, windowId, frame: found.frame };
+	}
+
+	function targetOf(window: TargetWindow, at: Point, size?: { width: number; height: number }) {
+		const frame = window.recorded ?? window.frame;
+		const x = window.recorded ? window.frame.x + at.x - frame.x : at.x;
+		const y = window.recorded ? window.frame.y + at.y - frame.y : at.y;
+		return {
+			cx: x / frame.width,
+			cy: y / frame.height,
+			...(size
+				? { width: size.width / frame.width, height: size.height / frame.height }
+				: {}),
+		};
 	}
 
 	async function raise(target: TargetWindow) {
-		await input.request({
+		await request({
 			cmd: "raise",
 			pid: target.pid,
 			windowId: target.windowId,
@@ -352,7 +736,7 @@ export function createAgentControl(
 	}
 
 	async function requireFrontmost(target: TargetWindow) {
-		const { window } = await input.request({ cmd: "frontmost_window" });
+		const { window } = await request({ cmd: "frontmost_window" });
 		if (window?.pid !== target.pid) {
 			throw new Error(
 				"Typing, keys and modifier clicks go only to the recorded window, and another app is in front of it now.",
@@ -360,69 +744,402 @@ export function createAgentControl(
 		}
 	}
 
-	async function runStep(step: AgentStep, start: TargetWindow, post: Post) {
-		if (needsFrontmost(step)) await requireFrontmost(start);
+	async function logged<T>(
+		run: Run,
+		kind: AgentActivitySpanKind,
+		action: AgentActivityAction,
+		body: () => Promise<T>,
+		target?: AgentActivityTarget,
+	) {
+		const end = beginSpan(kind, action, target);
+		try {
+			return await Promise.race([body(), run.aborted]);
+		} finally {
+			end();
+		}
+	}
+
+	async function find(
+		send: Post,
+		window: TargetWindow,
+		query: { text?: string; role?: string; offscreen?: boolean },
+		limit: number,
+	) {
+		const { x, y } = window.frame;
+		const { elements, truncated } = await send({
+			cmd: "find",
+			pid: window.pid,
+			windowId: window.windowId,
+			frame: window.frame,
+			text: query.text,
+			role: query.role,
+			limit,
+			offscreen: query.offscreen,
+		}).catch((error: unknown) => {
+			const off =
+				platform.name === "linux" &&
+				error instanceof Error &&
+				error.message.includes("window not found in process");
+			throw off ? new Error(LINUX_ACCESSIBILITY_OFF) : error;
+		});
+		if (elements.some((element) => element.web)) webWindows.set(window.windowId, true);
+		return {
+			elements: elements.map(({ container, ...element }) => ({
+				...element,
+				x: element.x - x,
+				y: element.y - y,
+				...(container
+					? { container: { ...container, x: container.x - x, y: container.y - y } }
+					: {}),
+			})),
+			truncated,
+		};
+	}
+
+	async function isWebWindow(send: Post, window: TargetWindow) {
+		if (!webWindows.has(window.windowId)) {
+			const mac = platform.name === "darwin";
+			const query = mac ? { role: "AXWebArea" } : {};
+			const probed = await find(send, window, query, mac ? 1 : FIND_LIMIT).catch(() => null);
+			const elements = probed?.elements ?? [];
+			webWindows.set(
+				window.windowId,
+				mac ? elements.length > 0 : elements.some((element) => element.web),
+			);
+		}
+		return webWindows.get(window.windowId) === true;
+	}
+
+	async function matchTarget(target: AgentTarget, window: TargetWindow, send: Post) {
+		const shown = await find(send, window, target, TARGET_FIND_LIMIT);
+		const first = rank(shown.elements, target.text);
+		const top = first[target.index ?? 0];
+		if (top?.grade === BEST_GRADE && top.element.web) return first;
+		const all = await find(send, window, { ...target, offscreen: true }, TARGET_FIND_LIMIT);
+		return rank([...shown.elements, ...all.elements], target.text);
+	}
+
+	function checkDeadline(run: Run) {
+		if (deps.now() >= run.deadline) throw new Error(LIMIT_PASSED);
+	}
+
+	async function scrollAt(
+		run: Run,
+		window: TargetWindow,
+		{ at, dx, dy }: { at: Point; dx: number; dy: number },
+	) {
+		const point = toGlobal(window, at);
+		await logged(
+			run,
+			"motion",
+			"scroll",
+			async () => {
+				await run.post({ cmd: "scroll", ...point, ms: SCROLL_MS, dx, dy, modifiers: [] });
+				await deps.sleep(SETTLE_MS);
+			},
+			targetOf(window, at),
+		);
+	}
+
+	async function notFound(target: AgentTarget, ranked: Ranked, window: TargetWindow, run: Run) {
+		if (ranked.length > 0) {
+			return new Error(
+				`Only ${ranked.length} element${ranked.length === 1 ? " matches" : "s match"} ` +
+					`${describeTarget(target)}, so index ${target.index} is not found: ` +
+					`${listElements(
+						ranked.map(({ element }) => element),
+						true,
+					)}.`,
+			);
+		}
+		const { elements } = await find(run.post, window, {}, TARGET_FIND_LIMIT);
+		const nearest = elements
+			.filter((element) => element.label)
+			.map((element) => ({ element, score: similarity(target.text, element.label) }))
+			.sort((a, b) => b.score - a.score)
+			.map(({ element }) => element);
+		return new Error(
+			`${describeTarget(target)} was not found in the window within ${TARGET_WAIT_MS / 1000} s. ` +
+				(nearest.length > 0
+					? `Nearest visible labels: ${listElements(nearest, false)}.`
+					: "No labelled controls are visible."),
+		);
+	}
+
+	async function pageSignature(window: TargetWindow, run: Run) {
+		const { elements } = await find(run.post, window, {}, FIND_LIMIT);
+		return elements
+			.map(({ x, y, width, height }) => [x, y, width, height].map(Math.round).join(","))
+			.join(" ");
+	}
+
+	async function resolveTarget(target: AgentTarget, run: Run) {
+		const deadline = deps.now() + TARGET_WAIT_MS;
+		let scrolls = 0;
+		let stalls = 0;
+		let centred = false;
+		let view: AgentFrame | null = null;
+		const axes = { x: false, y: false };
+		let last: { element: AgentElement; page: string } | null = null;
+		let endWait: (() => void) | null = null;
+		try {
+			for (;;) {
+				checkDeadline(run);
+				const window = await requireTarget();
+				const ranked = await Promise.race([
+					matchTarget(target, window, run.post),
+					run.aborted,
+				]);
+				const element = choose(ranked, target);
+				if (element) {
+					endWait?.();
+					endWait = null;
+				}
+				if (element && element.visible !== false) {
+					const centring = view && !centred ? centringScroll(element, view, axes) : null;
+					if (centring && (centring.dx !== 0 || centring.dy !== 0)) {
+						centred = true;
+						await scrollAt(run, window, centring);
+						continue;
+					}
+					return { element, frame: window.frame, scrolled: scrolls > 0 };
+				}
+				if (element) {
+					const page = isStrip(element) ? await pageSignature(window, run) : "";
+					if (last) {
+						const moved = isStrip(element)
+							? sameFrame(last.element, element) && page !== last.page
+							: !sameFrame(last.element, element) ||
+								!sameFrame(last.element.container, element.container);
+						if (!moved) stalls += 1;
+					}
+					if (stalls === TARGET_STALLS || scrolls === TARGET_SCROLLS) {
+						throw new Error(
+							`${describeTarget(target)} is hidden inside a section that scrolling doesn't ` +
+								"reveal (a closed menu or panel?). Open it first, then try again.",
+						);
+					}
+					last = { element, page };
+					const frame = {
+						x: 0,
+						y: 0,
+						width: window.frame.width,
+						height: window.frame.height,
+					};
+					const contained = element.container && intersect(element.container, frame);
+					view = contained || frame;
+					const reveal = revealScroll(element, view, Boolean(contained));
+					axes.x ||= reveal.dx !== 0;
+					axes.y ||= reveal.dy !== 0;
+					await scrollAt(run, window, reveal);
+					scrolls += 1;
+					continue;
+				}
+				if (deps.now() >= deadline) throw await notFound(target, ranked, window, run);
+				endWait ??= beginSpan("wait", "wait");
+				await Promise.race([deps.sleep(POLL_MS), run.aborted]);
+			}
+		} finally {
+			endWait?.();
+		}
+	}
+
+	async function locate({ x, y, target }: Spot, run: Run) {
+		if (!target) return { point: { x: Number(x), y: Number(y) } };
+		const { element, scrolled } = await resolveTarget(target, run);
+		return {
+			point: centreOf(element),
+			size: { width: element.width, height: element.height },
+			scrolled,
+		};
+	}
+
+	async function glideMs(durationMs: number | undefined, to: Point, run: Run) {
+		if (durationMs !== undefined) return durationMs;
+		const from = await run.post({ cmd: "cursor" });
+		return pacedGlideMs(Math.hypot(to.x - from.x, to.y - from.y), run.pace);
+	}
+
+	async function runPointer(step: PointerStep, run: Run) {
+		const spots = spotsOf(step);
+		const located: Awaited<ReturnType<typeof locate>>[] = [];
+		for (const spot of spots) located.push(await locate(spot, run));
+		if (located[1]?.scrolled) {
+			located[0] = await locate(spots[0], run);
+			if (located[0].scrolled) {
+				throw new Error(
+					"The drag's start and end are not on screen together. Drag between points that are both visible.",
+				);
+			}
+		}
+		const window = await requireTarget();
+		const [point, end] = located.map((each) => toGlobal(window, each.point));
+		const last = located[located.length - 1];
+		const target = targetOf(window, last.point, last.size);
+		switch (step.action) {
+			case "move": {
+				const ms = await glideMs(step.durationMs, point, run);
+				return logged(
+					run,
+					"motion",
+					"move",
+					() => run.post({ cmd: "move", ...point, ms }),
+					target,
+				);
+			}
+			case "click": {
+				const ms = await glideMs(step.durationMs, point, run);
+				return logged(
+					run,
+					"motion",
+					"click",
+					() =>
+						run.post({
+							cmd: "click",
+							...point,
+							ms,
+							button: step.button ?? "left",
+							count: step.count ?? 1,
+							modifiers: normalizeModifiers(step.modifiers),
+						}),
+					target,
+				);
+			}
+			case "drag": {
+				const ms =
+					step.durationMs ??
+					pacedGlideMs(Math.hypot(end.x - point.x, end.y - point.y), run.pace);
+				return logged(
+					run,
+					"motion",
+					"drag",
+					() =>
+						run.post({
+							cmd: "drag",
+							fromX: point.x,
+							fromY: point.y,
+							toX: end.x,
+							toY: end.y,
+							ms,
+							button: step.button ?? "left",
+							modifiers: normalizeModifiers(step.modifiers),
+						}),
+					target,
+				);
+			}
+			case "scroll":
+				return logged(
+					run,
+					"motion",
+					"scroll",
+					() =>
+						run.post({
+							cmd: "scroll",
+							...point,
+							ms: SCROLL_MS,
+							dx: step.deltaX ?? 0,
+							dy: step.deltaY,
+							modifiers: normalizeModifiers(step.modifiers),
+						}),
+					target,
+				);
+		}
+	}
+
+	async function present(
+		send: Post,
+		window: TargetWindow,
+		query: { text?: string; role?: string },
+	) {
+		const { elements } = await find(send, window, query, TARGET_FIND_LIMIT);
+		const matches = dedupe(elements);
+		if (!query.text || matches.length === 0 || !(await isWebWindow(send, window)))
+			return matches;
+		return matches.filter((element) => element.web);
+	}
+
+	async function waitFor(step: Extract<AgentStep, { action: "waitFor" }>, run: Run) {
+		const timeoutMs = step.timeoutMs ?? WAIT_FOR_MS;
+		if (step.settled) {
+			const { frame } = await requireTarget();
+			await deps.waitForStill(frame, { timeoutMs, signal: run.signal });
+			return;
+		}
+		const deadline = deps.now() + timeoutMs;
+		const query = { text: step.text, role: step.role };
+		for (;;) {
+			const matches = await present(run.post, await requireTarget(), query);
+			if (matches.length > 0 !== Boolean(step.gone)) return;
+			checkDeadline(run);
+			if (deps.now() >= deadline) {
+				throw new Error(
+					step.gone
+						? `${describeTarget(query)} was still visible after ${timeoutMs / 1000} s.`
+						: `${describeTarget(query)} did not appear within ${timeoutMs / 1000} s.`,
+				);
+			}
+			await deps.sleep(POLL_MS);
+		}
+	}
+
+	async function runStep(step: AgentStep, run: Run) {
+		if (needsFrontmost(step)) await requireFrontmost(run.start);
 		switch (step.action) {
 			case "wait":
-				return deps.sleep(step.ms);
+				return logged(run, "hold", "wait", () => deps.sleep(step.ms));
+			case "waitFor":
+				return logged(run, "wait", "wait", () => waitFor(step, run));
 			case "type":
-				return post({ cmd: "type", text: step.text, cps: TYPE_CPS });
+				if (step.into) await runPointer({ action: "click", target: step.into }, run);
+				return logged(run, "motion", "type", () =>
+					run.post({ cmd: "type", text: step.text, cps: TYPE_CPS }),
+				);
 			case "key":
-				return post({
-					cmd: "key",
-					key: normalizeKey(step.key),
-					modifiers: normalizeModifiers(step.modifiers),
-					repeat: step.repeat ?? 1,
-				});
+				return logged(run, "motion", "key", () =>
+					run.post({
+						cmd: "key",
+						key: normalizeKey(step.key),
+						modifiers: normalizeModifiers(step.modifiers),
+						repeat: step.repeat ?? 1,
+					}),
+				);
+			default:
+				return runPointer(step, run);
 		}
-		const target = await requireTarget();
-		const [point, end] = pointsOf(step).map((each) => toGlobal(target, each));
-		switch (step.action) {
-			case "move":
-				return post({ cmd: "move", ...point, ms: step.durationMs ?? MOVE_MS });
-			case "click":
-				return post({
-					cmd: "click",
-					...point,
-					ms: step.durationMs ?? CLICK_MS,
-					button: step.button ?? "left",
-					count: step.count ?? 1,
-					modifiers: normalizeModifiers(step.modifiers),
-				});
-			case "drag":
-				return post({
-					cmd: "drag",
-					fromX: point.x,
-					fromY: point.y,
-					toX: end.x,
-					toY: end.y,
-					ms: step.durationMs ?? DRAG_MS,
-					button: step.button ?? "left",
-					modifiers: normalizeModifiers(step.modifiers),
-				});
-			case "scroll":
-				return post({
-					cmd: "scroll",
-					...point,
-					ms: SCROLL_MS,
-					dx: step.deltaX ?? 0,
-					dy: step.deltaY,
-					modifiers: normalizeModifiers(step.modifiers),
-				});
-		}
+	}
+
+	async function readResult(run: Run) {
+		const settle = async () => {
+			const { frame } = await requireTarget();
+			await deps.waitForStill(frame, {
+				timeoutMs: AUTO_SETTLE_MS,
+				quietMs: AUTO_QUIET_MS,
+				signal: run.signal,
+			});
+		};
+		await logged(run, "wait", "wait", () => settle().catch(() => undefined));
+		await logged(run, "hold", "wait", () => deps.sleep(READ_HOLD_MS * run.pace.hold));
 	}
 
 	async function preflightInput() {
-		requireMac();
-		const { postEvents } = await input.request({ cmd: "preflight" });
-		if (!postEvents) throw new Error(POST_EVENTS_MISSING);
+		requireSupported();
+		const { postEvents } = await request({ cmd: "preflight" });
+		if (!postEvents) {
+			throw new Error(platform.name === "darwin" ? POST_EVENTS_MISSING : INPUT_UNAVAILABLE);
+		}
 	}
 
-	async function runSteps(steps: AgentStep[]) {
+	async function runSteps(steps: AgentStep[], pace: Pace, deadline: number) {
 		await preflightInput();
 		const start = await requireTarget();
-		for (const step of steps) for (const point of pointsOf(step)) toGlobal(start, point);
-		const { window: front } = await input.request({ cmd: "frontmost_window" });
+		steps.forEach((step, index) => {
+			try {
+				for (const point of pointsOf(step)) toGlobal(start, point);
+			} catch (error) {
+				throw stepError(index, step, error);
+			}
+		});
+		const { window: front } = await request({ cmd: "frontmost_window" });
 		if (front?.pid !== start.pid || front.windowId !== start.windowId) {
 			const endRaise = beginSpan("wait", "raise");
 			try {
@@ -430,7 +1147,7 @@ export function createAgentControl(
 			} finally {
 				endRaise();
 			}
-			const { window } = await input.request({ cmd: "frontmost_window" });
+			const { window } = await request({ cmd: "frontmost_window" });
 			if (window?.pid !== start.pid) {
 				throw new Error("Recordly couldn't bring the window to the front.");
 			}
@@ -438,6 +1155,7 @@ export function createAgentControl(
 		let stopped = false;
 		let tookOver = false;
 		let cause: string | undefined;
+		const controller = new AbortController();
 		const takeover = () =>
 			new Error(
 				cause ? `${TAKEOVER_MESSAGE} Recordly noticed that ${cause}.` : TAKEOVER_MESSAGE,
@@ -452,52 +1170,138 @@ export function createAgentControl(
 			tookOver = true;
 			stopped = true;
 			abort();
+			controller.abort();
 		};
 		const post: Post = (command) => {
 			if (stopped) return Promise.reject(takeover());
-			return input.request(command);
+			return request(command);
 		};
-		await input.request({ cmd: "arm" });
+		const run: Run = { start, post, pace, aborted, signal: controller.signal, deadline };
+		await request({ cmd: "arm" });
 		input.events.on("user-input", onUserInput);
 		try {
-			for (const step of steps) {
-				if (stopped) throw takeover();
-				const endSpan =
-					step.action === "wait"
-						? beginSpan("hold", "wait")
-						: beginSpan("motion", step.action, targetOf(step, start.frame));
+			for (const [index, step] of steps.entries()) {
 				try {
-					await Promise.race([runStep(step, start, post), aborted]);
-				} finally {
-					endSpan();
+					if (stopped) throw takeover();
+					checkDeadline(run);
+					await Promise.race([runStep(step, run), aborted]);
+					if (readsAfter(steps, index)) await Promise.race([readResult(run), aborted]);
+				} catch (error) {
+					const userInput = error instanceof Error && error.message === "user-input";
+					throw stepError(index, step, tookOver || userInput ? takeover() : error);
 				}
 			}
-		} catch (error) {
-			if (tookOver || (error instanceof Error && error.message === "user-input")) {
-				throw takeover();
-			}
-			throw error;
 		} finally {
 			stopped = true;
+			controller.abort();
 			input.events.off("user-input", onUserInput);
-			await input.request({ cmd: "disarm" }).catch(() => undefined);
+			await request({ cmd: "disarm" }).catch(() => undefined);
 		}
-		return { performed: steps.length };
 	}
 
-	async function perform(steps: AgentStep[], { title }: { title?: string } = {}) {
-		checkLimits(steps);
-		return exclusive(async () => {
-			const endScene = beginScene(title);
-			try {
-				const result = await runSteps(steps);
-				endScene(false);
-				return result;
-			} catch (error) {
-				endScene(error instanceof Error && error.message.startsWith(TAKEOVER_MESSAGE));
-				throw error;
+	async function probeTarget(target: AgentTarget, window: TargetWindow): Promise<Probe> {
+		const ranked = await matchTarget(target, window, request);
+		const candidates = ranked.length;
+		let element: AgentElement | undefined;
+		try {
+			element = choose(ranked, target);
+		} catch {
+			return { found: false, candidates };
+		}
+		if (!element) return { found: false, candidates };
+		if (element.visible === false) return { found: true, label: element.label, candidates };
+		const { x, y } = centreOf(element);
+		return {
+			found: true,
+			label: element.label,
+			x: Math.round(x),
+			y: Math.round(y),
+			candidates,
+		};
+	}
+
+	async function probe(step: AgentStep, window: TargetWindow): Promise<Probe> {
+		if (step.action === "waitFor") {
+			if (step.settled) return { found: true };
+			const query = { text: step.text, role: step.role };
+			const matches = await present(request, window, query);
+			return { found: matches.length > 0, candidates: matches.length };
+		}
+		let probed: Probe = { found: true };
+		for (const { x, y, target } of spotsOf(step)) {
+			if (target) {
+				probed = await probeTarget(target, window);
+				if (!probed.found) return probed;
+			} else {
+				const point = { x: Number(x), y: Number(y) };
+				toGlobal(window, point);
+				probed = { found: true, ...point };
 			}
+		}
+		return probed;
+	}
+
+	async function dryRun(steps: AgentStep[]) {
+		requireSupported();
+		const window = await requireTarget();
+		const report: AgentDryRunStep[] = [];
+		for (const [index, step] of steps.entries()) {
+			try {
+				report.push({
+					index: index + 1,
+					action: step.action,
+					...(await probe(step, window)),
+				});
+			} catch (error) {
+				throw stepError(index, step, error);
+			}
+		}
+		return report;
+	}
+
+	async function perform(steps: AgentStep[], options: PerformOptions = {}) {
+		const pace = PACES.get(options.pace ?? "normal");
+		if (!pace) throw new Error('pace must be "brisk", "normal" or "relaxed".');
+		if (options.then !== undefined && options.then !== "elements") {
+			throw new Error('then must be "elements".');
+		}
+		checkLimits(steps, pace);
+		return exclusive(async () => {
+			const startedAt = deps.now();
+			const result: PerformResult = { performed: 0, durationMs: 0 };
+			if (options.dryRun) {
+				result.dryRun = await dryRun(steps);
+			} else {
+				const endScene = beginScene(options.title);
+				try {
+					await runSteps(steps, pace, startedAt + AGENT_LIMITS.totalMs);
+					endScene(false);
+				} catch (error) {
+					endScene(error instanceof Error && error.message.includes(TAKEOVER_MESSAGE));
+					throw error;
+				}
+				result.performed = steps.length;
+			}
+			result.durationMs = Math.round(deps.now() - startedAt);
+			if (options.then === "elements") result.elements = (await listControls()).elements;
+			return result;
 		});
+	}
+
+	async function listControls(query: { text?: string; role?: string } = {}, limit = FIND_LIMIT) {
+		requireSupported();
+		const { elements, truncated } = await find(request, await requireTarget(), query, limit);
+		return {
+			elements: elements.map(({ role, label, x, y, width, height }) => ({
+				role,
+				label,
+				x,
+				y,
+				width,
+				height,
+			})),
+			truncated,
+		};
 	}
 
 	async function findElements({
@@ -509,35 +1313,33 @@ export function createAgentControl(
 		role?: string;
 		limit?: number;
 	}) {
-		requireMac();
-		const target = await requireTarget();
-		const { elements, truncated } = await input.request({
-			cmd: "find",
-			pid: target.pid,
-			windowId: target.windowId,
-			frame: target.frame,
-			text,
-			role,
-			limit: limit ?? FIND_LIMIT,
-		});
-		return {
-			elements: elements.map((element) => ({
-				...element,
-				x: element.x - target.frame.x,
-				y: element.y - target.frame.y,
-			})),
-			truncated,
-		};
+		return listControls({ text, role }, limit);
 	}
 
 	async function screenshot(region?: WindowBounds) {
-		requireMac();
+		requireSupported();
 		const target = await requireTarget();
 		await raise(target).catch(() => undefined);
 		return deps.capture(target.frame, region);
 	}
 
+	async function selectControlWindow(id: string) {
+		const windowId = parseWindowId(id) ?? (/^\d+$/.test(id) ? Number(id) : null);
+		if (!windowId) throw new Error(NO_WINDOW);
+		const found = await deps.findWindow(`window:${windowId}:0`);
+		if (!found?.frame) throw new Error(WINDOW_OFF_SCREEN_MESSAGE);
+		if (platform.isOwnWindow({ pid: found.pid, windowId })) throw new Error(OWN_WINDOW);
+		controlWindowId = windowId;
+		return {
+			id: `window:${windowId}:0`,
+			type: "window",
+			control: true,
+			note: "The mouse and keyboard act on this window; Recordly records the whole screen.",
+		};
+	}
+
 	async function selectWindow(windowId: number) {
+		if (platform.recordsScreen) return selectControlWindow(String(windowId));
 		const listed = await remote.listSources();
 		const match = listed.find((source) => parseWindowId(source.id) === windowId);
 		if (!match) throw new Error(BROWSER_NOT_FOUND);
@@ -545,7 +1347,7 @@ export function createAgentControl(
 	}
 
 	async function openUrl(url: string) {
-		requireMac();
+		requireSupported();
 		let parsed: URL;
 		try {
 			parsed = new URL(url);
@@ -564,18 +1366,18 @@ export function createAgentControl(
 	}
 
 	async function openInBrowser(url: string) {
-		const browser = normalizeAppName(deps.getBrowserName(url));
+		const browser = deps.getBrowserName(url);
 		const isBrowser = (window: AgentWindow | null): window is AgentWindow =>
 			window !== null &&
-			window.pid !== deps.ownPid &&
-			(browser
-				? normalizeAppName(window.appName) === browser
+			!platform.isOwnWindow(window) &&
+			(normalizeAppName(browser)
+				? platform.sameApp(browser, window.appName)
 				: isKnownBrowser(window.bundleId));
 		await deps.openExternal(url);
 		let candidate: number | null = null;
 		for (let waited = 0; waited < OPEN_URL_WAIT_MS; waited += POLL_MS) {
 			await deps.sleep(POLL_MS);
-			const { window } = await input.request({ cmd: "frontmost_window" });
+			const { window } = await request({ cmd: "frontmost_window" });
 			if (isBrowser(window) && window.windowId === candidate) {
 				return { url, source: await selectWindow(window.windowId) };
 			}
@@ -584,7 +1386,12 @@ export function createAgentControl(
 		throw new Error(BROWSER_NOT_FOUND);
 	}
 
-	return { preflightInput, perform, findElements, screenshot, openUrl };
+	async function chooseWindow(id: string) {
+		requireSupported();
+		return selectControlWindow(id);
+	}
+
+	return { preflightInput, perform, findElements, screenshot, openUrl, chooseWindow };
 }
 
 export type AgentControl = ReturnType<typeof createAgentControl>;

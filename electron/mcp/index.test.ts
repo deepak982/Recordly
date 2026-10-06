@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
 	renameFails: false,
 	writeFails: false,
 	startErrorCode: null as string | null,
+	support: { supported: true } as { supported: boolean; reason?: string },
 }));
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -55,12 +56,14 @@ vi.mock("./server", () => ({
 }));
 vi.mock("./agentControl", () => ({ createAgentControl: () => ({}) }));
 vi.mock("./agentInput", () => ({ agentInput: { stop: vi.fn() } }));
+vi.mock("./agentPlatform", () => ({ agentPlatform: { support: () => mocks.support } }));
 vi.mock("./remoteExport", () => ({ createRemoteExport: () => ({}) }));
+vi.mock("./reviewRecording", () => ({ createRemoteReview: () => ({}) }));
 vi.mock("./tools", () => ({ buildRecordlyMcpServer: vi.fn() }));
 
 import { USER_DATA_PATH } from "../appPaths";
-import type { RemoteControl } from "./remoteControl";
 import { setupMcpServer } from "./index";
+import type { RemoteControl } from "./remoteControl";
 
 const settingsFile = path.join(USER_DATA_PATH, "mcp-server.json");
 const call = (channel: string, ...args: unknown[]) => mocks.handlers.get(channel)?.({}, ...args);
@@ -74,6 +77,7 @@ beforeEach(() => {
 	mocks.renameFails = false;
 	mocks.writeFails = false;
 	mocks.startErrorCode = null;
+	mocks.support = { supported: true };
 });
 
 describe("MCP settings", () => {
@@ -115,6 +119,16 @@ describe("MCP settings", () => {
 		start();
 		mocks.startErrorCode = code;
 		expect(await call("mcp-server:set-enabled", true)).toMatchObject({ error });
+	});
+
+	it("reports whether this system supports mouse and keyboard control, and why not", () => {
+		start();
+		expect(call("mcp-server:get-state")).toMatchObject({ controlSupported: true });
+		mocks.support = { supported: false, reason: "Needs X11." };
+		expect(call("mcp-server:get-state")).toMatchObject({
+			controlSupported: false,
+			controlUnsupportedReason: "Needs X11.",
+		});
 	});
 
 	it("creates a token at startup when enabled without one, or starts disabled if it cannot", () => {

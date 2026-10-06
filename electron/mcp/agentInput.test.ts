@@ -2,7 +2,10 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../ipc/paths/binaries", () => ({ ensureAgentInputBinary: async () => "/bin/helper" }));
+vi.mock("../ipc/paths/binaries", () => ({
+	AGENT_INPUT_MISSING: "Recordly's mouse and keyboard helper is missing for this platform.",
+	ensureAgentInputBinary: async () => "/bin/helper",
+}));
 
 import { createAgentInput, HELPER_STOPPED, HelperUnavailableError } from "./agentInput";
 
@@ -10,11 +13,14 @@ async function flush() {
 	for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
 }
 
-function fakeProcess() {
+function fakeProcess(exitsOnEof = true) {
 	const stdout = new PassThrough();
 	const written: Array<Record<string, unknown>> = [];
 	const stdin = {
 		write: (chunk: string) => written.push(JSON.parse(chunk)),
+		end: vi.fn(() => {
+			if (exitsOnEof) proc.emit("exit");
+		}),
 		on: () => undefined,
 	};
 	const proc = Object.assign(new EventEmitter(), {
@@ -26,10 +32,10 @@ function fakeProcess() {
 	return { proc, written, reply };
 }
 
-function setup(overrides: Parameters<typeof createAgentInput>[0] = {}) {
+function setup(overrides: Parameters<typeof createAgentInput>[0] = {}, exitsOnEof = true) {
 	const helpers: ReturnType<typeof fakeProcess>[] = [];
 	const spawn = vi.fn(() => {
-		const helper = fakeProcess();
+		const helper = fakeProcess(exitsOnEof);
 		helpers.push(helper);
 		return helper.proc;
 	});
@@ -80,7 +86,7 @@ describe("agent input helper client", () => {
 
 	it("times out after the default budget, or the action time plus 5 s, then restarts", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-		const { input, helpers, spawn } = setup();
+		const { input, helpers, spawn } = setup({}, false);
 		const frontmost = input.request({ cmd: "frontmost_window" });
 		const frontmostOutcome = expect(frontmost).rejects.toThrow(
 			/did not answer "frontmost_window"/,
@@ -88,6 +94,8 @@ describe("agent input helper client", () => {
 		await flush();
 		await vi.advanceTimersByTimeAsync(1000);
 		await frontmostOutcome;
+		expect(helpers[0].proc.stdin.end).toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(500);
 		expect(helpers[0].proc.kill).toHaveBeenCalled();
 
 		const move = input.request({ cmd: "move", x: 1, y: 1, ms: 2000 });
@@ -136,6 +144,17 @@ describe("agent input helper client", () => {
 			HelperUnavailableError,
 		);
 
+		const notBundled = setup({
+			resolveBinary: async () => {
+				throw new Error(
+					"Recordly's mouse and keyboard helper is missing for this platform. (/bin/x)",
+				);
+			},
+		});
+		await expect(notBundled.input.request({ cmd: "preflight" })).rejects.toThrow(
+			"Recordly's mouse and keyboard helper is missing for this platform. (/bin/x)",
+		);
+
 		const unspawnable = setup({
 			spawn: () => {
 				throw new Error("EACCES");
@@ -165,11 +184,12 @@ describe("agent input helper client", () => {
 		input.stop();
 		resolveBinary("/bin/helper");
 		await expect(preflight).rejects.toThrow(HELPER_STOPPED);
-		expect(helpers[0].proc.kill).toHaveBeenCalledOnce();
+		expect(helpers[0].proc.stdin.end).toHaveBeenCalledOnce();
 	});
 
-	it("emits user-input events and stop() kills the helper", async () => {
-		const { input, helpers } = setup();
+	it("emits user-input events and stop() closes the helper's input, killing it only if it lingers", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const { input, helpers } = setup({}, false);
 		const onInput = vi.fn();
 		input.events.on("user-input", onInput);
 		const disarm = input.request({ cmd: "disarm" });
@@ -179,6 +199,21 @@ describe("agent input helper client", () => {
 		expect(onInput).toHaveBeenCalledWith({ event: "user-input", kind: "move", escape: false });
 		input.stop();
 		await expect(disarm).rejects.toThrow(HELPER_STOPPED);
+		expect(helpers[0].proc.stdin.end).toHaveBeenCalledOnce();
+		await vi.advanceTimersByTimeAsync(499);
+		expect(helpers[0].proc.kill).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(1);
 		expect(helpers[0].proc.kill).toHaveBeenCalledOnce();
+	});
+
+	it("does not kill a helper that exits on end of input", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const { input, helpers } = setup();
+		const cursor = input.request({ cmd: "cursor" });
+		await flush();
+		input.stop();
+		await expect(cursor).rejects.toThrow(HELPER_STOPPED);
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(helpers[0].proc.kill).not.toHaveBeenCalled();
 	});
 });

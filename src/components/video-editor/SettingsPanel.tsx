@@ -2491,20 +2491,30 @@ export function SettingsPanel({
 							)}
 							{mcpServer?.enabled && (
 								<>
-									{mcpServer.controlSupported && (
+									{(mcpServer.controlSupported ||
+										mcpServer.controlUnsupportedReason) && (
 										<SettingsRow
 											title={tSettings(
 												"mcp.control",
 												"Let agents use the mouse and keyboard",
 											)}
-											description={tSettings(
-												"mcp.controlDescription",
-												"Lets the agent open web pages, move the pointer, click and type in the window it records. Move the mouse or press Esc at any time to take back control.",
-											)}
+											description={
+												mcpServer.controlSupported
+													? tSettings(
+															"mcp.controlDescription",
+															"Lets the agent open web pages, move the pointer, click and type in the window it records. Move the mouse or press Esc at any time to take back control.",
+														)
+													: mcpServer.controlUnsupportedReason
+											}
 										>
 											<Switch
-												checked={mcpServer.controlEnabled}
-												disabled={savingMcpServer}
+												checked={
+													mcpServer.controlSupported &&
+													mcpServer.controlEnabled
+												}
+												disabled={
+													savingMcpServer || !mcpServer.controlSupported
+												}
 												onCheckedChange={(enabled) =>
 													void updateMcpControlEnabled(enabled)
 												}

@@ -5,8 +5,10 @@ import { app, clipboard, ipcMain } from "electron";
 import { USER_DATA_PATH } from "../appPaths";
 import { createAgentControl } from "./agentControl";
 import { agentInput } from "./agentInput";
+import { agentPlatform } from "./agentPlatform";
 import type { RemoteControl } from "./remoteControl";
 import { createRemoteExport } from "./remoteExport";
+import { createRemoteReview } from "./reviewRecording";
 import { createMcpHttpServer, MCP_PATH } from "./server";
 import { buildRecordlyMcpServer } from "./tools";
 
@@ -55,6 +57,7 @@ export function setupMcpServer({ isDev, remote }: { isDev: boolean; remote: Remo
 	let applying = Promise.resolve();
 	const remoteExport = createRemoteExport();
 	const agent = createAgentControl(remote);
+	const review = createRemoteReview({ remote });
 	const isControlEnabled = () => settings.enabled && settings.controlEnabled;
 	const server = createMcpHttpServer({
 		port,
@@ -64,6 +67,8 @@ export function setupMcpServer({ isDev, remote }: { isDev: boolean; remote: Remo
 				agent,
 				isControlEnabled,
 				platform: process.platform,
+				support: agentPlatform.support(),
+				review,
 			}),
 	});
 
@@ -98,13 +103,15 @@ export function setupMcpServer({ isDev, remote }: { isDev: boolean; remote: Remo
 	}
 
 	function getState(): McpServerState {
+		const control = agentPlatform.support();
 		return {
 			enabled: settings.enabled,
 			running: server.isRunning(),
 			url,
 			error,
 			controlEnabled: settings.controlEnabled,
-			controlSupported: process.platform === "darwin",
+			controlSupported: control.supported,
+			controlUnsupportedReason: control.reason,
 		};
 	}
 

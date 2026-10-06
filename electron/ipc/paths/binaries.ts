@@ -280,7 +280,34 @@ export async function ensureNativeCursorMonitorBinary(): Promise<string> {
 	);
 }
 
-export async function ensureAgentInputBinary(): Promise<string> {
+export const AGENT_INPUT_MISSING =
+	"Recordly's mouse and keyboard helper is missing for this platform. Reinstall or update the app.";
+
+async function requireExecutable(binaryPath: string, platform: NodeJS.Platform) {
+	if (platform !== "win32") await fs.chmod(binaryPath, 0o755).catch(() => undefined);
+	try {
+		await fs.access(binaryPath, fsConstants.X_OK);
+	} catch {
+		throw new Error(`${AGENT_INPUT_MISSING} (${binaryPath})`);
+	}
+	return binaryPath;
+}
+
+export async function ensureAgentInputBinary(
+	platform: NodeJS.Platform = process.platform,
+): Promise<string> {
+	if (platform === "win32") {
+		return requireExecutable(
+			resolvePreferredWindowsNativeHelperPath("agent-input-win", "recordly-agent-input.exe"),
+			platform,
+		);
+	}
+	if (platform === "linux") {
+		return requireExecutable(
+			getPrebundledNativeHelperPath("recordly-agent-input", getNativeArchTag(platform)),
+			platform,
+		);
+	}
 	await ensureNativeHelperMigration();
 	return ensureSwiftHelperBinary(
 		getAgentInputSourcePath(),

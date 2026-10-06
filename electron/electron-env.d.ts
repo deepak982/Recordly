@@ -28,6 +28,7 @@ interface McpServerState {
 	error: "port-in-use" | "port-unavailable" | "start-failed" | null;
 	controlEnabled: boolean;
 	controlSupported: boolean;
+	controlUnsupportedReason?: string;
 }
 
 type RemoteRecordingAction = "start" | "stop" | "pause" | "resume" | "cancel";
@@ -69,7 +70,6 @@ interface RemoteEditorReadyState {
 	ready: boolean;
 }
 
-// Used in Renderer process, expose in `preload.ts`
 interface RemoteReviewRequest {
 	id: string;
 }
@@ -91,6 +91,7 @@ interface RemoteReviewResult {
 	error?: string;
 }
 
+// Used in Renderer process, expose in `preload.ts`
 interface NativeCaptureDiagnostics {
 	backend: "windows-wgc" | "mac-screencapturekit" | "browser-store" | "ffmpeg";
 	phase: "availability" | "start" | "stop" | "mux";
@@ -1085,9 +1086,9 @@ interface Window {
 		sendRemoteExportResult: (result: RemoteExportResult) => void;
 		sendRemoteExportProgress: (progress: RemoteExportProgress) => void;
 		sendRemoteEditorReady: (state: RemoteEditorReadyState) => void;
-		setHasUnsavedChanges: (hasChanges: boolean) => void;
 		onRemoteReviewRequest: (callback: (request: RemoteReviewRequest) => void) => () => void;
 		sendRemoteReviewResult: (result: RemoteReviewResult) => void;
+		setHasUnsavedChanges: (hasChanges: boolean) => void;
 		onRequestSaveBeforeClose: (callback: () => Promise<boolean>) => () => void;
 		isNativeWindowsCaptureAvailable: () => Promise<{ available: boolean }>;
 		muxNativeWindowsRecording: (expectedDurationMs?: number) => Promise<{

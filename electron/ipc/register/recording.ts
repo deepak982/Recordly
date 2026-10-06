@@ -15,6 +15,7 @@ import {
 import { getHudCaptureExcludedProcessIds } from "../../../src/lib/hudCaptureProtection";
 import { showCursor } from "../../cursorHider";
 import {
+	persistAgentActivity,
 	readAgentActivity,
 	resetAgentActivity,
 	snapshotAgentActivity,
@@ -963,6 +964,7 @@ export function registerRecordingHandlers(
 					const diagnosticsSystemAudioPath = windowsSystemAudioPath;
 					const diagnosticsMicAudioPath = windowsMicAudioPath;
 					setWindowsCaptureStopRequested(true);
+					snapshotAgentActivity(getCursorCaptureElapsedMs());
 					proc.stdin.write("stop\n");
 					const tempVideoPath = await waitForWindowsCaptureStop(proc);
 					stagedTempVideoPath = tempVideoPath;
@@ -1041,6 +1043,11 @@ export function registerRecordingHandlers(
 							"Failed to persist cursor telemetry during native stop:",
 							error,
 						);
+					}
+					try {
+						await persistAgentActivity(finalVideoPath);
+					} catch (error) {
+						console.warn("Failed to persist agent activity during native stop:", error);
 					}
 
 					return { success: true, path: finalVideoPath };

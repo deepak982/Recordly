@@ -29,7 +29,23 @@ export type AgentWindow = AgentFrame & {
 	bundleId: string | null;
 };
 
-export type AgentElement = AgentFrame & { role: string; label: string };
+export type AgentWindowInfo = {
+	pid: number;
+	windowId: number;
+	title: string;
+	appName: string;
+	frame: AgentFrame;
+	visible: boolean;
+	minimized: boolean;
+};
+
+export type AgentElement = AgentFrame & {
+	role: string;
+	label: string;
+	visible?: boolean;
+	web?: boolean;
+	container?: AgentFrame;
+};
 
 export type AgentCommand =
 	| { cmd: "preflight" }
@@ -69,6 +85,7 @@ export type AgentCommand =
 	| { cmd: "key"; key: string; modifiers: AgentModifier[]; repeat: number }
 	| { cmd: "raise"; pid: number; windowId: number; frame: AgentFrame }
 	| { cmd: "frontmost_window" }
+	| { cmd: "window_info"; windowId: number }
 	| {
 			cmd: "find";
 			pid: number;
@@ -77,6 +94,7 @@ export type AgentCommand =
 			text?: string;
 			role?: string;
 			limit: number;
+			offscreen?: boolean;
 	  };
 
 export type AgentResults = {
@@ -92,6 +110,7 @@ export type AgentResults = {
 	key: Record<string, never>;
 	raise: { raised: boolean };
 	frontmost_window: { window: AgentWindow | null };
+	window_info: { window: AgentWindowInfo | null };
 	find: { elements: AgentElement[]; truncated: boolean };
 };
 
