@@ -140,7 +140,12 @@ import {
 	windowsPendingVideoPath,
 	windowsSystemAudioPath,
 } from "../state";
-import type { CursorTelemetryPoint, NativeMacRecordingOptions, SelectedSource } from "../types";
+import {
+	type CursorTelemetryPoint,
+	describeCaptureStartFailure,
+	type NativeMacRecordingOptions,
+	type SelectedSource,
+} from "../types";
 import {
 	getMacPrivacySettingsUrl,
 	getRecordingsDir,
@@ -927,11 +932,7 @@ export function registerRecordingHandlers(
 				setNativeCaptureMicrophonePath(null);
 				setNativeCaptureStopRequested(false);
 				setNativeCapturePaused(false);
-				return {
-					success: false,
-					message: "Failed to start native ScreenCaptureKit recording",
-					error: String(error),
-				};
+				return { success: false, ...describeCaptureStartFailure(error) };
 			}
 		},
 	);
