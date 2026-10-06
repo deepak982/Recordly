@@ -81,6 +81,15 @@ export function useExportRunner(input: ExportRunnerInput) {
 				setSessionExportError(message);
 				if (message) options?.onError?.(message);
 			};
+			const reportSaveError = (
+				saveResult: { message?: string; error?: string },
+				fallback: string,
+			) => {
+				const message = saveResult.message || fallback;
+				setSessionExportError(message);
+				options?.onError?.(saveResult.error || message);
+				return message;
+			};
 			if (!videoPath) {
 				toast.error("No video loaded");
 				return;
@@ -217,8 +226,8 @@ export function useExportRunner(input: ExportRunnerInput) {
 								return;
 							}
 						} else {
-							setExportError(saveResult.message || "Failed to save GIF");
-							toast.error(saveResult.message || "Failed to save GIF");
+							toast.error(reportSaveError(saveResult, "Failed to save GIF"));
+							if (options?.outputPath) await discardCancelledTemp(pendingSave);
 							if (smokeExportConfig.enabled) {
 								window.close();
 								return;
@@ -379,6 +388,7 @@ export function useExportRunner(input: ExportRunnerInput) {
 							success: boolean;
 							path?: string;
 							message?: string;
+							error?: string;
 							canceled?: boolean;
 						};
 						let pendingOnCancel: PendingExportSave;
@@ -501,13 +511,19 @@ export function useExportRunner(input: ExportRunnerInput) {
 									metrics: result.metrics,
 								});
 							}
-							setExportError(saveResult.message || "Failed to save video");
-							showExportErrorToast(saveResult.message || "Failed to save video");
-							// Keep the pending-save entry so the user can retry without
-							// re-rendering. The temp file is still on disk (the main
-							// process only moves/deletes it on success) and the
-							// ArrayBuffer fallback still references its in-memory blob.
-							if (pendingOnCancel.tempFilePath || pendingOnCancel.arrayBuffer) {
+							showExportErrorToast(
+								reportSaveError(saveResult, "Failed to save video"),
+							);
+							if (options?.outputPath) {
+								await discardCancelledTemp(pendingOnCancel);
+							} else if (
+								pendingOnCancel.tempFilePath ||
+								pendingOnCancel.arrayBuffer
+							) {
+								// Keep the pending-save entry so the user can retry without
+								// re-rendering. The temp file is still on disk (the main
+								// process only moves/deletes it on success) and the
+								// ArrayBuffer fallback still references its in-memory blob.
 								pendingExportSaveRef.current = pendingOnCancel;
 								setHasPendingExportSave(true);
 								keepExportDialogOpen = true;
@@ -580,7 +596,7 @@ export function useExportRunner(input: ExportRunnerInput) {
 				} else if (!exportWasCancelled()) {
 					setIsExporting(false);
 					exporterRef.current = null;
-					if (options?.destination !== "share")
+					if (options?.destination !== "share" && !options?.outputPath)
 						setShowExportDropdown(keepExportDialogOpen);
 					remountPreview();
 				}

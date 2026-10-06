@@ -10,7 +10,7 @@ vi.mock("electron", () => ({
 	ipcMain: { on: vi.fn() },
 }));
 
-const { createRemoteExport } = await import("./remoteExport");
+const { createRemoteExport, isSameFile } = await import("./remoteExport");
 
 let dir: string;
 let videoPath: string;
@@ -63,6 +63,41 @@ describe("output path validation", () => {
 		expect(remote.getStatus().state).toBe("idle");
 	});
 
+	it("rejects a whitespace-only path and a folder", async () => {
+		const { remote } = setup();
+		await expect(remote.exportVideo({ videoPath, outputPath: "   " })).rejects.toThrow(/empty/);
+		const folder = path.join(dir, "folder.mp4");
+		await fs.mkdir(folder);
+		await expect(
+			remote.exportVideo({ videoPath, outputPath: folder, overwrite: true }),
+		).rejects.toThrow(/not a regular file/);
+		expect(remote.getStatus().state).toBe("idle");
+	});
+
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"rejects an unwritable folder",
+		async () => {
+			const { remote } = setup();
+			const locked = path.join(dir, "locked");
+			await fs.mkdir(locked, { mode: 0o500 });
+			await expect(
+				remote.exportVideo({ videoPath, outputPath: path.join(locked, "out.mp4") }),
+			).rejects.toThrow(/cannot write/);
+			expect(remote.getStatus().state).toBe("idle");
+		},
+	);
+
+	it("keeps surrounding spaces in a real file name", async () => {
+		const { remote, ready, sent, lastRequest, reply } = setup();
+		const spaced = path.join(dir, " demo .mp4");
+		ready(videoPath);
+		const pending = remote.exportVideo({ videoPath, outputPath: spaced });
+		await sent();
+		expect(lastRequest().outputPath).toBe(spaced);
+		reply({ ok: true, path: spaced });
+		await pending;
+	});
+
 	it("rejects when there is no recording", async () => {
 		const { remote } = setup();
 		await expect(remote.exportVideo({ videoPath: null })).rejects.toThrow(/no recording/);
@@ -79,7 +114,7 @@ describe("output path validation", () => {
 			remote.exportVideo({ videoPath, outputPath: videoPath, overwrite: true }),
 		).rejects.toThrow(/recording itself/);
 		const alias = path.join(dir, "alias.mp4");
-		await fs.symlink(videoPath, alias);
+		await fs.link(videoPath, alias);
 		await expect(
 			remote.exportVideo({ videoPath, outputPath: alias, overwrite: true }),
 		).rejects.toThrow(/recording itself/);
@@ -214,11 +249,48 @@ describe("export flow", () => {
 		progress(10.2);
 		progress(10.4);
 		progress(55);
+		progress(40);
 		progress(140);
 		expect(onProgress.mock.calls).toEqual([[10], [55], [100]]);
 		expect(remote.getStatus().progress).toBe(100);
 		reply({ ok: true, path: "/out/p.mp4" });
 		await pending;
+	});
+
+	it("stops waiting for the editor when aborted and frees the slot", async () => {
+		const { remote, ready, sent, reply } = setup();
+		const controller = new AbortController();
+		const pending = remote.exportVideo({ videoPath }, { signal: controller.signal });
+		await vi.waitFor(() => expect(remote.getStatus().state).toBe("waiting-for-editor"));
+		controller.abort();
+		await expect(pending).rejects.toThrow(/canceled/);
+		expect(remote.getStatus().state).toBe("failed");
+		ready(videoPath);
+		const next = remote.exportVideo({ videoPath });
+		await sent();
+		reply({ ok: true, path: "/out/next.mp4" });
+		await expect(next).resolves.toMatchObject({ status: "done" });
+	});
+
+	it("detaches from a running export when aborted", async () => {
+		const { remote, ready, sent, reply } = setup();
+		const controller = new AbortController();
+		ready(videoPath);
+		const pending = remote.exportVideo({ videoPath }, { signal: controller.signal });
+		await sent();
+		controller.abort();
+		await expect(pending).resolves.toEqual({ status: "still-exporting" });
+		expect(remote.getStatus().state).toBe("exporting");
+		reply({ ok: true, path: "/out/after.mp4" });
+		expect(remote.getStatus()).toMatchObject({ state: "done", outputPath: "/out/after.mp4" });
+	});
+
+	it("rejects a signal that is already aborted", async () => {
+		const { remote } = setup();
+		await expect(
+			remote.exportVideo({ videoPath }, { signal: AbortSignal.abort() }),
+		).rejects.toThrow();
+		expect(remote.getStatus().state).toBe("idle");
 	});
 
 	it("returns still-exporting after the cap and keeps tracking", async () => {
@@ -237,5 +309,26 @@ describe("export flow", () => {
 		reply({ ok: true, path: "/out/late.mp4" });
 		expect(remote.getStatus()).toMatchObject({ state: "done", outputPath: "/out/late.mp4" });
 		expect(vi.getTimerCount()).toBe(0);
+	});
+});
+
+describe("isSameFile", () => {
+	const real = { dev: 1n, ino: 42n };
+	const other = { dev: 1n, ino: 43n };
+	const unknown = { dev: 0n, ino: 0n };
+
+	it("matches the same inode under another name", () => {
+		expect(isSameFile("/rec/a.mp4", real, "/rec/b.mp4", real)).toBe(true);
+		expect(isSameFile("/rec/a.mp4", real, "/rec/b.mp4", other)).toBe(false);
+	});
+
+	it("falls back to the resolved path when the inode is unknown", () => {
+		expect(isSameFile("/rec/a.mp4", unknown, "/rec/b.mp4", unknown)).toBe(false);
+		expect(isSameFile("/rec/x/../a.mp4", unknown, "/rec/a.mp4", unknown)).toBe(true);
+	});
+
+	it("compares paths case-insensitively only on Windows", () => {
+		expect(isSameFile("/Rec/A.mp4", unknown, "/rec/a.mp4", unknown, "win32")).toBe(true);
+		expect(isSameFile("/Rec/A.mp4", unknown, "/rec/a.mp4", unknown, "linux")).toBe(false);
 	});
 });

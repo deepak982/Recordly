@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { constants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { type IpcMain, ipcMain, type WebContents } from "electron";
@@ -32,15 +33,35 @@ type ActiveExport = {
 };
 
 const fileExists = (filePath: string) =>
-	fs.stat(filePath).then(
+	fs.stat(filePath, { bigint: true }).then(
 		(stats) => stats,
 		() => null,
 	);
 
+type FileIdentity = { dev: bigint; ino: bigint };
+
+export function isSameFile(
+	first: string,
+	firstStats: FileIdentity,
+	second: string,
+	secondStats: FileIdentity,
+	platform: NodeJS.Platform = process.platform,
+) {
+	const normalize = (filePath: string) =>
+		platform === "win32" ? path.resolve(filePath).toLowerCase() : path.resolve(filePath);
+	if (normalize(first) === normalize(second)) return true;
+	return (
+		firstStats.ino !== 0n &&
+		firstStats.dev === secondStats.dev &&
+		firstStats.ino === secondStats.ino
+	);
+}
+
 async function resolveTarget(args: RemoteExportArgs, recordingsDir: () => Promise<string>) {
 	if (!args.videoPath) throw new Error("There is no recording to export yet.");
 	const videoPath = path.resolve(args.videoPath);
-	const requested = args.outputPath?.trim();
+	const requested = args.outputPath;
+	if (requested !== undefined && !requested.trim()) throw new Error("outputPath is empty.");
 	if (requested && !path.isAbsolute(requested)) {
 		throw new Error(`outputPath must be an absolute path: ${requested}`);
 	}
@@ -52,16 +73,21 @@ async function resolveTarget(args: RemoteExportArgs, recordingsDir: () => Promis
 	if (path.extname(outputPath).toLowerCase() !== `.${format}`) {
 		throw new Error(`outputPath must end in .${format} for a ${format} export.`);
 	}
-	if (!(await fileExists(path.dirname(outputPath)))?.isDirectory()) {
-		throw new Error(`The folder does not exist: ${path.dirname(outputPath)}`);
+	const folder = path.dirname(outputPath);
+	if (!(await fileExists(folder))?.isDirectory()) {
+		throw new Error(`The folder does not exist: ${folder}`);
 	}
+	await fs.access(folder, constants.W_OK).catch(() => {
+		throw new Error(`Recordly cannot write to the folder: ${folder}`);
+	});
 	const [existing, recording] = await Promise.all([
 		fileExists(outputPath),
 		fileExists(videoPath),
 	]);
-	if (existing && recording && existing.dev === recording.dev && existing.ino === recording.ino) {
+	if (existing && recording && isSameFile(outputPath, existing, videoPath, recording)) {
 		throw new Error("outputPath cannot be the recording itself.");
 	}
+	if (existing && !existing.isFile()) throw new Error(`${outputPath} is not a regular file.`);
 	if (existing && !args.overwrite) {
 		throw new Error(`${outputPath} already exists. Pass overwrite: true to replace it.`);
 	}
@@ -120,7 +146,7 @@ export function createRemoteExport({
 	ipc.on("remote-export-progress", (_event, update: RemoteExportProgress) => {
 		if (!active || update?.id !== active.id || !Number.isFinite(update.progress)) return;
 		const pct = Math.round(Math.min(100, Math.max(0, update.progress)));
-		if (pct === status.progress) return;
+		if (pct <= (status.progress ?? -1)) return;
 		status = { ...status, progress: pct };
 		active.onProgress?.(pct);
 	});
