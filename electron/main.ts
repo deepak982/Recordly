@@ -28,6 +28,8 @@ import {
 	killWindowsCaptureProcess,
 	registerIpcHandlers,
 } from "./ipc/handlers";
+import { setupMcpServer } from "./mcp";
+import { createRemoteControl } from "./mcp/remoteControl";
 import { ensureMediaServer } from "./mediaServer";
 import { hardenWebContentsNavigation, shouldHardenWebContentsType } from "./navigationPolicy";
 import { shouldGrantDisplayCapture, shouldGrantMediaPermission } from "./permissionPolicy";
@@ -183,6 +185,8 @@ let isForceClosing = false;
 let isAppQuitting = false;
 let isCreatingMainWindow = false;
 let isCreatingEditorWindow = false;
+const remoteControl = createRemoteControl();
+let mcpServer: ReturnType<typeof setupMcpServer> | null = null;
 const shouldEnforceSingleInstanceLock = !IS_DEV;
 const hasSingleInstanceLock = shouldEnforceSingleInstanceLock
 	? app.requestSingleInstanceLock()
@@ -885,6 +889,10 @@ app.on("before-quit", () => {
 	void cleanupAllExportStreams();
 });
 
+app.on("will-quit", () => {
+	void mcpServer?.close();
+});
+
 app.on("window-all-closed", () => {
 	if (IS_SMOKE_EXPORT || process.platform !== "darwin") {
 		app.quit();
@@ -1031,6 +1039,7 @@ app.whenReady().then(async () => {
 		(recording: boolean, sourceName: string) => {
 			selectedSourceName = sourceName;
 			setHudOverlayRecordingActive(recording);
+			remoteControl.onRecordingStateChange(recording);
 			if (shouldUseTray()) {
 				if (!tray) createTray();
 				updateTrayMenu(recording);
@@ -1043,6 +1052,8 @@ app.whenReady().then(async () => {
 			}
 		},
 	);
+
+	mcpServer = setupMcpServer({ isDev: IS_DEV, remote: remoteControl });
 
 	if (IS_SMOKE_EXPORT || process.env.RECORDLY_DEV_OPEN_RECORDING_INPUT) {
 		await logSmokeExportGpuDiagnostics();
