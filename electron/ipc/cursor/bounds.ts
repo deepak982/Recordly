@@ -10,6 +10,7 @@ import {
 	setCachedNativeMacWindowSourcesAtMs,
 	setInteractionCaptureCleanup,
 	setSelectedWindowBounds,
+	setSelectedWindowBoundsPending,
 	setWindowBoundsCaptureInterval,
 	windowBoundsCaptureInterval,
 } from "../state";
@@ -198,22 +199,28 @@ export function stopWindowBoundsCapture() {
 		setWindowBoundsCaptureInterval(null);
 	}
 	setSelectedWindowBounds(null);
+	setSelectedWindowBoundsPending(false);
 }
 
 async function refreshSelectedWindowBounds() {
 	if (!selectedSource?.id?.startsWith("window:")) {
 		setSelectedWindowBounds(null);
+		setSelectedWindowBoundsPending(false);
 		return;
 	}
 
 	let bounds: WindowBounds | null = null;
 
-	if (process.platform === "darwin") {
-		bounds = await resolveMacWindowBounds(selectedSource);
-	} else if (process.platform === "win32") {
-		bounds = await resolveWindowsWindowBounds(selectedSource);
-	} else if (process.platform === "linux") {
-		bounds = await resolveLinuxWindowBounds(selectedSource);
+	try {
+		if (process.platform === "darwin") {
+			bounds = await resolveMacWindowBounds(selectedSource);
+		} else if (process.platform === "win32") {
+			bounds = await resolveWindowsWindowBounds(selectedSource);
+		} else if (process.platform === "linux") {
+			bounds = await resolveLinuxWindowBounds(selectedSource);
+		}
+	} finally {
+		setSelectedWindowBoundsPending(false);
 	}
 
 	setSelectedWindowBounds(bounds);
@@ -229,6 +236,7 @@ export function startWindowBoundsCapture() {
 		return;
 	}
 
+	setSelectedWindowBoundsPending(process.platform === "darwin");
 	void refreshSelectedWindowBounds();
 	setWindowBoundsCaptureInterval(
 		setInterval(() => {
