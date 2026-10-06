@@ -35,10 +35,13 @@ describe("ScreenCaptureKitRecorder finalization coordination", () => {
 });
 
 describe("ScreenCaptureKitRecorder resume timing", () => {
-	it("anchors warm-start resume timing to video before accepting audio", () => {
-		expect(recorderSource).toContain(
-			"guard outputType == .screen, let pauseStartedHostTime else",
+	it("ends the pause gap at resume and drops samples captured while paused", () => {
+		const resume = recorderSource.slice(recorderSource.indexOf("func resumeCapture()"));
+		expect(resume.slice(0, resume.indexOf("func stream("))).toContain(
+			"resumedHostTime - pauseStartedHostTime",
 		);
+		expect(recorderSource).toContain("if let resumedHostTime, sampleTime < resumedHostTime");
+		expect(recorderSource).not.toMatch(/sampleTime - pauseStartedHostTime/);
 	});
 
 	it("drops non-monotonic video and audio samples", () => {
@@ -95,9 +98,11 @@ describe("ScreenCaptureKitRecorder window capture", () => {
 	});
 });
 
-
 describe("ScreenCaptureKitRecorder first frame timing", () => {
-	const callback = recorderSource.slice(recorderSource.indexOf("func stream(_ stream:"), recorderSource.indexOf("func stream(_ stream:") + 5000);
+	const callback = recorderSource.slice(
+		recorderSource.indexOf("func stream(_ stream:"),
+		recorderSource.indexOf("func stream(_ stream:") + 5000,
+	);
 	it("validates a complete frame and writer readiness before setting time zero", () => {
 		const clock = callback.indexOf("adjustedPresentationTime(for:");
 		expect(clock).toBeGreaterThan(callback.indexOf("status == .complete"));

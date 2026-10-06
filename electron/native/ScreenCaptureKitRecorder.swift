@@ -62,8 +62,11 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 	private var isRecording = false
 	private var isPaused = false
 	private var pauseStartedHostTime: CMTime?
-	private var pendingResumeAdjustment = false
+	private var resumedHostTime: CMTime?
+	private var pausedSampleBuffer: CMSampleBuffer?
+	private var excludesRecordlyWindows = false
 	private var accumulatedPausedDuration: CMTime = .zero
+	private var stopPresentationTime: CMTime?
 	private var sessionStarted = false
 	private var frameCount = 0
 	private var outputURL: URL?
@@ -129,6 +132,7 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 		let excludedApplications = availableContent.applications.filter {
 			excludedProcessIds.contains($0.processID)
 		}
+		excludesRecordlyWindows = !excludedApplications.isEmpty
 
 		if let windowId = config.windowId {
 			trackedWindowId = windowId
@@ -349,8 +353,10 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 		isRecording = true
 		isPaused = false
 		pauseStartedHostTime = nil
-		pendingResumeAdjustment = false
+		resumedHostTime = nil
+		pausedSampleBuffer = nil
 		accumulatedPausedDuration = .zero
+		stopPresentationTime = nil
 		frameCount = 0
 		firstSampleTime = .zero
 		lastVideoPresentationTime = .zero
@@ -372,7 +378,6 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 				}
 				self.isPaused = true
 				self.pauseStartedHostTime = CMClockGetTime(CMClockGetHostTimeClock())
-				self.pendingResumeAdjustment = false
 				continuation.resume(returning: true)
 			}
 		}
@@ -385,8 +390,24 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 					continuation.resume(returning: self.isRecording && !self.isPaused)
 					return
 				}
+				let resumedHostTime = CMClockGetTime(CMClockGetHostTimeClock())
+				if let pauseStartedHostTime = self.pauseStartedHostTime, resumedHostTime > pauseStartedHostTime {
+					self.accumulatedPausedDuration = self.accumulatedPausedDuration + (resumedHostTime - pauseStartedHostTime)
+				}
 				self.isPaused = false
-				self.pendingResumeAdjustment = true
+				self.pauseStartedHostTime = nil
+				self.resumedHostTime = resumedHostTime
+				if let pausedSampleBuffer = self.pausedSampleBuffer,
+				   self.frameCount > 0,
+				   let videoInput = self.videoInput,
+				   self.assetWriter?.status == .writing,
+				   videoInput.isReadyForMoreMediaData {
+					let presentationTime = resumedHostTime - self.firstSampleTime - self.accumulatedPausedDuration
+					if CMTimeCompare(presentationTime, self.lastVideoPresentationTime) > 0 {
+						_ = self.appendVideoSample(pausedSampleBuffer, to: videoInput, at: presentationTime)
+					}
+				}
+				self.pausedSampleBuffer = nil
 				continuation.resume(returning: true)
 			}
 		}
@@ -404,6 +425,13 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 				return
 			}
 
+			if isPaused {
+				if excludesRecordlyWindows {
+					pausedSampleBuffer = sampleBuffer
+				}
+				return
+			}
+
 			guard let videoInput = videoInput,
 				  assetWriter?.status == .writing,
 				  videoInput.isReadyForMoreMediaData else { return }
@@ -414,22 +442,7 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 				return
 			}
 
-			lastSampleBuffer = sampleBuffer
-			let appended: Bool
-			if videoPixelBufferAdaptor != nil {
-				appended = appendCroppedVideoFrame(sampleBuffer, at: presentationTime)
-			} else {
-				let timing = CMSampleTimingInfo(duration: sampleBuffer.duration, presentationTimeStamp: presentationTime, decodeTimeStamp: sampleBuffer.decodeTimeStamp)
-				if let retimed = try? CMSampleBuffer(copying: sampleBuffer, withNewTiming: [timing]) {
-					appended = videoInput.append(retimed)
-				} else {
-					appended = false
-				}
-			}
-			if appended {
-					lastVideoPresentationTime = presentationTime
-					lastVideoDuration = sampleBuffer.duration
-					frameCount += 1
+			if appendVideoSample(sampleBuffer, to: videoInput, at: presentationTime) {
 					if frameCount == 1 {
 						// Signal readiness only after AVAssetWriter has accepted a
 						// real frame, so countdown warm-start cannot pause too early.
@@ -468,6 +481,27 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 		}
 
 		return
+	}
+
+	private func appendVideoSample(_ sampleBuffer: CMSampleBuffer, to videoInput: AVAssetWriterInput, at presentationTime: CMTime) -> Bool {
+		lastSampleBuffer = sampleBuffer
+		let appended: Bool
+		if videoPixelBufferAdaptor != nil {
+			appended = appendCroppedVideoFrame(sampleBuffer, at: presentationTime)
+		} else {
+			let timing = CMSampleTimingInfo(duration: sampleBuffer.duration, presentationTimeStamp: presentationTime, decodeTimeStamp: sampleBuffer.decodeTimeStamp)
+			if let retimed = try? CMSampleBuffer(copying: sampleBuffer, withNewTiming: [timing]) {
+				appended = videoInput.append(retimed)
+			} else {
+				appended = false
+			}
+		}
+		if appended {
+			lastVideoPresentationTime = presentationTime
+			lastVideoDuration = sampleBuffer.duration
+			frameCount += 1
+		}
+		return appended
 	}
 
 	private func appendCroppedVideoFrame(_ sampleBuffer: CMSampleBuffer, at presentationTime: CMTime) -> Bool {
@@ -543,6 +577,10 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 
 				self.isFinalizing = true
 				self.interactiveStopParticipated = interactive
+				if self.frameCount > 0,
+				   let stopHostTime = self.isPaused ? self.pauseStartedHostTime : CMClockGetTime(CMClockGetHostTimeClock()) {
+					self.stopPresentationTime = stopHostTime - self.firstSampleTime - self.accumulatedPausedDuration
+				}
 				self.isRecording = false
 				self.windowValidationTask = nil
 				self.trackedWindowId = nil
@@ -592,24 +630,30 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 		// helper before `finishWriting()` and leaving an mdat with no moov atom:
 		// an unplayable recording.  Wait briefly for the queue to drain, then skip
 		// the frame rather than lose the recording.
+		var videoEndTime = lastVideoPresentationTime + (lastSampleBuffer.map { frameDuration(for: $0) } ?? .zero)
 		if let originalBuffer = lastSampleBuffer,
 		   let videoInput = videoInput,
 		   await waitUntilReady(videoInput, of: assetWriter) {
-			let additionalTime = lastVideoPresentationTime + frameDuration(for: originalBuffer)
+			let additionalTime = max(videoEndTime, stopPresentationTime ?? .zero)
+			let appended: Bool
 			if let adaptor = videoPixelBufferAdaptor, let pixelBuffer = lastCroppedPixelBuffer {
-				adaptor.append(pixelBuffer, withPresentationTime: additionalTime)
+				appended = adaptor.append(pixelBuffer, withPresentationTime: additionalTime)
 			} else {
 				let timing = CMSampleTimingInfo(duration: originalBuffer.duration, presentationTimeStamp: additionalTime, decodeTimeStamp: originalBuffer.decodeTimeStamp)
 				if let additionalSampleBuffer = try? CMSampleBuffer(copying: originalBuffer, withNewTiming: [timing]) {
-				videoInput.append(additionalSampleBuffer)
+					appended = videoInput.append(additionalSampleBuffer)
+				} else {
+					appended = false
 				}
+			}
+			if appended {
+				videoEndTime = additionalTime
 			}
 		}
 
 		// `endSession`, `markAsFinished` and `finishWriting` all raise when the
 		// writer is no longer in the `.writing` state (a mid-capture failure, for
 		// example a full disk), which would abort the helper the same way.
-		let videoEndTime = lastVideoPresentationTime + (lastSampleBuffer.map { frameDuration(for: $0) } ?? .zero)
 		let endTime = resolvedCaptureEndTime(videoEndTime: videoEndTime)
 		if let assetWriter, assetWriter.status == .writing {
 			assetWriter.endSession(atSourceTime: endTime)
@@ -643,6 +687,7 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 		windowCropRect = nil
 		windowCropDisplayId = nil
 		excludedProcessIds.removeAll()
+		excludesRecordlyWindows = false
 		lastCroppedPixelBuffer = nil
 		systemAudioWriter = nil
 		systemAudioInput = nil
@@ -666,8 +711,10 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 		frameCount = 0
 		isPaused = false
 		pauseStartedHostTime = nil
-		pendingResumeAdjustment = false
+		resumedHostTime = nil
+		pausedSampleBuffer = nil
 		accumulatedPausedDuration = .zero
+		stopPresentationTime = nil
 		capturesSystemAudio = false
 		capturesMicrophone = false
 		writesSystemAudioToSeparateTrack = false
@@ -720,20 +767,13 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 		}
 
 		let sampleTime = sampleBuffer.presentationTimeStamp
-		if pendingResumeAdjustment {
-			// Audio and video callbacks share this queue but their timestamps can be
-			// offset slightly. Anchor the post-countdown adjustment to video and drop
-			// audio until that anchor exists; otherwise the first audio callback can
-			// make the following video timestamp move backwards and fail the writer.
-			guard outputType == .screen, let pauseStartedHostTime else {
-				return nil
-			}
-			let pauseGap = sampleTime - pauseStartedHostTime
-			if pauseGap > .zero {
-				accumulatedPausedDuration = accumulatedPausedDuration + pauseGap
-			}
-			self.pauseStartedHostTime = nil
-			pendingResumeAdjustment = false
+		// The pause gap ends at the resume moment, not at the next frame, which on a
+		// static window can arrive seconds later. Audio and video callbacks share
+		// this queue and both get the same offset, so drop any sample captured
+		// before resume; it would map to before the resume point and could make
+		// video timestamps move backwards and fail the writer.
+		if let resumedHostTime, sampleTime < resumedHostTime {
+			return nil
 		}
 
 		if outputType == .screen {
