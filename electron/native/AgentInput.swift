@@ -375,7 +375,7 @@ func click(_ request: [String: Any]) throws -> (Int) throws -> Void {
 	let ms = milliseconds(request, 0)
 	return { epoch in
 		try glide(to: target, ms: ms, epoch: epoch)
-		try pause(ms: 80, epoch: epoch)
+		try pause(ms: 250, epoch: epoch)
 		try holdModifiers(modifiers, epoch: epoch) { flags in
 			for clickState in 1...count {
 				if clickState > 1 {
