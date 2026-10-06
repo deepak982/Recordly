@@ -47,9 +47,12 @@ const POINT_HELP =
 	"image pixel × scale, plus originX/originY when it reports them). A point outside the window is " +
 	"refused: take a fresh screenshot and recompute it.";
 
-const INPUT_HELP =
+const INPUT_NOTE =
 	"Uses the real mouse and keyboard: Recordly raises the selected window first, and on macOS it must " +
-	"stay frontmost and uncovered. Errors and what to do: 'the user took over' — the user moved the " +
+	"stay frontmost and uncovered.";
+
+const INPUT_HELP =
+	`${INPUT_NOTE} Errors and what to do: 'the user took over' — the user moved the ` +
 	"mouse, typed or pressed Esc; stop and ask the user before doing anything else. 'Mouse and keyboard " +
 	`control is off' — ask the user to turn on ${CONTROL_SWITCH}. 'not allowed to post mouse and ` +
 	"keyboard input' — ask the user to grant Recordly Accessibility permission in System Settings, then " +
@@ -61,33 +64,27 @@ const INPUT_HELP =
 
 const MAC_INSTRUCTIONS =
 	"Recordly records the screen and turns recordings into polished demo videos (automatic zoom on " +
-	"clicks, smooth cursor). On macOS it also drives the recorded window with the real mouse and " +
-	"keyboard, so a demo of any website or desktop app needs no other browser or input tool.\n\n" +
+	"clicks, smooth cursor). On macOS it drives the recorded window with the real mouse and keyboard, " +
+	"so a demo of any website or desktop app needs no other browser or input tool.\n\n" +
 	"Workflow for any demo:\n" +
-	"1. Target: open_url { url } for a web page (opens the user's default, signed-in browser and selects " +
-	"its window); for a desktop app, list_sources → select_source (by id when one app has several " +
-	"windows). Keep the window landscape (at least 1.2 × as wide as tall) so automatic zooms work, and " +
-	"uncovered: the recording is the screen area under the window.\n" +
-	"2. Plan before recording: screenshot and find_elements to learn the screen; write a short list of " +
-	"scenes (what the viewer should see, and the steps). Avoid side effects while exploring. Nothing is " +
-	"recorded yet, so take your time.\n" +
-	"3. start_recording.\n" +
-	"4. One perform call per scene: its moves, clicks, drags, scrolls, typing and keys, with 1.5–3 s wait " +
-	"steps between beats and after anything that loads, so viewers can follow. Coordinates change after " +
-	"navigation, dialogs or scrolling: end the scene there, screenshot to verify the result and locate " +
-	"the next targets, then continue.\n" +
-	"5. stop_recording (returns the saved path; the editor opens with zooms applied), then export_video.\n\n" +
-	"Coordinates are window-relative points, (0,0) = the selected window's top-left. find_elements " +
-	"answers in points; for a screenshot pixel, point = pixel × scale.\n\n" +
-	"Errors and recovery: 'the user took over' → stop and ask the user before continuing. 'Mouse and " +
-	`keyboard control is off' → ask the user to turn on ${CONTROL_SWITCH}. Missing Accessibility or ` +
-	"Screen Recording permission → ask the user to grant it in System Settings and reopen Recordly. " +
-	"Window closed, minimized, on another desktop, or another app in front → list_sources, select_source, " +
-	"screenshot. Point outside the window or off screen → fresh screenshot; ask the user to move the " +
-	"window fully onto a display if needed. A failed scene has already run its earlier steps: screenshot, " +
-	"recover, redo it, or cancel_recording and start over if the take is ruined. Other refusals say what " +
-	"to fix; never retry blindly. Act only inside the selected window, never on Recordly itself. Call " +
-	"get_status at any time; tools refuse with a message instead of showing dialogs.";
+	"1. Target: open_url for a web page, or list_sources → select_source for an app. Keep the window " +
+	"landscape (at least 1.2 × as wide as tall) so zooms work, and uncovered.\n" +
+	"2. Plan while nothing is recorded: get exact targets from find_elements (aim at x + width/2, " +
+	"y + height/2). For a control it does not list, screenshot a region of about 300 × 200 points " +
+	"around it and use origin + pixel × scale; never aim at a small control from a whole-window " +
+	"screenshot. Write the scenes with their coordinates. Avoid side effects while exploring.\n" +
+	"3. move_pointer to where the first scene starts, then start_recording.\n" +
+	"4. One perform per scene. Each click zooms in for about a second around it, so glide to each " +
+	"target in 600–1000 ms, one click per beat, at least 2.5 s between clicks, and wait 1.5–3 s after " +
+	"a click or anything that loads. After navigation, a dialog or scrolling, end the scene and " +
+	"screenshot to check it. Time between calls is recorded too, so keep it short.\n" +
+	"5. stop_recording, then export_video.\n\n" +
+	"Coordinates are window-relative points; (0,0) is the window's top-left.\n\n" +
+	"Errors: 'the user took over' → stop and ask the user. 'Mouse and keyboard control is off' → ask " +
+	`the user to turn on ${CONTROL_SWITCH}. Missing permission → ask the user to grant it in System ` +
+	"Settings and reopen Recordly. Window closed, covered or on another desktop → list_sources, " +
+	"select_source, screenshot. A failed scene already ran its earlier steps: screenshot and recover, " +
+	"or cancel_recording and start over. Never retry blindly; act only inside the selected window.";
 
 const INSTRUCTIONS =
 	"Recordly records the screen and turns recordings into polished demo videos (automatic zoom on " +
@@ -214,14 +211,17 @@ function demoPrompt(platform: NodeJS.Platform, { goal, url, app, output_path }: 
 			"",
 			`1. Target. ${target} Make sure the window is landscape (at least 1.2 × as wide as tall, so ` +
 				"automatic zooms work) and nothing covers it.",
-			"2. Plan before recording. Use screenshot and find_elements to learn the screen, then write a " +
+			"2. Plan before recording. Learn the screen with screenshot and find_elements, then write a " +
 				"short list of scenes: what the viewer should see, and the steps (click, type, key, scroll, " +
-				"drag, wait). Locate the first scene's targets now. Avoid side effects such as submitting or " +
-				"deleting while exploring.",
-			"3. Call start_recording.",
-			"4. For each scene, call perform once: its steps with 1.5–3 s waits between beats and after " +
-				"anything that loads. Between scenes, screenshot to confirm the result and locate the next " +
-				"targets — coordinates change after navigation or scrolling.",
+				"drag, wait). Take exact coordinates from find_elements (the centre: x + width/2, " +
+				"y + height/2); for a control it does not list, screenshot a region of about 300 × 200 " +
+				"points around it and use origin + pixel × scale. Locate the first scene's targets now. " +
+				"Avoid side effects such as submitting or deleting while exploring.",
+			"3. Call move_pointer to where the first scene starts, then start_recording.",
+			"4. For each scene, call perform once. Each click zooms in for about a second around it: glide " +
+				"to each target in 600–1000 ms, one click per beat, at least 2.5 s between clicks, and wait " +
+				"1.5–3 s after a click or anything that loads. Between scenes, screenshot to confirm the " +
+				"result and locate the next targets — coordinates change after navigation or scrolling.",
 			`5. ${exportStep}`,
 			"6. Tell the user the saved path and what the video shows.",
 			"",
@@ -665,7 +665,8 @@ export function buildRecordlyMcpServer(
 		{
 			description:
 				"Press one key or shortcut in the selected window, optionally several times; sent only while " +
-				`its app is frontmost. ${KEY_REFERENCE} ${INPUT_HELP}`,
+				`its app is frontmost. ${KEY_REFERENCE} ${INPUT_NOTE} Errors are explained in click's ` +
+				"description; 'the user took over' means stop and ask the user.",
 			inputSchema: z.object(keyArgs),
 		},
 		async (args) => perform([{ action: "key", ...args }]),
@@ -680,12 +681,14 @@ export function buildRecordlyMcpServer(
 				"step takes the fields of the matching single tool plus action: move {x, y, durationMs?}, " +
 				"click {x, y, button?, count?, modifiers?, durationMs?}, drag {fromX, fromY, toX, toY, " +
 				"button?, modifiers?, durationMs?}, scroll {x, y, deltaY, deltaX?, modifiers?}, type " +
-				"{text}, key {key, modifiers?, repeat?} (key names as in press_key), wait {ms}. Put 1500–" +
-				"3000 ms waits between beats and after anything that loads, so viewers can follow. Limits: " +
-				"1–200 steps, waits up to 30000 ms, 10 minutes per call. If a step navigates or opens a " +
-				"dialog, end the scene there and screenshot before the next one. If a step fails, the " +
-				"earlier steps have already run: screenshot to see the state and continue from there. " +
-				`Returns { performed }. ${POINT_HELP} ${INPUT_HELP}`,
+				"{text}, key {key, modifiers?, repeat?} (key names as in press_key), wait {ms}. Pacing: " +
+				"glide to each target in 600–1000 ms, one click per beat with at least 2.5 s between clicks " +
+				"(each click zooms in for about a second), and 1500–3000 ms waits after a click or anything " +
+				"that loads. Limits: 1–200 steps, waits up to 30000 ms, 10 minutes per call. If a step " +
+				"navigates or opens a dialog, end the scene there and screenshot before the next one. If a " +
+				"step fails, the earlier steps have already run: screenshot and continue from there. " +
+				`Returns { performed }. ${POINT_HELP} ${INPUT_NOTE} Errors are explained in click's ` +
+				"description; 'the user took over' means stop and ask the user.",
 			inputSchema: z.object({ steps: z.array(stepSchema).min(1).max(200) }),
 		},
 		async ({ steps }) => perform(steps),

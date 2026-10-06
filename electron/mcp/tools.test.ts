@@ -362,6 +362,14 @@ describe("buildRecordlyMcpServer", () => {
 		expect(JSON.stringify(result.tools) + instructions).not.toMatch(
 			/Auditor|Configuration|Onboarding|stanch|Chrome/,
 		);
+		const tooLong = [
+			["instructions", instructions],
+			...result.tools.map((tool: { name: string; description: string }) => [
+				tool.name,
+				tool.description,
+			]),
+		].filter(([, text]) => text.length > 2048);
+		expect(tooLong.map(([name, text]) => `${name}: ${text.length}`)).toEqual([]);
 	});
 
 	it.each([
