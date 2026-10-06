@@ -337,6 +337,7 @@ export default function VideoEditor() {
 		effectiveCursorTelemetry,
 		effectiveShowCursor,
 		cursorTelemetrySourcePath,
+		pendingFreshRecordingAutoZoomPathRef,
 		hasCaptionsForSidecar,
 		captionSidecarPayload,
 		experimentalNvidiaCudaExport,

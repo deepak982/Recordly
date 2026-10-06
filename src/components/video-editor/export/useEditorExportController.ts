@@ -1,4 +1,4 @@
-import type { RefObject } from "react";
+import type { MutableRefObject, RefObject } from "react";
 import type { useI18n } from "@/contexts/I18nContext";
 import type { useVideoEditorAudio } from "../audio/useVideoEditorAudio";
 import type { getSmokeExportConfig } from "../smokeExportConfig";
@@ -13,6 +13,7 @@ import { useExportRunner } from "./useExportRunner";
 import type { useExportSession } from "./useExportSession";
 import type { useExportSettings } from "./useExportSettings";
 import { useExportStatusViewModel } from "./useExportStatusViewModel";
+import { useRemoteExportBridge } from "./useRemoteExportBridge";
 import { useSmokeExportAutomation } from "./useSmokeExportAutomation";
 
 type Input = {
@@ -37,6 +38,7 @@ type Input = {
 	effectiveCursorTelemetry: CursorTelemetryPoint[];
 	effectiveShowCursor: boolean;
 	cursorTelemetrySourcePath: string | null;
+	pendingFreshRecordingAutoZoomPathRef?: MutableRefObject<string | null>;
 	hasCaptionsForSidecar: boolean;
 	captionSidecarPayload?: Parameters<typeof useExportRunner>[0]["captionSidecarPayload"];
 	experimentalNvidiaCudaExport: boolean;
@@ -85,6 +87,7 @@ export function useEditorExportController(input: Input) {
 		videoSourcePath: input.videoSourcePath,
 		handleExport: runner.handleExport,
 	});
+	useRemoteExportBridge({ ...input, handleExport: runner.handleExport });
 	const status = useExportStatusViewModel({
 		t: input.t,
 		session: input.session,
