@@ -74,10 +74,10 @@ const MAC_INSTRUCTIONS =
 	"around it and use origin + pixel × scale; never aim at a small control from a whole-window " +
 	"screenshot. Write the scenes with their coordinates. Avoid side effects while exploring.\n" +
 	"3. move_pointer to where the first scene starts, then start_recording.\n" +
-	"4. One perform per scene. Each click zooms in for about a second around it, so glide to each " +
-	"target in 600–1000 ms, one click per beat, at least 2.5 s between clicks, and wait 1.5–3 s after " +
-	"a click or anything that loads. After navigation, a dialog or scrolling, end the scene and " +
-	"screenshot to check it. Time between calls is recorded too, so keep it short.\n" +
+	"4. One perform per scene: glide to each target in 600–1000 ms and wait 1.5–2.5 s after a click " +
+	"or anything that loads (waits stay in the video). After navigation, a dialog or scrolling, end the " +
+	"scene and screenshot to check it. By default Recordly cuts the time between calls from the video " +
+	"and zooms on clicks, so verify calmly. Give perform a title only when the user wants captions.\n" +
 	"5. stop_recording, then export_video.\n\n" +
 	"Coordinates are window-relative points; (0,0) is the window's top-left.\n\n" +
 	"Errors: 'the user took over' → stop and ask the user. 'Mouse and keyboard control is off' → ask " +
@@ -218,10 +218,11 @@ function demoPrompt(platform: NodeJS.Platform, { goal, url, app, output_path }: 
 				"points around it and use origin + pixel × scale. Locate the first scene's targets now. " +
 				"Avoid side effects such as submitting or deleting while exploring.",
 			"3. Call move_pointer to where the first scene starts, then start_recording.",
-			"4. For each scene, call perform once. Each click zooms in for about a second around it: glide " +
-				"to each target in 600–1000 ms, one click per beat, at least 2.5 s between clicks, and wait " +
-				"1.5–3 s after a click or anything that loads. Between scenes, screenshot to confirm the " +
-				"result and locate the next targets — coordinates change after navigation or scrolling.",
+			"4. For each scene, call perform once: glide to each target in 600–1000 ms and wait 1.5–2.5 s " +
+				"after a click or anything that loads. Between scenes, screenshot to confirm the result and " +
+				"locate the next targets — coordinates change after navigation or scrolling. Recordly cuts " +
+				"the time between calls and zooms on clicks by default, so take the time to check. Add a " +
+				"perform title only if the user asked for captions or a step-by-step tutorial.",
 			`5. ${exportStep}`,
 			"6. Tell the user the saved path and what the video shows.",
 			"",
@@ -270,9 +271,9 @@ export function buildRecordlyMcpServer(
 		{ instructions: mac ? MAC_INSTRUCTIONS : INSTRUCTIONS },
 	);
 
-	async function perform(steps: AgentStep[]) {
+	async function perform(steps: AgentStep[], options?: { title?: string }) {
 		if (!isControlEnabled()) throw new Error(CONTROL_OFF);
-		return textResult(await agent.perform(steps));
+		return textResult(await agent.perform(steps, options));
 	}
 
 	server.registerPrompt(
@@ -677,21 +678,31 @@ export function buildRecordlyMcpServer(
 		{
 			description:
 				"Run one scene of the demo: ordered steps executed back to back with exact timing, so the " +
-				"video is smoothly paced (separate tool calls leave uneven pauses while you think). Each " +
+				"video is smoothly paced (separate tool calls split a scene into many small cuts). Each " +
 				"step takes the fields of the matching single tool plus action: move {x, y, durationMs?}, " +
 				"click {x, y, button?, count?, modifiers?, durationMs?}, drag {fromX, fromY, toX, toY, " +
 				"button?, modifiers?, durationMs?}, scroll {x, y, deltaY, deltaX?, modifiers?}, type " +
 				"{text}, key {key, modifiers?, repeat?} (key names as in press_key), wait {ms}. Pacing: " +
-				"glide to each target in 600–1000 ms, one click per beat with at least 2.5 s between clicks " +
-				"(each click zooms in for about a second), and 1500–3000 ms waits after a click or anything " +
-				"that loads. Limits: 1–200 steps, waits up to 30000 ms, 10 minutes per call. If a step " +
+				"glide to each target in 600–1000 ms and wait 1500–2500 ms after a click or anything that " +
+				"loads; waits stay in the video, while the time between calls is cut by default. title " +
+				"labels the scene and becomes an on-screen caption: set it only when the user wants " +
+				"captions. Limits: 1–200 steps, waits up to 30000 ms, 10 minutes per call. If a step " +
 				"navigates or opens a dialog, end the scene there and screenshot before the next one. If a " +
 				"step fails, the earlier steps have already run: screenshot and continue from there. " +
 				`Returns { performed }. ${POINT_HELP} ${INPUT_NOTE} Errors are explained in click's ` +
 				"description; 'the user took over' means stop and ask the user.",
-			inputSchema: z.object({ steps: z.array(stepSchema).min(1).max(200) }),
+			inputSchema: z.object({
+				steps: z.array(stepSchema).min(1).max(200),
+				title: z
+					.string()
+					.trim()
+					.min(1)
+					.max(80)
+					.optional()
+					.describe("Scene caption, only when the user asks for captions or a tutorial"),
+			}),
 		},
-		async ({ steps }) => perform(steps),
+		async ({ steps, title }) => perform(steps, title === undefined ? undefined : { title }),
 	);
 
 	return server;

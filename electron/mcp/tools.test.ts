@@ -275,9 +275,11 @@ describe("buildRecordlyMcpServer", () => {
 			type_text: "type",
 		};
 		calls.forEach(([name, args], index) => {
-			expect(agent.perform).toHaveBeenNthCalledWith(index + 1, [
-				{ action: actions[name], ...args },
-			]);
+			expect(agent.perform).toHaveBeenNthCalledWith(
+				index + 1,
+				[{ action: actions[name], ...args }],
+				undefined,
+			);
 		});
 	});
 
@@ -294,7 +296,25 @@ describe("buildRecordlyMcpServer", () => {
 		];
 		const { result } = await call("tools/call", { name: "perform", arguments: { steps } });
 		expect(result.isError).toBeFalsy();
-		expect(agent.perform).toHaveBeenCalledWith(steps);
+		expect(agent.perform).toHaveBeenCalledWith(steps, undefined);
+	});
+
+	it("passes a trimmed scene title to perform and refuses an empty or long one", async () => {
+		const { call, agent } = setup();
+		const steps = [{ action: "wait", ms: 1 }];
+		await call("tools/call", {
+			name: "perform",
+			arguments: { steps, title: "  Open settings " },
+		});
+		expect(agent.perform).toHaveBeenCalledWith(steps, { title: "Open settings" });
+		for (const title of ["   ", "x".repeat(81)]) {
+			const { result } = await call("tools/call", {
+				name: "perform",
+				arguments: { steps, title },
+			});
+			expect(result.isError).toBe(true);
+		}
+		expect(agent.perform).toHaveBeenCalledTimes(1);
 	});
 
 	it("validates perform steps before reaching the controller", async () => {
