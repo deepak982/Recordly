@@ -1119,6 +1119,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
 		ipcRenderer.invoke("mcp-server:set-enabled", enabled),
 	regenerateMcpServerToken: () => ipcRenderer.invoke("mcp-server:regenerate-token"),
 	copyMcpSetupCommand: () => ipcRenderer.invoke("mcp-server:copy-setup-command"),
+	setMcpControlEnabled: (enabled: boolean) =>
+		ipcRenderer.invoke("mcp-server:set-control-enabled", enabled),
 	onRemoteRecordingCommand: (callback: (command: RemoteRecordingCommand) => void) => {
 		const listener = (_event: Electron.IpcRendererEvent, command: RemoteRecordingCommand) =>
 			callback(command);

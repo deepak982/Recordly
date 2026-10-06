@@ -25,7 +25,9 @@ interface McpServerState {
 	enabled: boolean;
 	running: boolean;
 	url: string;
-	error: "port-in-use" | "start-failed" | null;
+	error: "port-in-use" | "port-unavailable" | "start-failed" | null;
+	controlEnabled: boolean;
+	controlSupported: boolean;
 }
 
 type RemoteRecordingAction = "start" | "stop" | "pause" | "resume" | "cancel";
@@ -1046,6 +1048,7 @@ interface Window {
 		setMcpServerEnabled: (enabled: boolean) => Promise<McpServerState>;
 		regenerateMcpServerToken: () => Promise<McpServerState>;
 		copyMcpSetupCommand: () => Promise<void>;
+		setMcpControlEnabled: (enabled: boolean) => Promise<McpServerState>;
 		onRemoteRecordingCommand: (
 			callback: (command: RemoteRecordingCommand) => void,
 		) => () => void;

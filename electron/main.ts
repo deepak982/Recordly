@@ -1053,7 +1053,11 @@ app.whenReady().then(async () => {
 		},
 	);
 
-	mcpServer = setupMcpServer({ isDev: IS_DEV, remote: remoteControl });
+	try {
+		mcpServer = setupMcpServer({ isDev: IS_DEV, remote: remoteControl });
+	} catch (error) {
+		console.error("[mcp-server] Could not set up the MCP server:", error);
+	}
 
 	if (IS_SMOKE_EXPORT || process.env.RECORDLY_DEV_OPEN_RECORDING_INPUT) {
 		await logSmokeExportGpuDiagnostics();

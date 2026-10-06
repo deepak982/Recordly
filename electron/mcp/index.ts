@@ -1,8 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { app, clipboard, ipcMain } from "electron";
 import { USER_DATA_PATH } from "../appPaths";
+import { createAgentControl } from "./agentControl";
+import { agentInput } from "./agentInput";
 import type { RemoteControl } from "./remoteControl";
 import { createRemoteExport } from "./remoteExport";
 import { createMcpHttpServer, MCP_PATH } from "./server";
@@ -11,7 +13,7 @@ import { buildRecordlyMcpServer } from "./tools";
 const SETTINGS_FILE = path.join(USER_DATA_PATH, "mcp-server.json");
 const PORT = 43831;
 
-type StoredSettings = { enabled: boolean; token: string };
+type StoredSettings = { enabled: boolean; token: string; controlEnabled: boolean };
 
 function readSettings(): StoredSettings {
 	try {
@@ -19,16 +21,28 @@ function readSettings(): StoredSettings {
 		return {
 			enabled: parsed.enabled === true,
 			token: typeof parsed.token === "string" ? parsed.token : "",
+			controlEnabled: parsed.controlEnabled === true,
 		};
 	} catch {
-		return { enabled: false, token: "" };
+		return { enabled: false, token: "", controlEnabled: false };
 	}
 }
 
+const PORT_UNAVAILABLE = new Set(["EACCES", "EADDRNOTAVAIL"]);
+
 function writeSettings(settings: StoredSettings) {
+	const contents = JSON.stringify(settings, null, 2);
+	const options = { encoding: "utf-8", mode: 0o600 } as const;
 	const tempFile = `${SETTINGS_FILE}.${process.pid}.tmp`;
-	writeFileSync(tempFile, JSON.stringify(settings, null, 2), { encoding: "utf-8", mode: 0o600 });
-	renameSync(tempFile, SETTINGS_FILE);
+	try {
+		writeFileSync(tempFile, contents, options);
+		renameSync(tempFile, SETTINGS_FILE);
+	} catch {
+		writeFileSync(SETTINGS_FILE, contents, options);
+		if (process.platform !== "win32") chmodSync(SETTINGS_FILE, 0o600);
+	} finally {
+		rmSync(tempFile, { force: true });
+	}
 }
 
 const createToken = () => randomBytes(32).toString("base64url");
@@ -40,10 +54,17 @@ export function setupMcpServer({ isDev, remote }: { isDev: boolean; remote: Remo
 	let error: McpServerState["error"] = null;
 	let applying = Promise.resolve();
 	const remoteExport = createRemoteExport();
+	const agent = createAgentControl(remote);
+	const isControlEnabled = () => settings.enabled && settings.controlEnabled;
 	const server = createMcpHttpServer({
 		port,
 		getToken: () => settings.token,
-		buildServer: () => buildRecordlyMcpServer(remote, remoteExport, app.getVersion()),
+		buildServer: () =>
+			buildRecordlyMcpServer(remote, remoteExport, app.getVersion(), {
+				agent,
+				isControlEnabled,
+				platform: process.platform,
+			}),
 	});
 
 	function save(next: StoredSettings) {
@@ -61,7 +82,12 @@ export function setupMcpServer({ isDev, remote }: { isDev: boolean; remote: Remo
 			await server.start();
 		} catch (startError) {
 			const code = (startError as NodeJS.ErrnoException).code;
-			error = code === "EADDRINUSE" ? "port-in-use" : "start-failed";
+			error =
+				code === "EADDRINUSE"
+					? "port-in-use"
+					: code && PORT_UNAVAILABLE.has(code)
+						? "port-unavailable"
+						: "start-failed";
 			console.warn("[mcp-server] Could not start:", startError);
 		}
 	}
@@ -77,6 +103,8 @@ export function setupMcpServer({ isDev, remote }: { isDev: boolean; remote: Remo
 			running: server.isRunning(),
 			url,
 			error,
+			controlEnabled: settings.controlEnabled,
+			controlSupported: process.platform === "darwin",
 		};
 	}
 
@@ -91,8 +119,12 @@ export function setupMcpServer({ isDev, remote }: { isDev: boolean; remote: Remo
 
 	ipcMain.handle("mcp-server:get-state", () => getState());
 	ipcMain.handle("mcp-server:set-enabled", async (_, enabled: unknown) => {
-		save({ enabled: enabled === true, token: settings.token || createToken() });
+		save({ ...settings, enabled: enabled === true, token: settings.token || createToken() });
 		await apply();
+		return getState();
+	});
+	ipcMain.handle("mcp-server:set-control-enabled", (_, enabled: unknown) => {
+		save({ ...settings, controlEnabled: enabled === true });
 		return getState();
 	});
 	ipcMain.handle("mcp-server:regenerate-token", () => {
@@ -111,6 +143,7 @@ export function setupMcpServer({ isDev, remote }: { isDev: boolean; remote: Remo
 	void apply();
 	return {
 		close: () => {
+			agentInput.stop();
 			applying = applying.then(() => server.close());
 			return applying;
 		},
