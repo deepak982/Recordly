@@ -936,9 +936,9 @@ func usable(_ value: AnyObject) -> AnyObject? {
 	return value
 }
 
-func walk(_ window: AXUIElement, roles: Set<String>?, text: String, bounds: CGRect) -> (matches: [(path: [Int], element: [String: Any])], exhausted: Bool) {
+func walk(_ window: AXUIElement, roles: Set<String>?, text: String, bounds: CGRect, offscreen: Bool) -> (matches: [(path: [Int], element: [String: Any])], exhausted: Bool) {
 	let deadline = ProcessInfo.processInfo.systemUptime + 1.5
-	var queue: [(element: AXUIElement, depth: Int, path: [Int])] = [(window, 0, [])]
+	var queue: [(element: AXUIElement, depth: Int, path: [Int], clip: CGRect?, web: Bool)] = [(window, 0, [], nil, false)]
 	var head = 0
 	var matches: [(path: [Int], element: [String: Any])] = []
 	while head < queue.count {
@@ -955,9 +955,15 @@ func walk(_ window: AXUIElement, roles: Set<String>?, text: String, bounds: CGRe
 		let field = values.map(usable)
 		let role = field[0] as? String ?? ""
 		let subrole = field[1] as? String ?? ""
+		let box = rect(position: field[7], size: field[8])
 		if node.depth < 100, let children = field[9] as? [AXUIElement] {
+			var clip = node.clip
+			if role == "AXScrollArea" || role == "AXWebArea", let box {
+				clip = clip?.intersection(box) ?? box
+			}
+			let web = node.web || role == "AXWebArea"
 			for (index, child) in children.enumerated() {
-				queue.append((child, node.depth + 1, node.path + [index]))
+				queue.append((child, node.depth + 1, node.path + [index], clip, web))
 			}
 		}
 		if let roles, !roles.contains(role) && !roles.contains(subrole) {
@@ -970,18 +976,32 @@ func walk(_ window: AXUIElement, roles: Set<String>?, text: String, bounds: CGRe
 		if !text.isEmpty && !labels.contains(where: { $0.lowercased().contains(text) }) {
 			continue
 		}
-		guard let box = rect(position: field[7], size: field[8]), box.width > 1, box.height > 1,
-			bounds.contains(CGPoint(x: box.midX, y: box.midY)), !box.contains(bounds) else {
+		guard let box, !box.contains(bounds) else {
 			continue
 		}
-		matches.append((node.path, [
+		let centre = CGPoint(x: box.midX, y: box.midY)
+		let visible = box.width > 1 && box.height > 1 && bounds.contains(centre) && node.clip?.contains(centre) != false
+		guard visible || offscreen && max(box.width, box.height) > 1 else {
+			continue
+		}
+		var element: [String: Any] = [
 			"role": role,
 			"label": String(label.prefix(200)),
 			"x": box.minX,
 			"y": box.minY,
 			"width": box.width,
 			"height": box.height,
-		]))
+		]
+		if node.web {
+			element["web"] = true
+		}
+		if !visible {
+			element["visible"] = false
+			if let clip = node.clip, !clip.isEmpty {
+				element["container"] = ["x": clip.minX, "y": clip.minY, "width": clip.width, "height": clip.height]
+			}
+		}
+		matches.append((node.path, element))
 	}
 	return (matches, false)
 }
@@ -1028,7 +1048,7 @@ func find(_ request: [String: Any]) throws -> [String: Any] {
 			usleep(100_000)
 		}
 	}
-	let (found, exhausted) = walk(window, roles: roles, text: text, bounds: bounds)
+	let (found, exhausted) = walk(window, roles: roles, text: text, bounds: bounds, offscreen: request["offscreen"] as? Bool == true)
 	let matches = found.sorted { $0.path.lexicographicallyPrecedes($1.path) }
 	return [
 		"elements": matches.prefix(limit).map(\.element),
