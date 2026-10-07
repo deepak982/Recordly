@@ -517,7 +517,7 @@ describe("planAgentEdits", () => {
 
 	it("cuts a failed last scene to the end and never keeps nothing", () => {
 		const log = buildLog([clickScene(1000), { ...clickScene(4500), failed: true }]);
-		expect(plan(log, 15000).keepRanges.at(-1)?.endMs).toBe(4600);
+		expect(plan(log, 15000).keepRanges.at(-1)?.endMs).toBe(4500);
 		const allFailed = buildLog([{ ...clickScene(1000), failed: true }]);
 		expect(planAgentEdits(allFailed, 15000, WIDE)).toBeNull();
 	});
@@ -528,7 +528,18 @@ describe("planAgentEdits", () => {
 			{ startMs: 4500, steps: [["motion", "click", 200, button(0.5, 0.5)]], failed: true },
 			{ startMs: 5100, steps: [["motion", "click", 200, button(0.5, 0.5)]], failed: true },
 		]);
-		expect(plan(log, 15000).keepRanges.at(-1)?.endMs).toBe(4600);
+		expect(plan(log, 15000).keepRanges.at(-1)?.endMs).toBe(4500);
+	});
+
+	it("never snaps a retake back across the failed scene before it", () => {
+		const log = buildLog([
+			clickScene(1000),
+			{ startMs: 5000, steps: [["motion", "click", 300, button(0.1, 0.1)]], failed: true },
+			{ ...clickScene(9000), title: "Retake" },
+		]);
+		const result = plan(log, 20000, WIDE, [8600]);
+		expect(keptWithin(result, 5000, 8300)).toBe(0);
+		expect(shotsOf(result).find((shot) => shot.endMs > 8300)?.startMs).toBe(8300);
 	});
 
 	it("never leaves a shot under 0.9 s", () => {

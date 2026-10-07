@@ -164,34 +164,61 @@ function quietTimeNear(
 	return best ?? timeMs;
 }
 
+function earliestAllowed(cuts: TimeRange[], timeMs: number): number {
+	return cuts.reduce(
+		(floor, cut) => (cut.endMs <= timeMs ? Math.max(floor, cut.endMs) : floor),
+		0,
+	);
+}
+
+function latestAllowed(cuts: TimeRange[], timeMs: number, durationMs: number): number {
+	return cuts.reduce(
+		(ceiling, cut) => (cut.startMs >= timeMs ? Math.min(ceiling, cut.startMs) : ceiling),
+		durationMs,
+	);
+}
+
 function snapToQuiet(
 	ranges: TimeRange[],
 	changeTimesMs: number[],
 	durationMs: number,
+	cuts: TimeRange[],
 ): TimeRange[] {
 	if (changeTimesMs.length === 0) return ranges;
 	return ranges.map((range, index) => {
 		const startMs = quietTimeNear(
 			range.startMs,
 			changeTimesMs,
-			index === 0 ? 0 : ranges[index - 1].endMs,
+			Math.max(
+				index === 0 ? 0 : ranges[index - 1].endMs,
+				earliestAllowed(cuts, range.startMs),
+			),
 			range.endMs - 1,
 		);
 		const endMs = quietTimeNear(
 			range.endMs,
 			changeTimesMs,
 			Math.max(range.endMs, startMs + 1),
-			index === ranges.length - 1 ? durationMs : ranges[index + 1].startMs,
+			Math.min(
+				index === ranges.length - 1 ? durationMs : ranges[index + 1].startMs,
+				latestAllowed(cuts, range.endMs, durationMs),
+			),
 		);
 		return { startMs, endMs };
 	});
 }
 
-function extendShortShots(ranges: TimeRange[], durationMs: number): TimeRange[] {
+function extendShortShots(ranges: TimeRange[], durationMs: number, cuts: TimeRange[]): TimeRange[] {
 	return ranges.map((range, index) => {
 		if (range.endMs - range.startMs >= MIN_SHOT_MS) return range;
-		const endMs = Math.min(durationMs, range.startMs + MIN_SHOT_MS);
-		const previousEndMs = index === 0 ? 0 : ranges[index - 1].endMs;
+		const endMs = Math.min(
+			latestAllowed(cuts, range.endMs, durationMs),
+			range.startMs + MIN_SHOT_MS,
+		);
+		const previousEndMs = Math.max(
+			index === 0 ? 0 : ranges[index - 1].endMs,
+			earliestAllowed(cuts, range.startMs),
+		);
 		return {
 			startMs: Math.max(previousEndMs, Math.min(range.startMs, endMs - MIN_SHOT_MS)),
 			endMs,
@@ -400,8 +427,8 @@ export function planAgentEdits(
 		.sort((a, b) => a - b);
 	const shots = [
 		(ranges: TimeRange[]) => mergeRanges(ranges, durationMs, MERGE_CUT_GAP_MS, failedCuts),
-		(ranges: TimeRange[]) => snapToQuiet(ranges, changeTimes, durationMs),
-		(ranges: TimeRange[]) => extendShortShots(ranges, durationMs),
+		(ranges: TimeRange[]) => snapToQuiet(ranges, changeTimes, durationMs, failedCuts),
+		(ranges: TimeRange[]) => extendShortShots(ranges, durationMs, failedCuts),
 		(ranges: TimeRange[]) => mergeRanges(ranges, durationMs, MERGE_CUT_GAP_MS, failedCuts),
 	].reduce((ranges, step) => step(ranges), cut);
 	if (shots.length === 0) return null;
