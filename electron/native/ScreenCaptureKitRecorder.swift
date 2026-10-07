@@ -23,6 +23,8 @@ struct CaptureConfig: Codable {
 }
 
 let targetCaptureFPS = 60
+let keepaliveFrameIntervalMs = 200
+let keepaliveTimerIntervalMs = 100
 let maxInlineAudioTailExtension = CMTime(seconds: 2.0, preferredTimescale: 600)
 /// How long finalization waits for a backed-up encoder queue before giving up on
 /// the optional tail frame: 100 polls x 10 ms = 1 s.
@@ -55,6 +57,7 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 	private var lastSystemAudioPresentationTime: CMTime = .invalid
 	private var lastMicrophonePresentationTime: CMTime = .invalid
 	private var lastSampleBuffer: CMSampleBuffer?
+	private var keepaliveTimer: DispatchSourceTimer?
 	private var lastVideoPresentationTime: CMTime = .zero
 	private var lastVideoDuration: CMTime = .zero
 	private var lastInlineAudioPresentationTime: CMTime = .invalid
@@ -362,6 +365,7 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 		lastVideoPresentationTime = .zero
 		lastVideoDuration = .zero
 		startWindowValidationIfNeeded()
+		startKeepaliveTimer()
 	}
 
 	func stopCapture() async throws -> String {
@@ -483,6 +487,65 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 		return
 	}
 
+	private func startKeepaliveTimer() {
+		keepaliveTimer?.cancel()
+		let timer = DispatchSource.makeTimerSource(queue: queue)
+		timer.schedule(
+			deadline: .now() + .milliseconds(keepaliveTimerIntervalMs),
+			repeating: .milliseconds(keepaliveTimerIntervalMs),
+			leeway: .milliseconds(20)
+		)
+		timer.setEventHandler { [weak self] in
+			self?.appendKeepaliveFrame()
+		}
+		keepaliveTimer = timer
+		timer.resume()
+	}
+
+	private func stopKeepaliveTimer() {
+		keepaliveTimer?.cancel()
+		keepaliveTimer = nil
+	}
+
+	private func appendKeepaliveFrame() {
+		guard isRecording,
+			  !isPaused,
+			  !isFinalizing,
+			  frameCount > 0,
+			  let originalBuffer = lastSampleBuffer,
+			  let videoInput = videoInput,
+			  assetWriter?.status == .writing,
+			  videoInput.isReadyForMoreMediaData else { return }
+
+		let presentationTime = max(
+			.zero,
+			CMClockGetTime(CMClockGetHostTimeClock()) - firstSampleTime - accumulatedPausedDuration
+		)
+		let minimumGap = CMTime(value: CMTimeValue(keepaliveFrameIntervalMs), timescale: 1000)
+		guard CMTimeCompare(presentationTime, lastVideoPresentationTime + minimumGap) >= 0 else {
+			return
+		}
+
+		if let adaptor = videoPixelBufferAdaptor, let pixelBuffer = lastCroppedPixelBuffer {
+			if adaptor.append(pixelBuffer, withPresentationTime: presentationTime) {
+				lastVideoPresentationTime = presentationTime
+				frameCount += 1
+			}
+			return
+		}
+
+		let timing = CMSampleTimingInfo(
+			duration: frameDuration(for: originalBuffer),
+			presentationTimeStamp: presentationTime,
+			decodeTimeStamp: originalBuffer.decodeTimeStamp
+		)
+		if let retimed = try? CMSampleBuffer(copying: originalBuffer, withNewTiming: [timing]),
+		   videoInput.append(retimed) {
+			lastVideoPresentationTime = presentationTime
+			frameCount += 1
+		}
+	}
+
 	private func appendVideoSample(_ sampleBuffer: CMSampleBuffer, to videoInput: AVAssetWriterInput, at presentationTime: CMTime) -> Bool {
 		lastSampleBuffer = sampleBuffer
 		let appended: Bool
@@ -582,6 +645,7 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 					self.stopPresentationTime = stopHostTime - self.firstSampleTime - self.accumulatedPausedDuration
 				}
 				self.isRecording = false
+				self.stopKeepaliveTimer()
 				self.windowValidationTask = nil
 				self.trackedWindowId = nil
 				self.finalizationWaiters.append(continuation)
@@ -706,6 +770,7 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 		lastSampleBuffer = nil
 		lastVideoPresentationTime = .zero
 		lastVideoDuration = .zero
+		stopKeepaliveTimer()
 		lastInlineAudioPresentationTime = .invalid
 		lastInlineAudioDuration = .zero
 		frameCount = 0

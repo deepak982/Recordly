@@ -12,6 +12,10 @@ import {
 } from "./editorPreferences";
 import { DEFAULT_AUTO_CAPTION_SETTINGS, DEFAULT_CROP_REGION } from "./types";
 
+it("exports at 60 fps unless the user picked otherwise", () => {
+	expect(DEFAULT_EDITOR_PREFERENCES.mp4FrameRate).toBe(60);
+});
+
 describe("border radius preferences", () => {
 	it("migrates legacy pixels once and marks the stored unit", () => {
 		expect(normalizeEditorPreferences({ borderRadius: 54 })).toMatchObject({

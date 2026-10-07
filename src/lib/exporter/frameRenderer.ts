@@ -1603,6 +1603,7 @@ export class FrameRenderer {
 			cursorTimeMs,
 			connectZooms: this.config.connectZooms,
 			zoomInDurationMs: this.config.zoomInDurationMs,
+			zoomInOverlapMs: this.config.zoomInOverlapMs,
 			zoomOutDurationMs: this.config.zoomOutDurationMs,
 			zoomClassicMode: this.config.zoomClassicMode,
 			cursorTelemetry: this.config.cursorTelemetry,
