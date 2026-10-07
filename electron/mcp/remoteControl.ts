@@ -494,7 +494,12 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 				...(onScreen ? {} : { warning: WINDOW_OFF_SCREEN_MESSAGE }),
 			};
 		},
-		async startRecording({ countdownSeconds }: { countdownSeconds?: number } = {}) {
+		async startRecording({
+			countdownSeconds,
+		}: {
+			countdownSeconds?: number;
+			scenes?: readonly string[];
+		} = {}) {
 			const state = getState();
 			if (state === "recording" || state === "paused") {
 				throw new Error(

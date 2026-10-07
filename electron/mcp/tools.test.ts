@@ -91,6 +91,55 @@ function setup(
 	return { remote, remoteExport, agent, review, call };
 }
 
+const PROTOCOL_INSTRUCTIONS = [
+	"Never record a flow you have not already run",
+	"Plan, rehearse, take:",
+	"it checks only the page you are on",
+	"cancel_recording, re-plan, rehearse, re-take",
+	"Never retry blindly or patch a ruined take",
+];
+
+const PROTOCOL_PROMPT = [
+	"Never record a flow you have not already run end to end",
+	"Do not call start_recording until the rehearsal has passed",
+	"PHASE 1 - PLAN",
+	"PHASE 2 - REHEARSE",
+	"PHASE 3 - TAKE",
+	"4b. Pre-mortem",
+	"Use index only when no combination of role and text is unique",
+	"SELF-CHECK",
+	"Any no means do not record.",
+	"start_recording with scenes set to the rehearsed scene list",
+	"find_elements",
+	"origin + pixel x scale",
+	"dryRun probes only the page you are on",
+	"candidates > 1 means ambiguous, not missing",
+	"cancel_recording and take it again",
+	"Never call start_recording before a clean rehearsal of the whole flow",
+	"Never export a take you have not checked with review_recording",
+];
+
+const PERMISSIVE_WORDING = [
+	"Check the first scene",
+	"screenshot and continue",
+	"or once for a whole flow",
+];
+
+const REPLACE_ANCHORS = [
+	"On macOS it drives the recorded window",
+	"Missing permission → ask the user to grant it in System Settings and reopen Recordly. ",
+	"Coordinates are window-relative points; (0,0) is the window's top-left.",
+	"or list_sources → select_source for an app. Keep the window landscape (at least 1.2 × as wide " +
+		"as tall) so zooms work, and uncovered.",
+	"\n\nErrors:",
+];
+
+const INITIALIZE = {
+	protocolVersion: "2025-11-25",
+	capabilities: {},
+	clientInfo: { name: "test", version: "1" },
+};
+
 describe("buildRecordlyMcpServer", () => {
 	it("exposes the full recording and export tool set", async () => {
 		const { call } = setup();
@@ -135,9 +184,39 @@ describe("buildRecordlyMcpServer", () => {
 
 	it("returns controller refusals as tool errors the agent can read", async () => {
 		const { call } = setup();
-		const { result } = await call("tools/call", { name: "start_recording", arguments: {} });
+		const { result } = await call("tools/call", {
+			name: "start_recording",
+			arguments: { scenes: ["Open the project list", "Create a project"] },
+		});
 		expect(result.isError).toBe(true);
 		expect(result.content[0].text).toContain("No capture source is selected.");
+	});
+
+	it("refuses to record without the rehearsed scene list while control is on", async () => {
+		const { call, remote } = setup();
+		const { result } = await call("tools/call", { name: "start_recording", arguments: {} });
+		expect(result.isError).toBe(true);
+		expect(result.content[0].text).toContain("scenes");
+		expect(result.content[0].text).toContain("Rehearse the flow unrecorded first");
+		expect(remote.startRecording).not.toHaveBeenCalled();
+		const scenes = ["Open the project list"];
+		await call("tools/call", { name: "start_recording", arguments: { scenes } });
+		expect(remote.startRecording).toHaveBeenCalledWith({ scenes });
+		for (const bad of [[], Array.from({ length: 13 }, () => "scene"), [" "]]) {
+			const { result: refused } = await call("tools/call", {
+				name: "start_recording",
+				arguments: { scenes: bad },
+			});
+			expect(refused.isError).toBe(true);
+		}
+		expect(remote.startRecording).toHaveBeenCalledTimes(1);
+	});
+
+	it("records without a scene list when the mouse and keyboard switch is off", async () => {
+		const { call, remote } = setup("idle", { controlEnabled: false });
+		const { result } = await call("tools/call", { name: "start_recording", arguments: {} });
+		expect(result.content[0].text).toContain("No capture source is selected.");
+		expect(remote.startRecording).toHaveBeenCalledWith({});
 	});
 
 	it("rejects an out-of-range countdown before reaching the controller", async () => {
@@ -471,12 +550,10 @@ describe("buildRecordlyMcpServer", () => {
 			"open_url",
 			"list_sources → select_source",
 			"screenshot",
-			"find_elements",
 			"start_recording",
 			"perform",
 			"stop_recording",
 			"export_video",
-			"pixel × scale",
 			"landscape",
 			"the user took over",
 			"Let agents use the mouse and keyboard",
@@ -627,5 +704,80 @@ describe("buildRecordlyMcpServer", () => {
 		const mac = setup("idle", { platform: "darwin" });
 		await mac.call("tools/call", { name: "select_source", arguments: { id: "window:7:0" } });
 		expect(mac.agent.chooseWindow).not.toHaveBeenCalled();
+	});
+	it.each([
+		"darwin",
+		"win32",
+		"linux",
+	] as const)("teaches plan, rehearse, take in the %s instructions and record_demo prompt", async (platform) => {
+		const { call } = setup("idle", { platform });
+		const init = await call("initialize", INITIALIZE);
+		const instructions: string = init.result.instructions;
+		for (const needle of PROTOCOL_INSTRUCTIONS) expect(instructions).toContain(needle);
+		expect(instructions.indexOf("2. Plan.")).toBeLessThan(instructions.indexOf("3. Rehearse"));
+		expect(instructions.indexOf("3. Rehearse")).toBeLessThan(
+			instructions.indexOf("start_recording"),
+		);
+		const { result } = await call("prompts/get", {
+			name: "record_demo",
+			arguments: { goal: "creating a project", url: "https://example.com" },
+		});
+		const text: string = result.messages[0].content.text;
+		for (const needle of PROTOCOL_PROMPT) expect(text).toContain(needle);
+		expect(text.indexOf("PHASE 1 - PLAN")).toBeLessThan(text.indexOf("PHASE 2 - REHEARSE"));
+		expect(text.indexOf("PHASE 2 - REHEARSE")).toBeLessThan(text.indexOf("PHASE 3 - TAKE"));
+		const tools = JSON.stringify((await call("tools/list")).result.tools);
+		expect(tools).toContain("validated at run time");
+		expect(tools).toContain("ambiguous, not missing");
+		expect(tools).toContain("page, a signature to compare between the rehearsal and the take");
+		for (const phrase of PERMISSIVE_WORDING) {
+			expect(instructions).not.toContain(phrase);
+			expect(text).not.toContain(phrase);
+			expect(tools).not.toContain(phrase);
+		}
+	});
+
+	it("keeps the permissive wording out of the Wayland instructions and prompt", async () => {
+		const { call } = setup("idle", { platform: "linux", wayland: true });
+		const init = await call("initialize", INITIALIZE);
+		const { result } = await call("prompts/get", {
+			name: "record_demo",
+			arguments: { goal: "creating a project" },
+		});
+		const text: string = result.messages[0].content.text;
+		expect(text).toContain("user performs the demo");
+		const tools = JSON.stringify((await call("tools/list")).result.tools);
+		for (const phrase of PERMISSIVE_WORDING) {
+			expect(init.result.instructions).not.toContain(phrase);
+			expect(text).not.toContain(phrase);
+			expect(tools).not.toContain(phrase);
+		}
+	});
+
+	it("keeps each substring controlInstructions replaces unique in the macOS text", async () => {
+		const { call } = setup();
+		const init = await call("initialize", INITIALIZE);
+		const instructions: string = init.result.instructions;
+		for (const anchor of REPLACE_ANCHORS) {
+			expect(instructions.split(anchor)).toHaveLength(2);
+		}
+	});
+
+	it.each([
+		"darwin",
+		"win32",
+		"linux",
+	] as const)("keeps every %s description and the instructions within 2048 characters", async (platform) => {
+		const { call } = setup("idle", { platform });
+		const init = await call("initialize", INITIALIZE);
+		const { result } = await call("tools/list");
+		const tooLong = [
+			["instructions", init.result.instructions as string] as const,
+			...result.tools.map(
+				(tool: { name: string; description: string }) =>
+					[tool.name, tool.description] as const,
+			),
+		].filter(([, text]) => text.length > 2048);
+		expect(tooLong.map(([name, text]) => `${name}: ${text.length}`)).toEqual([]);
 	});
 });

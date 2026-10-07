@@ -65,30 +65,29 @@ const INPUT_HELP =
 	"screenshot again.";
 
 const MAC_INSTRUCTIONS =
-	"Recordly records the screen and turns recordings into polished demo videos (automatic zoom on " +
-	"clicks, smooth cursor). On macOS it drives the recorded window with the real mouse and keyboard, " +
+	"Recordly records the screen and turns recordings into polished demo videos: it zooms on clicks " +
+	"and smooths the cursor. On macOS it drives the recorded window with the real mouse and keyboard, " +
 	"so a demo of any website or desktop app needs no other browser or input tool.\n\n" +
-	"Workflow for any demo:\n" +
+	"Never record a flow you have not already run. Plan, rehearse, take:\n" +
 	"1. Target: open_url for a web page, or list_sources → select_source for an app. Keep the window " +
 	"landscape (at least 1.2 × as wide as tall) so zooms work, and uncovered.\n" +
-	"2. Plan while nothing is recorded: learn the screen with find_elements and screenshot, and aim " +
-	"with targets {text, role?, index?}, found when each step runs, instead of coordinates. For a " +
-	"control with no label, screenshot a region of about 300 × 200 points around it and use origin + " +
-	"pixel × scale. perform with dryRun: true checks the current page's targets. Avoid side effects " +
-	"while exploring.\n" +
-	"3. move_pointer to where the first scene starts, then start_recording.\n" +
-	"4. perform per scene or per flow: targets and waitFor let one call cross pages. Leave timing to " +
-	"Recordly; it glides naturally and holds each result after a click or Enter. Screenshot when you " +
-	"need to check a result. By default the time between calls is cut from the video, so verify " +
-	"calmly. Give perform a title only when the user wants captions.\n" +
-	"5. stop_recording, review_recording to check the contact sheet, then export_video.\n\n" +
+	"2. Plan. Write the scene list and every step first. Aim with targets {text, role?, index?}, not " +
+	"coordinates: give role (a link is not a button) and the label's whole visible text, counts " +
+	'included ("Pending 93").\n' +
+	"3. Rehearse unrecorded, one page at a time: perform dryRun: true (it checks only the page you " +
+	"are on), fix every missing or ambiguous target, then perform that page's steps with then: " +
+	'"elements" and confirm the page. Note durationMs. Do side effects here, not in the take.\n' +
+	"4. Reset to the start state, move_pointer to scene 1's start, then start_recording.\n" +
+	"5. Replay the rehearsed steps in as few perform calls as you can; gaps between calls are cut, so " +
+	"one per scene reads best. Leave timing to Recordly; title only for captions.\n" +
+	"6. stop_recording, review_recording, then export_video.\n\n" +
 	"Coordinates are window-relative points; (0,0) is the window's top-left.\n\n" +
 	"Errors: 'the user took over' → stop and ask the user. 'Mouse and keyboard control is off' → ask " +
 	`the user to turn on ${CONTROL_SWITCH}. Missing permission → ask the user to grant it in System ` +
 	"Settings and reopen Recordly. Window closed, covered or on another desktop → list_sources, " +
-	"select_source, screenshot. A failed step ('Step n') leaves the earlier steps done: screenshot and " +
-	"continue, or cancel_recording and start over. Never retry blindly; act only inside the selected " +
-	"window.";
+	"select_source, screenshot. A failed step ('Step n') means the page diverged: cancel_recording, " +
+	"re-plan, rehearse, re-take. Never retry blindly or patch a ruined take. Act only inside the " +
+	"selected window.";
 
 const LINUX_ACCESSIBILITY =
 	"Browsers and Electron apps list their controls only when started with ACCESSIBILITY_ENABLED=1; " +
@@ -342,25 +341,114 @@ function demoPrompt(
 		return [
 			`Record a demo video with Recordly that shows: ${goal}`,
 			"",
-			`1. Target. ${target} ${keep}`,
-			"2. Plan before recording. Learn the screen with find_elements and screenshot, then write a " +
-				"short list of scenes: what the viewer should see, and the steps. Aim with targets {text, " +
-				"role?, index?} found when each step runs, not coordinates; for a control with no label, " +
-				"screenshot a region of about 300 × 200 points around it and use origin + pixel × scale. " +
-				"Check the first scene with perform dryRun: true. Avoid side effects such as submitting or " +
-				"deleting while exploring.",
-			"3. Call move_pointer to where the first scene starts, then start_recording.",
-			"4. Call perform per scene, or once for a whole flow: targets and waitFor let it cross pages. " +
-				"Leave out durations and waits; Recordly paces the motion and holds each result after a " +
-				"click or Enter. Screenshot between calls when you need to check the result; the time " +
-				"between calls is cut by default. Add a perform title only if the user asked for captions " +
-				"or a step-by-step tutorial.",
-			`5. ${exportStep}`,
-			"6. Tell the user the saved path and what the video shows.",
+			"Never record a flow you have not already run end to end. Work in three phases: PLAN, " +
+				"REHEARSE, TAKE. Do not call start_recording until the rehearsal has passed.",
 			"",
-			"If a tool says the user took over, stop and ask the user. If a step fails, screenshot, recover " +
-				"as the error says and redo the scene; if the take is ruined, cancel_recording and start " +
-				"over. Act only inside the selected window.",
+			"PHASE 1 - PLAN (nothing is recorded; take as long as you need)",
+			`1. Target. ${target} ${keep}`,
+			"2. Write the scene list out in your reply before you touch the window: the happy path " +
+				"first, then the edge cases, then the error handling. Give each scene its assumed " +
+				"starting state, one line of what the viewer should come away knowing, and its " +
+				"numbered steps. Keep it to a few scenes, one idea each.",
+			"3. Walk the flow with screenshot and find_elements only. For every step write the exact " +
+				"target {text, role?, index?}:",
+			'   - Always give role. "Open" as a button and "Open" as a link are different elements; ' +
+				"a row action is usually a link, a floating helper is usually a button.",
+			"   - Use the accessible name exactly as find_elements returns it, counts and badges " +
+				'included: a chip reading "Pending" with 93 items is the target text "Pending 93", ' +
+				'never "Pending", which matches dozens of things.',
+			"   - If find_elements returns more than one plausible match, disambiguate now by " +
+				"narrowing: add role, then the fuller accessible name. Use index only when no " +
+				"combination of role and text is unique - it is positional, so one new row silently " +
+				"re-aims it. Never leave the choice to the take.",
+			"   - For a control with no label, screenshot a region of about 300 x 200 points around " +
+				"it and use origin + pixel x scale.",
+			"4. Write the per-step expectation list: after step n, what must be true (which page, " +
+				"which heading, which element appears or disappears). This is what you check during " +
+				"the rehearsal.",
+			"4b. Pre-mortem. Assume this take has already failed. Write every reason it could have " +
+				"failed - wrong element, late-loading row, a dialog, a count that changed, a session " +
+				"that expired. Add one rehearsal check for each. The CHECKS list below is the floor, " +
+				"not the ceiling.",
+			"5. Avoid side effects for now - no submitting, deleting or signing out while planning.",
+			"",
+			"PHASE 2 - REHEARSE (still not recording; this is the whole point)",
+			"6. Run the real flow once, unrecorded, one page at a time. For each page:",
+			"   a. perform with dryRun: true for just that page's steps. dryRun probes only the page " +
+				"you are on - up to and including the first step that can change it, with the rest " +
+				"returned as found: null, validated at run time - so never dry-run a multi-page flow " +
+				"in one call. found: false with candidates > 1 means ambiguous, not missing.",
+			"   b. Fix every target that is missing or ambiguous, then re-dry-run until all its " +
+				"steps report found.",
+			'   c. perform that page\'s steps for real, with then: "elements".',
+			"   d. Check the returned elements against your expectation for that step. After each " +
+				"step, take a screenshot and carefully evaluate if you have achieved the right " +
+				"outcome. State in one sentence what the screenshot shows and whether the step " +
+				"succeeded. If it didn't, try again. Only when you confirm a step was executed " +
+				"correctly should you move on to the next one. If you are not on the page you " +
+				"planned, stop and fix the plan - do not carry on. Record the call's durationMs.",
+			"7. Totals. Sum the durationMs values; that is roughly the video's length. If a page " +
+				"took much longer than the rest, plan a waitFor for it rather than hoping.",
+			"8. Reset to the starting state (re-open the URL, undo or delete whatever the rehearsal " +
+				"created, sign back in). The take must start from the same screen the rehearsal " +
+				"started from.",
+			"",
+			"PHASE 3 - TAKE",
+			"9. move_pointer to where scene 1 begins, then start_recording with scenes set to the " +
+				"rehearsed scene list.",
+			"10. Replay the rehearsed steps, one perform call per scene and no more calls than " +
+				"that: the gap between calls is cut from the video, so extra calls mean extra cuts. " +
+				"Pass the targets you proved, not new ones. Leave out durations and waits; Recordly " +
+				"paces the motion and holds each result after a click or Enter. Add a title only if " +
+				"the user asked for captions or a tutorial.",
+			"11. Do not screenshot mid-take to decide what to do next - the per-step verification " +
+				"belongs in the rehearsal, not here. Screenshot only after a failure.",
+			`12. ${exportStep}`,
+			"13. Tell the user the saved path, what the video shows, and anything you changed " +
+				"between the rehearsal and the take.",
+			"",
+			"CHECKS - what must be true, and what to do when it is not",
+			"- Wrong page. A target not found mid-take almost always means an earlier click landed " +
+				"on the wrong element, so the page has been wrong since then. Do not retry the step. " +
+				"cancel_recording, find the real cause with find_elements, fix that target, rehearse " +
+				"again, re-take.",
+			"- Ambiguous target. Two or more equal matches: perform refuses and lists them. Fix in " +
+				"the plan with role or fuller text, and index only as a last resort.",
+			"- Layout shift. If the page moves while the pointer glides (lazy content, a banner, a " +
+				"list that finishes loading), put a waitFor for the settled page before the click, " +
+				"or waitFor settled: true, and prove it in the rehearsal.",
+			"- Slow load. Add waitFor {text | role} for the thing you are about to click, with " +
+				"timeoutMs above the slowest rehearsal time. Never a bare wait to cover a load.",
+			"- Dialog, cookie banner or toast. Dismiss it before start_recording, or make " +
+				"dismissing it scene 1. Never let it appear for the first time during the take.",
+			"- Empty state. If the demo needs rows, confirm in the rehearsal that they are there, " +
+				"and that the count has not changed by the take. Data that changes the layout (a " +
+				"new row, a changed badge count) invalidates every target whose text includes a " +
+				"number - re-check those after the reset.",
+			"- Auth / logout. If the flow signs out, the reset in step 8 must sign back in. Check " +
+				"you are signed in before start_recording.",
+			"- Covered or resized window. select_source again and screenshot before start_recording.",
+			"- The user took over. Stop and ask the user.",
+			"",
+			"HARD STOPS",
+			"- Never call start_recording before a clean rehearsal of the whole flow.",
+			"- Never retry a failed step blindly. Diagnose in one sentence why it failed, fix the " +
+				"plan so that cause cannot recur, rehearse again, then re-take.",
+			"- Never patch a ruined take by continuing from where it broke. If the cause can be " +
+				"fixed off camera, pause_recording, fix it, resume_recording; if it cannot, " +
+				"cancel_recording and take it again.",
+			"- Never let a scene depend on a target you have not seen found.",
+			"- Never export a take you have not checked with review_recording.",
+			"",
+			"Act only inside the selected window.",
+			"",
+			"SELF-CHECK - answer each one before start_recording",
+			"- Scene list written: happy path, edge cases, error handling?",
+			"- Every target resolved uniquely, with role?",
+			"- Whole flow rehearsed unrecorded, zero failures?",
+			"- durationMs noted per page?",
+			"- Reset to the start state?",
+			"Any no means do not record.",
 			...(platform === "darwin" ? [] : ["Use ctrl, not cmd, for shortcuts."]),
 			...(linux ? [LINUX_ACCESSIBILITY] : []),
 		].join("\n");
@@ -518,7 +606,8 @@ export function buildRecordlyMcpServer(
 		{
 			description:
 				"Start recording the selected source. Returns once capture is actually running (after the " +
-				"countdown). Refuses if " +
+				"countdown). While the mouse and keyboard switch is on it also refuses without scenes, the " +
+				"scene list you rehearsed. Refuses if " +
 				(platform === "linux"
 					? "a recording is already running or still being saved; with no source selected it records the screen entry."
 					: "no source is selected, permissions are missing, or a recording is already running or still being saved.") +
@@ -537,9 +626,27 @@ export function buildRecordlyMcpServer(
 					.max(MAX_COUNTDOWN_SECONDS)
 					.optional()
 					.describe("Countdown before capture starts; defaults to the user's setting"),
+				scenes: z
+					.array(z.string().trim().min(1).max(200))
+					.min(1)
+					.max(12)
+					.optional()
+					.describe(
+						"The scene list you rehearsed, one short line per scene; required while the " +
+							"mouse and keyboard switch is on",
+					),
 			}),
 		},
-		async (args) => textResult(await remote.startRecording(args)),
+		async (args) => {
+			if (isControlEnabled() && args.scenes === undefined) {
+				throw new Error(
+					"Pass scenes: the scene list you rehearsed. Rehearse the flow unrecorded first " +
+						"(perform with dryRun, then the steps for real), reset to the start state, " +
+						"then start_recording with one short line per scene.",
+				);
+			}
+			return textResult(await remote.startRecording(args));
+		},
 	);
 
 	server.registerTool(
@@ -749,7 +856,9 @@ export function buildRecordlyMcpServer(
 				"{ elements: [{role, label, x, y, width, height}], truncated } in window-relative points; " +
 				"click the centre (x + width/2, y + height/2). More precise than reading a screenshot, but " +
 				"some apps (canvas-based, games, custom-drawn UIs) expose few or no elements — then pick " +
-				"points from screenshot. Read-only; works while the mouse and keyboard switch is off.",
+				"points from screenshot. A label is the whole visible text, counts and badges included: a " +
+				'chip reading "Pending" with 93 items has the label "Pending 93". ' +
+				"Read-only; works while the mouse and keyboard switch is off.",
 			annotations: { readOnlyHint: true },
 			inputSchema: z.object({
 				text: z
@@ -872,22 +981,24 @@ export function buildRecordlyMcpServer(
 		"perform",
 		{
 			description:
-				"Run one scene or a whole flow: steps executed back to back with exact timing (separate " +
-				"calls split a scene into many cuts). Steps take the matching tool's fields plus action: " +
-				"move {x, y | target}, click {x, y | target, button?, count?, modifiers?}, drag {fromX, " +
-				"fromY | from, toX, toY | to}, scroll {x, y | target, deltaY, deltaX?}, type {text, into?}, " +
-				"key {key, modifiers?, repeat?}, wait {ms}, waitFor {text?, role?, gone?, settled?, " +
-				"timeoutMs?}. A target {text, role?, index?} is found on screen when its step runs (waiting " +
-				"up to 5 s, scrolling it into view), so one perform can cross pages; prefer it to " +
+				"Run one rehearsed scene: steps executed back to back with exact timing (separate calls " +
+				"split a scene into many cuts). Each step takes the matching tool's own fields plus " +
+				"action: move, click, drag, scroll, type, key, wait {ms} or waitFor. A target {text, " +
+				"role?, index?} is found on screen when its step runs (waiting " +
+				"up to 5 s, scrolling it into view), so a scene may change page; prefer targets to " +
 				"coordinates. Leave out durationMs and waits: Recordly glides at a natural speed and, after " +
-				"a click or Enter, waits for the screen to settle and holds the result for reading; pace " +
-				"(brisk, normal, relaxed) scales that. A wait or waitFor right after one replaces that hold: " +
-				"use wait only for longer reading and waitFor only for slow content. dryRun checks the " +
-				"current page's targets without acting and returns dryRun: [{index (1-based, as in 'Step " +
-				"n'), found, …}]; then: 'elements' returns the visible controls afterwards. title becomes an " +
-				"on-screen caption: set it only when the user wants captions. Limits: 1–200 steps, waits " +
-				"up to 30000 ms, 10 minutes per call. A failure says 'Step n (action)': the earlier steps " +
-				"have run, so screenshot and continue from there. Returns " +
+				"a click or Enter, waits for the screen to settle and holds the result for reading. A wait " +
+				"or waitFor right after one replaces that hold: " +
+				"use wait only for longer reading and waitFor only for slow content. dryRun acts on nothing: " +
+				"it probes up to and including the first step that can change the page and returns dryRun: " +
+				"[{index (1-based, as in 'Step n'), action, found, label?, candidates?, ambiguous?, " +
+				"matches?, note?}], the steps after it as found: null with note 'validated at run time'. " +
+				"found: false with candidates > 1 (ambiguous: true, matches listed) means ambiguous, not " +
+				"missing. dryRun and then: 'elements' also return page, a signature to compare between the " +
+				"rehearsal and the take; then: 'elements' adds the visible controls. Limits: 1–200 steps, " +
+				"waits up to 30000 ms, 10 minutes per " +
+				"call. A failure says 'Step n (action)': the earlier steps have run and the page has " +
+				"diverged, so cancel_recording and take the scene again. Returns " +
 				`{ performed, durationMs }. ${POINT_HELP} ${INPUT_NOTE} 'the user took over' means stop and ` +
 				"ask the user; other errors are explained in click's description.",
 			inputSchema: z.object({
@@ -908,7 +1019,7 @@ export function buildRecordlyMcpServer(
 				dryRun: z
 					.boolean()
 					.optional()
-					.describe("Only check that the current page's targets can be found; no input"),
+					.describe("Only check the targets on the page you are on now; no input"),
 				then: z
 					.literal("elements")
 					.optional()
