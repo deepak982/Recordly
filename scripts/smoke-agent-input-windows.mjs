@@ -296,6 +296,31 @@ async function main() {
 			menus.length > 0 && menus.every((each) => each.visible !== false && !each.web),
 			`find by text returns ${JSON.stringify(menus[0])}`,
 		);
+		const probe = await request({ cmd: "at", pid: notepad.pid, ...center(menus[0]) });
+		const sameBox = (a, b) =>
+			["x", "y", "width", "height"].every((key) => Math.abs(a[key] - b[key]) <= 1);
+		check(
+			probe.hit?.role === menus[0].role &&
+				probe.hit.label === menus[0].label &&
+				sameBox(probe.hit, menus[0]),
+			`at returns the menu item find reported: ${JSON.stringify(probe.hit)}`,
+		);
+		check(
+			probe.parent !== null && typeof probe.parent.role === "string",
+			`at returns the parent ${JSON.stringify(probe.parent)}`,
+		);
+		const nowhere = await request({ cmd: "at", pid: notepad.pid, x: -30000, y: -30000 });
+		check(
+			nowhere.hit === null && nowhere.parent === null,
+			"at returns nulls for a point over nothing",
+		);
+		// Same code path as a point that has drifted onto another app's window.
+		const foreign = await request({ cmd: "at", pid: process.pid, ...center(menus[0]) });
+		check(
+			foreign.hit === null && foreign.parent === null,
+			"at returns nulls when the point belongs to another process",
+		);
+
 		let editor;
 		for (const role of ["edit", "document"]) {
 			editor ??= (await request({ cmd: "find", ...target, role, limit: 5 })).elements[0];

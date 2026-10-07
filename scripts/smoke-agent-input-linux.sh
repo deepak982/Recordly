@@ -97,6 +97,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -294,6 +295,35 @@ row = only(find(text="row 3", role="text"))
 check(target and slider and row and row["role"] == "AXStaticText", "find by AT-SPI role name and alias", (target, slider, row))
 check(len(find(text="row", limit=2).get("elements", [])) == 2 and find(text="row", limit=2).get("truncated") is True, "find honours limit and reports truncated")
 check(find(role="bogus").get("error") == "unknown role: bogus", "find rejects an unknown role")
+
+
+def at(x, y, helper=None):
+    return (helper or h).call("at", pid=app.pid, x=x, y=y)
+
+
+r = at(*center(button))
+check(
+    r.get("ok") and r.get("hit") == {"role": "AXButton", "label": "Press Me", **{k: button[k] for k in ("x", "y", "width", "height")}}
+    and r.get("parent") and r["parent"]["width"] > 0,
+    "at returns the control under the point with its parent",
+    r,
+)
+r = at(frame["x"] + frame["width"] + 60, frame["y"] + frame["height"] + 60)
+check(r.get("ok") is True and r.get("hit") is None and r.get("parent") is None, "at returns nulls over empty space", r)
+stub = tempfile.mkdtemp()
+with open(os.path.join(stub, "libatspi.so.0"), "w") as handle:
+    handle.write("not a library\n")
+blind = Helper({**os.environ, "LD_LIBRARY_PATH": stub})
+r = at(*center(button), helper=blind)
+pf = blind.call("preflight")
+check(
+    r.get("ok") is True and r.get("hit") is None and r.get("parent") is None and pf.get("atspi") is False
+    and blind.call("find", pid=app.pid, windowId=main_id, frame=frame, limit=5).get("error", "").endswith("libatspi (at-spi2-core) is not installed"),
+    "at returns nulls when libatspi cannot be loaded",
+    (r, pf),
+)
+blind.proc.stdin.close()
+blind.proc.wait(5)
 if not (button and field and target and slider and row):
     print("FAIL cannot continue without targets", flush=True)
     sys.exit(1)
@@ -400,6 +430,7 @@ for cmd, fields in [
     ("raise", {"pid": app.pid, "windowId": main_id, "frame": frame}),
     ("find", {"pid": app.pid, "windowId": main_id, "frame": frame, "limit": 5}),
     ("window_info", {"windowId": main_id}),
+    ("at", {"pid": app.pid, "x": 10, "y": 10}),
 ]:
     r = w.call(cmd, **fields)
     check(r.get("ok") is False and r.get("error") == WAYLAND, f"Wayland refuses {cmd}", r)

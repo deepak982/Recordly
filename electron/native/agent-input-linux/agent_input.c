@@ -1360,6 +1360,8 @@ static struct {
 	int (*has_state)(void *, int);
 	void *(*component)(void *);
 	AtspiRect *(*extents)(void *, int, void **);
+	void *(*at_point)(void *, int, int, int, void **);
+	void *(*parent)(void *, void **);
 	void *(*text)(void *);
 	int (*char_count)(void *, void **);
 	char *(*get_text)(void *, int, int, void **);
@@ -1393,6 +1395,8 @@ static bool atspi_ready(void) {
 		{"atspi_state_set_contains", (void **)&at.has_state, false},
 		{"atspi_accessible_get_component_iface", (void **)&at.component, false},
 		{"atspi_component_get_extents", (void **)&at.extents, false},
+		{"atspi_component_get_accessible_at_point", (void **)&at.at_point, false},
+		{"atspi_accessible_get_parent", (void **)&at.parent, false},
 		{"atspi_accessible_get_text_iface", (void **)&at.text, false},
 		{"atspi_text_get_character_count", (void **)&at.char_count, false},
 		{"atspi_text_get_text", (void **)&at.get_text, false},
@@ -1691,6 +1695,103 @@ static bool walk(void *window, const char *const *roles, const char *text, const
 	return true;
 }
 
+static char *point_element(void *obj) {
+	void *err = NULL, *states = at.states(obj);
+	int role = at.role(obj, &err);
+	clear(&err);
+	char *raw = at.role_name(role), *label = NULL;
+	const char *ax = ax_role(role, states);
+	if (!ax) ax = raw ? raw : "";
+	for (int k = 0; k < 3 && !label; k++) {
+		char *value = label_at(obj, k);
+		if (*value) label = value;
+		else free(value);
+	}
+	double b[4] = {0, 0, 0, 0};
+	extents(obj, b);
+	const char *text = label ? label : "", *cut = text;
+	for (int i = 0; i < 200 && *cut; i++) utf8_next(&cut);
+	Buf j = {0};
+	b_puts(&j, "{\"role\":");
+	b_str(&j, ax);
+	b_puts(&j, ",\"label\":");
+	char clipped[1024] = "";
+	snprintf(clipped, sizeof clipped, "%.*s", (int)(cut - text), text);
+	b_str(&j, clipped);
+	const char *keys[4] = {"x", "y", "width", "height"};
+	for (int i = 0; i < 4; i++) {
+		b_printf(&j, ",\"%s\":", keys[i]);
+		b_num(&j, b[i]);
+	}
+	b_puts(&j, "}");
+	free(label);
+	at.free(raw);
+	if (states) at.unref(states);
+	return j.s;
+}
+
+/* get_accessible_at_point only descends one level, so follow it down until it stops. */
+static void *deepest_at(void *window, int x, int y) {
+	void *current = window;
+	for (int depth = 0; depth < 100; depth++) {
+		void *component = at.component(current), *err = NULL, *child = NULL;
+		if (component) {
+			child = at.at_point(component, x, y, 0, &err);
+			clear(&err);
+			at.unref(component);
+		}
+		if (!child || child == current) {
+			if (child) at.unref(child);
+			return current;
+		}
+		at.unref(current);
+		current = child;
+	}
+	return current;
+}
+
+static void nothing(Buf *out) { b_puts(out, ",\"hit\":null,\"parent\":null"); }
+
+static bool cmd_at(Json *r, Buf *out) {
+	int pid = 0;
+	double x, y;
+	TRY(need_pid(r, &pid) && point(r, "x", "y", &x, &y));
+	pthread_mutex_lock(&at.lock);
+	void *window = NULL, *app = atspi_ready() ? app_for(pid) : NULL;
+	void *err = NULL;
+	int n = app ? at.child_count(app, &err) : 0;
+	clear(&err);
+	for (int i = 0; i < n && !window; i++) {
+		void *candidate = at.child(app, i, &err);
+		clear(&err);
+		double box[4];
+		if (candidate && extents(candidate, box) && box[2] > 0 && box[3] > 0 && centred_in(box, x, y)) window = candidate;
+		else if (candidate) at.unref(candidate);
+	}
+	if (app) at.unref(app);
+	if (!window) nothing(out);
+	else {
+		void *hit = deepest_at(window, (int)lround(x), (int)lround(y));
+		char *element = point_element(hit);
+		b_puts(out, ",\"hit\":");
+		b_puts(out, element);
+		free(element);
+		void *parent = at.parent(hit, &err);
+		clear(&err);
+		b_puts(out, ",\"parent\":");
+		if (!parent) b_puts(out, "null");
+		else {
+			char *above = point_element(parent);
+			b_puts(out, above);
+			free(above);
+			at.unref(parent);
+		}
+		at.unref(hit);
+	}
+	pthread_mutex_unlock(&at.lock);
+	return true;
+}
+
 static bool find_locked(int pid, const double bounds[4], const double outer[4], const char *title,
 	const char *role_query, const char *const *roles, const char *query, bool offscreen, int limit, Buf *out) {
 	if (!atspi_ready()) return fail("find needs the AT-SPI accessibility bus, but %s", at.why);
@@ -1806,7 +1907,7 @@ static void *signal_main(void *arg) {
 static const struct { const char *name; InputFn input; WorkFn work; } commands[] = {
 	{"move", cmd_move, NULL}, {"click", cmd_click, NULL}, {"drag", cmd_drag, NULL}, {"scroll", cmd_scroll, NULL},
 	{"type", cmd_type, NULL}, {"key", cmd_key, NULL}, {"frontmost_window", NULL, cmd_frontmost},
-	{"raise", NULL, cmd_raise}, {"find", NULL, cmd_find}, {"window_info", NULL, cmd_window_info}, {"preflight", NULL, NULL}, {"cursor", NULL, NULL},
+	{"raise", NULL, cmd_raise}, {"find", NULL, cmd_find}, {"window_info", NULL, cmd_window_info}, {"at", NULL, cmd_at}, {"preflight", NULL, NULL}, {"cursor", NULL, NULL},
 	{"arm", NULL, NULL}, {"disarm", NULL, NULL},
 };
 

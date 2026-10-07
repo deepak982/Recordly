@@ -1359,6 +1359,30 @@ bool cachedBool(IUIAutomationElement* element, PROPERTYID property) {
 	return result;
 }
 
+bool isHeading(IUIAutomationElement* element) {
+	const int level = cachedInt(element, UIA_HeadingLevelPropertyId, kHeadingLevelNone);
+	return (level > kHeadingLevelNone && level <= kHeadingLevel9) ||
+		lowercase(cachedString(element, UIA_LocalizedControlTypePropertyId)) == L"heading";
+}
+
+std::string roleNameOf(IUIAutomationElement* element) {
+	const int type = cachedInt(element, UIA_ControlTypePropertyId, 0);
+	return isHeading(element) && type == UIA_TextControlTypeId ? "Heading" : controlTypeName(type);
+}
+
+std::wstring truncateLabel(std::wstring label) {
+	if (label.size() > 200) label.resize(IS_HIGH_SURROGATE(label[199]) ? 199 : 200);
+	return label;
+}
+
+std::wstring firstLabel(IUIAutomationElement* element, std::initializer_list<PROPERTYID> properties) {
+	for (const PROPERTYID property : properties) {
+		const std::wstring label = trim(cachedString(element, property));
+		if (!label.empty()) return truncateLabel(label);
+	}
+	return {};
+}
+
 std::string runtimeKey(IUIAutomationElement* element) {
 	VARIANT value;
 	VariantInit(&value);
@@ -1562,10 +1586,7 @@ std::string find(const Json& request) {
 		Com<IUIAutomationElement> element;
 		if (FAILED(found->GetElement(index, element.put())) || !element) continue;
 		const int type = cachedInt(element.p, UIA_ControlTypePropertyId, 0);
-		const int level = cachedInt(element.p, UIA_HeadingLevelPropertyId, kHeadingLevelNone);
-		const bool heading = (level > kHeadingLevelNone && level <= kHeadingLevel9) ||
-			lowercase(cachedString(element.p, UIA_LocalizedControlTypePropertyId)) == L"heading";
-		if (roles && !roles->count(type) && !(heading && roles->count(kHeadingRole))) continue;
+		if (roles && !roles->count(type) && !(isHeading(element.p) && roles->count(kHeadingRole))) continue;
 		std::vector<std::wstring> labels;
 		for (const PROPERTYID property : kTextProperties) {
 			const std::wstring label = trim(cachedString(element.p, property));
@@ -1591,11 +1612,10 @@ std::string find(const Json& request) {
 			truncated = true;
 			break;
 		}
-		std::wstring label = labels.empty() ? std::wstring() : labels.front();
-		if (label.size() > 200) label.resize(IS_HIGH_SURROGATE(label[199]) ? 199 : 200);
 		if (!elements.empty()) elements += ",";
-		elements += "{\"role\":" + quote(std::string(heading && type == UIA_TextControlTypeId ? "Heading" : controlTypeName(type))) +
-			",\"label\":" + quote(label) + ",\"x\":" + num(box.left) + ",\"y\":" + num(box.top) +
+		elements += "{\"role\":" + quote(roleNameOf(element.p)) +
+			",\"label\":" + quote(truncateLabel(labels.empty() ? std::wstring() : labels.front())) +
+			",\"x\":" + num(box.left) + ",\"y\":" + num(box.top) +
 			",\"width\":" + num(width) + ",\"height\":" + num(height);
 		if (!key.empty() && scope.web.count(key)) elements += ",\"web\":true";
 		if (!visible) {
@@ -1605,6 +1625,49 @@ std::string find(const Json& request) {
 		elements += "}";
 	}
 	return "\"elements\":[" + elements + "],\"truncated\":" + boolText(truncated);
+}
+
+const std::initializer_list<PROPERTYID> kHitProperties = {UIA_NamePropertyId, UIA_FullDescriptionPropertyId,
+	UIA_ValueValuePropertyId};
+
+std::string hitFields(IUIAutomationElement* element) {
+	RECT box{};
+	element->get_CachedBoundingRectangle(&box);
+	return "{\"role\":" + quote(roleNameOf(element)) + ",\"label\":" + quote(firstLabel(element, kHitProperties)) + "," +
+		boundsFields(box) + "}";
+}
+
+// Probed before every press, so "nothing there", "another app's window" and "UIA refused" all
+// answer null rather than failing: the caller treats null as inconclusive and presses anyway.
+// ElementFromPoint is screen-point based, so the match is scoped to pid here, as on macOS.
+std::string elementAt(const Json& request) {
+	const DWORD owner = pid(request);
+	const POINT spot = point(request, "x", "y");
+	const std::string nothing = "\"hit\":null,\"parent\":null";
+	IUIAutomation* uia = automation();
+	if (!uia) return nothing;
+	const auto cache = cacheFor(uia, {UIA_ControlTypePropertyId, UIA_BoundingRectanglePropertyId,
+		UIA_ProcessIdPropertyId, UIA_LocalizedControlTypePropertyId, UIA_HeadingLevelPropertyId,
+		UIA_NamePropertyId, UIA_FullDescriptionPropertyId, UIA_ValueValuePropertyId});
+	Com<IUIAutomationElement> hit;
+	Com<IUIAutomationElement> desktop;
+	if (!cache || FAILED(uia->ElementFromPointBuildCache(spot, cache.p, hit.put())) || !hit) return nothing;
+	// The desktop root and any other app's window both read as nothing, so the three platforms agree.
+	const auto belongs = [&](IUIAutomationElement* element) {
+		BOOL isDesktop = FALSE;
+		if (SUCCEEDED(uia->GetRootElement(desktop.put())) && desktop &&
+			SUCCEEDED(uia->CompareElements(element, desktop.p, &isDesktop)) && isDesktop) {
+			return false;
+		}
+		return static_cast<DWORD>(cachedInt(element, UIA_ProcessIdPropertyId, 0)) == owner;
+	};
+	if (!belongs(hit.p)) return nothing;
+	Com<IUIAutomationTreeWalker> walker;
+	Com<IUIAutomationElement> parent;
+	const bool hasParent = SUCCEEDED(uia->get_ControlViewWalker(walker.put())) && walker &&
+		SUCCEEDED(walker->GetParentElementBuildCache(hit.p, cache.p, parent.put())) && parent &&
+		belongs(parent.p);
+	return "\"hit\":" + hitFields(hit.p) + ",\"parent\":" + (hasParent ? hitFields(parent.p) : "null");
 }
 
 // ---- dispatch -------------------------------------------------------------------------------------
@@ -1726,6 +1789,7 @@ void handle(const std::string& line) {
 		});
 	} else if (command == "raise") runWork(id, [request] { return raise(*request); });
 	else if (command == "find") runWork(id, [request] { return find(*request); });
+	else if (command == "at") runWork(id, [request] { return elementAt(*request); });
 	else send("{\"id\":" + id + ",\"ok\":false,\"error\":" + quote("unknown command: " + command) + "}");
 }
 
