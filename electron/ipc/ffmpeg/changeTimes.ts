@@ -8,6 +8,7 @@ export const MAX_CHANGE_TIMES = 50_000;
 const MAX_CHANGE_TIME_SOURCE_MS = 20 * 60_000;
 const KEEPALIVE_MIN_GAP_MS = 150;
 const KEEPALIVE_SIZE_MULTIPLE = 2.5;
+const PROBE_TIMEOUT_MS = 15_000;
 
 interface VideoPacket {
 	timeMs: number;
@@ -85,7 +86,12 @@ export async function extractScreenChangeTimesMs(
 			"csv=p=0",
 			videoPath,
 		],
-		{ maxBuffer: 256 * 1024 * 1024, windowsHide: true },
+		{
+			maxBuffer: 256 * 1024 * 1024,
+			windowsHide: true,
+			timeout: PROBE_TIMEOUT_MS,
+			killSignal: "SIGKILL",
+		},
 	);
 	const times = selectChangeTimesMs(stdout, durationMs);
 	return times.length > 0 ? times : null;

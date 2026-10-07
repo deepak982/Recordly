@@ -197,11 +197,13 @@ export async function waitForStillWindow(
 		const unsettled = () => ({ settled: false, elapsedMs: Date.now() - started });
 		let sampledAt = started;
 		let stillSince = started;
+		let compared = false;
 		let previous = await sampleBefore(deadline);
 		if (!previous) return unsettled();
 		for (;;) {
 			const now = Date.now();
-			if (now - stillSince >= quietMs) return { settled: true, elapsedMs: now - started };
+			if (compared && now - stillSince >= quietMs)
+				return { settled: true, elapsedMs: now - started };
 			if (now >= deadline) return { settled: false, elapsedMs: now - started };
 			const wait = Math.min(sampledAt + intervalMs, deadline) - now;
 			await Promise.race([new Promise((resolve) => setTimeout(resolve, wait)), aborted]);
@@ -209,6 +211,7 @@ export async function waitForStillWindow(
 			const next = await sampleBefore(deadline);
 			if (!next) return unsettled();
 			if (windowSampleChanged(previous, next)) stillSince = sampledAt;
+			compared = true;
 			previous = next;
 		}
 	} finally {

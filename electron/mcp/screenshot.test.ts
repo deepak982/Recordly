@@ -294,6 +294,19 @@ describe("waitForStillWindow", () => {
 		});
 	});
 
+	it("compares two samples before calling the window still", async () => {
+		mockFrames(() => 255);
+		const capture = getSources.getMockImplementation();
+		getSources.mockImplementationOnce(
+			(options: unknown) =>
+				new Promise((resolve) => setTimeout(() => resolve(capture(options)), 500)),
+		);
+		const result = waitForStillWindow(FRAME, { timeoutMs: 4000 });
+		await vi.advanceTimersByTimeAsync(1000);
+		await expect(result).resolves.toMatchObject({ settled: true });
+		expect(getSources).toHaveBeenCalledTimes(2);
+	});
+
 	it("keeps waiting while the window changes, then settles", async () => {
 		mockFrames((call) => [255, 0, 255][call] ?? 255);
 		const result = waitForStillWindow(FRAME, { timeoutMs: 4000 });

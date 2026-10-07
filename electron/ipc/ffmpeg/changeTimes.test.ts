@@ -127,6 +127,15 @@ describe("extractScreenChangeTimesMs", () => {
 		expect(args[args.length - 1]).toBe("/rec.mp4");
 	});
 
+	it("bounds the probe so a hung ffprobe cannot stall the stop handler", async () => {
+		mocks.stdout = csv([[0, 40_000, "K_"]]);
+		await extractScreenChangeTimesMs("/rec.mp4", 1_000);
+		expect(mocks.execFile.mock.calls[0][2]).toMatchObject({
+			timeout: 15_000,
+			killSignal: "SIGKILL",
+		});
+	});
+
 	it("skips a recording past the length limit without probing it", async () => {
 		expect(await extractScreenChangeTimesMs("/long.mp4", 21 * 60_000)).toBeNull();
 		expect(mocks.execFile).not.toHaveBeenCalled();
