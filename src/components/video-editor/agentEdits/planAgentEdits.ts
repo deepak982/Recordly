@@ -38,35 +38,56 @@ export interface AgentActivityLog {
 	version: 1;
 	scenes: AgentActivityScene[];
 	spans: AgentActivitySpan[];
+	changeTimesMs?: number[];
+}
+
+export interface AgentEditKeepRange {
+	startMs: number;
+	endMs: number;
+	/** Playback rate for this source range. Absent or 1 means a plain shot. */
+	speed?: number;
 }
 
 export interface AgentEditPlan {
-	keepRanges: { startMs: number; endMs: number }[];
+	keepRanges: AgentEditKeepRange[];
 	zooms: { startMs: number; endMs: number; depth: ZoomDepth; focus: ZoomFocus }[];
 	captions: { startMs: number; endMs: number; text: string }[];
 }
 
-export const MOTION_LEAD_MS = 300;
+export const MOTION_LEAD_MS = 700;
 export const MOTION_TAIL_MS = 400;
-export const WAIT_KEEP_HEAD_MS = 500;
+export const WAIT_KEEP_HEAD_MS = 1200;
 export const WAIT_KEEP_TAIL_MS = 300;
-export const KEEP_MERGE_GAP_MS = 600;
+export const HOLD_KEEP_MS = 800;
+export const HOLD_READ_KEEP_MS = 1200;
+export const HOLD_READ_KEEP_MAX_MS = 4000;
+export const KEEP_MERGE_GAP_MS = 250;
+export const MERGE_CUT_GAP_MS = 1200;
+export const MIN_SHOT_MS = 900;
+export const RAMP_MAX_GAP_MS = 3000;
+export const RAMP_MIN_SPEED = 4;
+export const RAMP_MAX_SPEED = 8;
+export const RAMP_TARGET_SCREEN_MS = 500;
+export const RAMP_EASE_SCREEN_MS = 175;
+export const QUIET_RADIUS_MS = 400;
+export const QUIET_SNAP_WINDOW_MS = 600;
 export const FINAL_TAIL_MS = 1200;
 export const MIN_TOTAL_CUT_MS = 500;
 export const ZOOM_MAX_AFTER_ACTION_MS = 3000;
 export const ZOOM_MIN_DURATION_MS = 1200;
+export const ZOOM_KEEP_TAIL_MS = 250;
 export const TYPE_INHERITS_CLICK_WITHIN_MS = 2000;
 export const ZOOM_SMALL_TARGET_MAX_WIDTH = 0.15;
 export const ZOOM_MEDIUM_TARGET_MAX_WIDTH = 0.35;
-export const SMALL_TARGET_ZOOM_DEPTH: ZoomDepth = 3;
-export const MEDIUM_TARGET_ZOOM_DEPTH: ZoomDepth = 2;
+export const SMALL_TARGET_ZOOM_DEPTH: ZoomDepth = 2;
+export const MEDIUM_TARGET_ZOOM_DEPTH: ZoomDepth = 1;
 export const ZOOM_MERGE_GAP_MS = 1350;
 export const ZOOM_MERGE_FOCUS_DISTANCE = 0.25;
 export const ZOOM_MIN_PIECE_MS = 600;
 export const CAPTION_DURATION_MS = 2500;
 export const CAPTION_MAX_CHARS = 80;
 
-type TimeRange = AgentEditPlan["keepRanges"][number];
+type TimeRange = { startMs: number; endMs: number };
 type ZoomPlan = AgentEditPlan["zooms"][number];
 type ZoomLook = Pick<ZoomPlan, "depth" | "focus">;
 
@@ -90,7 +111,12 @@ function normalizeTimed<T extends TimeRange>(items: readonly T[] | undefined, du
 		.sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs);
 }
 
-function mergeRanges(ranges: TimeRange[], durationMs: number): TimeRange[] {
+function mergeRanges(
+	ranges: TimeRange[],
+	durationMs: number,
+	maxGapMs: number = KEEP_MERGE_GAP_MS,
+	blocked: TimeRange[] = [],
+): TimeRange[] {
 	const merged: TimeRange[] = [];
 	const clamped = ranges
 		.map((range) => ({
@@ -101,13 +127,120 @@ function mergeRanges(ranges: TimeRange[], durationMs: number): TimeRange[] {
 		.sort((a, b) => a.startMs - b.startMs);
 	for (const range of clamped) {
 		const last = merged[merged.length - 1];
-		if (last && range.startMs - last.endMs < KEEP_MERGE_GAP_MS) {
+		const bridgesACut = blocked.some(
+			(cut) => cut.startMs < range.startMs && cut.endMs > (last?.endMs ?? 0),
+		);
+		if (last && !bridgesACut && range.startMs - last.endMs < maxGapMs) {
 			last.endMs = Math.max(last.endMs, range.endMs);
 		} else {
 			merged.push(range);
 		}
 	}
 	return merged;
+}
+
+function quietTimeNear(
+	timeMs: number,
+	changeTimesMs: number[],
+	minMs: number,
+	maxMs: number,
+): number {
+	let best: number | null = null;
+	for (let index = 0; index <= changeTimesMs.length; index += 1) {
+		const lowMs =
+			index === 0 ? Number.NEGATIVE_INFINITY : changeTimesMs[index - 1] + QUIET_RADIUS_MS;
+		const highMs =
+			index === changeTimesMs.length
+				? Number.POSITIVE_INFINITY
+				: changeTimesMs[index] - QUIET_RADIUS_MS;
+		if (highMs < lowMs) continue;
+		const candidate = Math.round(Math.min(Math.max(timeMs, lowMs), highMs));
+		if (candidate < minMs || candidate > maxMs) continue;
+		if (Math.abs(candidate - timeMs) > QUIET_SNAP_WINDOW_MS) continue;
+		if (best === null || Math.abs(candidate - timeMs) < Math.abs(best - timeMs)) {
+			best = candidate;
+		}
+	}
+	return best ?? timeMs;
+}
+
+function snapToQuiet(
+	ranges: TimeRange[],
+	changeTimesMs: number[],
+	durationMs: number,
+): TimeRange[] {
+	if (changeTimesMs.length === 0) return ranges;
+	return ranges.map((range, index) => {
+		const startMs = quietTimeNear(
+			range.startMs,
+			changeTimesMs,
+			index === 0 ? 0 : ranges[index - 1].endMs,
+			range.endMs - 1,
+		);
+		const endMs = quietTimeNear(
+			range.endMs,
+			changeTimesMs,
+			Math.max(range.endMs, startMs + 1),
+			index === ranges.length - 1 ? durationMs : ranges[index + 1].startMs,
+		);
+		return { startMs, endMs };
+	});
+}
+
+function extendShortShots(ranges: TimeRange[], durationMs: number): TimeRange[] {
+	return ranges.map((range, index) => {
+		if (range.endMs - range.startMs >= MIN_SHOT_MS) return range;
+		const endMs = Math.min(durationMs, range.startMs + MIN_SHOT_MS);
+		const previousEndMs = index === 0 ? 0 : ranges[index - 1].endMs;
+		return {
+			startMs: Math.max(previousEndMs, Math.min(range.startMs, endMs - MIN_SHOT_MS)),
+			endMs,
+		};
+	});
+}
+
+function rampGap(startMs: number, endMs: number): AgentEditKeepRange[] {
+	const gapMs = endMs - startMs;
+	const speed = Math.min(
+		RAMP_MAX_SPEED,
+		Math.max(RAMP_MIN_SPEED, Math.round(gapMs / RAMP_TARGET_SCREEN_MS)),
+	);
+	const easeSpeed = Math.max(2, Math.round(speed / 2));
+	const easeMs = Math.min(Math.round(RAMP_EASE_SCREEN_MS * easeSpeed), Math.floor(gapMs / 3));
+	if (easeMs <= 0) return [{ startMs, endMs, speed }];
+	return [
+		{ startMs, endMs: startMs + easeMs, speed: easeSpeed },
+		{ startMs: startMs + easeMs, endMs: endMs - easeMs, speed },
+		{ startMs: endMs - easeMs, endMs, speed: easeSpeed },
+	];
+}
+
+function rampShortCuts(
+	ranges: TimeRange[],
+	blocked: TimeRange[],
+	changeTimesMs: number[],
+): AgentEditKeepRange[] {
+	return ranges.slice(1).flatMap((range, index) => {
+		const previous = ranges[index];
+		const gapMs = range.startMs - previous.endMs;
+		if (gapMs <= 0 || gapMs > RAMP_MAX_GAP_MS) return [];
+		if (blocked.some((cut) => cut.startMs < range.startMs && cut.endMs > previous.endMs)) {
+			return [];
+		}
+		if (
+			changeTimesMs.length > 0 &&
+			!changeTimesMs.some((timeMs) => timeMs > previous.endMs && timeMs < range.startMs)
+		) {
+			return [];
+		}
+		return rampGap(previous.endMs, range.startMs);
+	});
+}
+
+function holdKeepMs(span: AgentActivitySpan, previous: AgentActivitySpan | undefined): number {
+	if (span.kind === "wait") return WAIT_KEEP_HEAD_MS + WAIT_KEEP_TAIL_MS;
+	if (previous?.kind !== "wait") return HOLD_KEEP_MS;
+	return Math.min(HOLD_READ_KEEP_MAX_MS, Math.max(HOLD_READ_KEEP_MS, span.endMs - span.startMs));
 }
 
 function subtractRange(ranges: TimeRange[], cut: TimeRange): TimeRange[] {
@@ -188,7 +321,7 @@ function planZooms(spans: AgentActivitySpan[], keepRanges: TimeRange[]): ZoomPla
 	return merged.flatMap((zoom) =>
 		keepRanges.flatMap((range) => {
 			const startMs = Math.max(zoom.startMs, range.startMs);
-			const endMs = Math.min(zoom.endMs, range.endMs);
+			const endMs = Math.min(zoom.endMs, range.endMs - ZOOM_KEEP_TAIL_MS);
 			return endMs - startMs >= ZOOM_MIN_PIECE_MS ? [{ ...zoom, startMs, endMs }] : [];
 		}),
 	);
@@ -222,6 +355,7 @@ export function planAgentEdits(
 	log: AgentActivityLog | null | undefined,
 	durationMs: number,
 	sourceAspect: number,
+	changeTimesMs?: number[],
 ): AgentEditPlan | null {
 	if (!log || log.version !== 1 || !Number.isFinite(durationMs) || durationMs <= 0) return null;
 
@@ -243,30 +377,49 @@ export function planAgentEdits(
 	);
 	if (spans.length === 0) return null;
 
-	const pieces = spans.flatMap((span): TimeRange[] => {
-		if (span.kind !== "wait") {
+	const pieces = spans.flatMap((span, index): TimeRange[] => {
+		if (span.kind === "motion") {
 			return [{ startMs: span.startMs - MOTION_LEAD_MS, endMs: span.endMs + MOTION_TAIL_MS }];
 		}
-		if (span.endMs - span.startMs < WAIT_KEEP_HEAD_MS + WAIT_KEEP_TAIL_MS) {
+		const keepMs = holdKeepMs(span, spans[index - 1]);
+		if (span.endMs - span.startMs <= keepMs) {
 			return [{ startMs: span.startMs, endMs: span.endMs }];
 		}
 		return [
-			{ startMs: span.startMs, endMs: span.startMs + WAIT_KEEP_HEAD_MS },
+			{ startMs: span.startMs, endMs: span.startMs + keepMs - WAIT_KEEP_TAIL_MS },
 			{ startMs: span.endMs - WAIT_KEEP_TAIL_MS, endMs: span.endMs },
 		];
 	});
 	const lastEndMs = spans.reduce((max, span) => Math.max(max, span.endMs), 0);
 	pieces.push({ startMs: lastEndMs, endMs: lastEndMs + FINAL_TAIL_MS });
-	const keepRanges = failedCuts.reduce(subtractRange, mergeRanges(pieces, durationMs));
-	if (keepRanges.length === 0) return null;
+	const cut = failedCuts.reduce(subtractRange, mergeRanges(pieces, durationMs));
+	if (cut.length === 0) return null;
+	const changeTimes = (Array.isArray(changeTimesMs) ? changeTimesMs : [])
+		.filter((timeMs) => Number.isFinite(timeMs))
+		.map((timeMs) => Math.round(timeMs))
+		.sort((a, b) => a - b);
+	const shots = [
+		(ranges: TimeRange[]) => mergeRanges(ranges, durationMs, MERGE_CUT_GAP_MS, failedCuts),
+		(ranges: TimeRange[]) => snapToQuiet(ranges, changeTimes, durationMs),
+		(ranges: TimeRange[]) => extendShortShots(ranges, durationMs),
+		(ranges: TimeRange[]) => mergeRanges(ranges, durationMs, MERGE_CUT_GAP_MS, failedCuts),
+	].reduce((ranges, step) => step(ranges), cut);
+	if (shots.length === 0) return null;
 
 	const zooms =
 		sourceAspect < MIN_FRESH_RECORDING_AUTO_ZOOM_SOURCE_ASPECT_RATIO
 			? []
-			: planZooms(spans, keepRanges);
-	const captions = planCaptions(scenes, keepRanges);
-	const keptMs = keepRanges.reduce((sum, range) => sum + range.endMs - range.startMs, 0);
-	if (durationMs - keptMs < MIN_TOTAL_CUT_MS && zooms.length === 0 && captions.length === 0) {
+			: planZooms(spans, shots);
+	const captions = planCaptions(scenes, shots);
+	const keepRanges: AgentEditKeepRange[] = [
+		...shots,
+		...rampShortCuts(shots, failedCuts, changeTimes),
+	].sort((a, b) => a.startMs - b.startMs);
+	const screenMs = keepRanges.reduce(
+		(sum, range) => sum + (range.endMs - range.startMs) / (range.speed ?? 1),
+		0,
+	);
+	if (durationMs - screenMs < MIN_TOTAL_CUT_MS && zooms.length === 0 && captions.length === 0) {
 		return null;
 	}
 	return { keepRanges, zooms, captions };

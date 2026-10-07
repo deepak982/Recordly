@@ -184,7 +184,7 @@ describe("useFreshRecordingAgentEdits", () => {
 		renderBoth(input);
 
 		expect(getAgentActivity).toHaveBeenCalledWith("/rec.mp4");
-		expect(planAgentEdits).toHaveBeenCalledWith(log, 6000, 1920 / 1080);
+		expect(planAgentEdits).toHaveBeenCalledWith(log, 6000, 1920 / 1080, undefined);
 		const { timeline } = input;
 		expect(timeline.setClipRegions).toHaveBeenCalledTimes(1);
 		expect(timeline.setClipRegions).toHaveBeenCalledWith([
@@ -213,6 +213,23 @@ describe("useFreshRecordingAgentEdits", () => {
 		expect(setAutoSuggestZoomsTrigger).not.toHaveBeenCalled();
 	});
 
+	it("forwards the recorded screen change times to the planner", async () => {
+		const changeTimesMs = [0, 240, 1800, 4200];
+		getAgentActivity.mockResolvedValue({ success: true, log: { ...log, changeTimesMs } });
+		const input = makeInput();
+		renderBoth(input);
+		await vi.advanceTimersByTimeAsync(0);
+		renderBoth(input);
+		renderBoth(input);
+
+		expect(planAgentEdits).toHaveBeenCalledWith(
+			{ ...log, changeTimesMs },
+			6000,
+			1920 / 1080,
+			changeTimesMs,
+		);
+	});
+
 	it("holds the click auto-suggest while the log is loading", async () => {
 		let resolve: (value: unknown) => void = () => undefined;
 		getAgentActivity.mockReturnValue(
@@ -228,6 +245,26 @@ describe("useFreshRecordingAgentEdits", () => {
 		resolve({ success: true, log });
 		await settle(input);
 		expect(input.timeline.setClipRegions).toHaveBeenCalledTimes(1);
+	});
+
+	it("turns a speed-ramped keep range into a sped-up clip", async () => {
+		planAgentEdits.mockReturnValue({
+			...plan,
+			keepRanges: [
+				{ startMs: 0, endMs: 1000 },
+				{ startMs: 1000, endMs: 2600, speed: 4 },
+				{ startMs: 2600, endMs: 5000 },
+			],
+			zooms: [],
+			captions: [],
+		});
+		const input = makeInput();
+		await settle(input);
+		expect(input.timeline.setClipRegions).toHaveBeenCalledWith([
+			{ id: "clip-2", startMs: 0, endMs: 1000, sourceStartMs: 0, speed: 1 },
+			{ id: "clip-3", startMs: 1000, endMs: 1400, sourceStartMs: 1000, speed: 4 },
+			{ id: "clip-4", startMs: 1400, endMs: 3800, sourceStartMs: 2600, speed: 1 },
+		]);
 	});
 
 	it("leaves captions alone when the plan has none", async () => {

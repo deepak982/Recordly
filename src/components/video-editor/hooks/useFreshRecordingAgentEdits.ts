@@ -91,6 +91,7 @@ export function useFreshRecordingAgentEdits({
 					loaded.log,
 					Math.round(duration * 1000),
 					video.videoWidth / video.videoHeight,
+					loaded.log.changeTimesMs,
 				);
 		} catch (error) {
 			console.warn("Unable to plan agent edits:", error);
@@ -102,13 +103,16 @@ export function useFreshRecordingAgentEdits({
 				(clip) => clip.startMs === 0 && (clip.sourceStartMs ?? 0) === 0 && clip.speed === 1,
 			);
 		if (plan && untouched) {
-			const edited: ClipRegion[] = plan.keepRanges.map(({ startMs, endMs }) => ({
-				id: `clip-${nextClipIdRef.current++}`,
-				startMs,
-				endMs,
-				sourceStartMs: startMs,
-				speed: 1,
-			}));
+			const edited: ClipRegion[] = plan.keepRanges.map(({ startMs, endMs, speed }) => {
+				const clipSpeed = Number.isFinite(speed) && Number(speed) > 0 ? Number(speed) : 1;
+				return {
+					id: `clip-${nextClipIdRef.current++}`,
+					startMs,
+					endMs: startMs + Math.round((endMs - startMs) / clipSpeed),
+					sourceStartMs: startMs,
+					speed: clipSpeed,
+				};
+			});
 			const next = packClipSequence(edited);
 			setClipRegions(next);
 			const zooms = (applyZooms ? plan.zooms : []).map(

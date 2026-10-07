@@ -112,17 +112,17 @@ import {
 import { updateOverlayIndicator } from "./videoPlayback/overlayUtils";
 import { supportsPreviewPlaybackRate } from "./videoPlayback/playbackRate";
 import { PreviewVideoSource } from "./videoPlayback/previewVideoSource";
-import { usePreviewVideoReady } from "./videoPlayback/usePreviewVideoReady";
 import { getSceneEffectMetrics } from "./videoPlayback/sceneEffects";
 import {
 	resolvePreviewMotionMode,
 	resolveSceneZoomTarget,
 	shouldComposePreviewFrame,
 } from "./videoPlayback/sceneMotion";
+import { usePreviewVideoReady } from "./videoPlayback/usePreviewVideoReady";
 import {
 	getWebcamMediaTargetTimeSeconds,
-	isWebcamVisibleAtSourceTime,
 	isWebcamMediaSynchronized,
+	isWebcamVisibleAtSourceTime,
 	shouldSeekWebcamMedia,
 } from "./videoPlayback/webcamSync";
 import {
@@ -2057,6 +2057,7 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 					cursorTimeMs: currentTimeRef.current,
 					connectZooms: connectZoomsRef.current,
 					zoomInDurationMs: zoomInDurationMsRef.current,
+					zoomInOverlapMs: zoomInOverlapMsRef.current,
 					zoomOutDurationMs: zoomOutDurationMsRef.current,
 					zoomClassicMode: zoomClassicModeRef.current,
 					cursorTelemetry: cursorTelemetryRef.current,

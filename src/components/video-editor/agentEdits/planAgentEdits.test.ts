@@ -5,7 +5,14 @@ import {
 	type AgentActivitySpanKind,
 	type AgentActivityTarget,
 	type AgentEditPlan,
+	HOLD_READ_KEEP_MAX_MS,
+	MIN_SHOT_MS,
 	planAgentEdits,
+	QUIET_RADIUS_MS,
+	RAMP_MAX_GAP_MS,
+	RAMP_MAX_SPEED,
+	RAMP_MIN_SPEED,
+	ZOOM_KEEP_TAIL_MS,
 } from "./planAgentEdits";
 
 type Step = [AgentActivitySpanKind, AgentActivityAction, number, AgentActivityTarget?];
@@ -52,6 +59,10 @@ function clickScene(startMs: number, target: AgentActivityTarget = button(0.5, 0
 	};
 }
 
+const speedOf = (range: AgentEditPlan["keepRanges"][number]) => range.speed ?? 1;
+const shotsOf = (plan: AgentEditPlan) => plan.keepRanges.filter((range) => speedOf(range) === 1);
+const rampsOf = (plan: AgentEditPlan) => plan.keepRanges.filter((range) => speedOf(range) !== 1);
+
 function keptWithin(plan: AgentEditPlan, startMs: number, endMs: number) {
 	return plan.keepRanges.reduce(
 		(sum, range) =>
@@ -60,20 +71,49 @@ function keptWithin(plan: AgentEditPlan, startMs: number, endMs: number) {
 	);
 }
 
+function screenMsOf(plan: AgentEditPlan) {
+	return plan.keepRanges.reduce(
+		(sum, range) => sum + (range.endMs - range.startMs) / speedOf(range),
+		0,
+	);
+}
+
+function cutsOf(plan: AgentEditPlan) {
+	return plan.keepRanges.slice(1).flatMap((range, index) => {
+		const previous = plan.keepRanges[index];
+		return range.startMs > previous.endMs
+			? [{ startMs: previous.endMs, endMs: range.startMs }]
+			: [];
+	});
+}
+
 function expectWellFormed(plan: AgentEditPlan, durationMs: number) {
 	plan.keepRanges.forEach((range, index) => {
 		expect(range.startMs).toBeGreaterThanOrEqual(0);
 		expect(range.endMs).toBeLessThanOrEqual(durationMs);
 		expect(range.endMs).toBeGreaterThan(range.startMs);
-		if (index > 0) expect(range.startMs).toBeGreaterThan(plan.keepRanges[index - 1].endMs);
+		expect(speedOf(range)).toBeGreaterThan(0);
+		if (index > 0) {
+			expect(range.startMs).toBeGreaterThanOrEqual(plan.keepRanges[index - 1].endMs);
+		}
 	});
+	for (const shot of shotsOf(plan)) {
+		if (shot.endMs < durationMs) {
+			expect(shot.endMs - shot.startMs).toBeGreaterThanOrEqual(MIN_SHOT_MS);
+		}
+	}
 	plan.zooms.forEach((zoom, index) => {
 		expect(zoom.endMs - zoom.startMs).toBeGreaterThanOrEqual(100);
 		expect(
-			plan.keepRanges.filter(
+			shotsOf(plan).filter(
 				(range) => range.startMs <= zoom.startMs && zoom.endMs <= range.endMs,
 			),
 		).toHaveLength(1);
+		expect(
+			rampsOf(plan).filter(
+				(range) => range.startMs < zoom.endMs && zoom.startMs < range.endMs,
+			),
+		).toHaveLength(0);
 		if (index > 0) expect(zoom.startMs).toBeGreaterThanOrEqual(plan.zooms[index - 1].endMs);
 		expect(zoom.focus.cx).toBeGreaterThanOrEqual(0);
 		expect(zoom.focus.cx).toBeLessThanOrEqual(1);
@@ -89,8 +129,13 @@ function expectWellFormed(plan: AgentEditPlan, durationMs: number) {
 	}
 }
 
-function plan(log: AgentActivityLog, durationMs: number, aspect = WIDE): AgentEditPlan {
-	const result = planAgentEdits(log, durationMs, aspect);
+function plan(
+	log: AgentActivityLog,
+	durationMs: number,
+	aspect = WIDE,
+	changeTimesMs?: number[],
+): AgentEditPlan {
+	const result = planAgentEdits(log, durationMs, aspect, changeTimesMs);
 	if (!result) throw new Error("expected a plan");
 	expectWellFormed(result, durationMs);
 	return result;
@@ -167,9 +212,9 @@ describe("planAgentEdits on a realistic agent demo", () => {
 	const result = plan(log, durationMs);
 	const clicks = log.spans.filter((span) => span.action === "click");
 
-	it("cuts at least 20 s of thinking and loading", () => {
+	it("shortens the demo by at least 20 s of thinking and loading", () => {
 		expect(log.scenes[log.scenes.length - 1].endMs).toBeLessThanOrEqual(durationMs);
-		expect(durationMs - keptWithin(result, 0, durationMs)).toBeGreaterThanOrEqual(20000);
+		expect(durationMs - screenMsOf(result)).toBeGreaterThanOrEqual(20000);
 	});
 
 	it("keeps every click inside one kept range", () => {
@@ -182,7 +227,7 @@ describe("planAgentEdits on a realistic agent demo", () => {
 		}
 	});
 
-	it("zooms on every click, each zoom inside one keep range", () => {
+	it("zooms on every click, each zoom inside one shot", () => {
 		for (const click of clicks) {
 			expect(
 				result.zooms.some(
@@ -192,8 +237,25 @@ describe("planAgentEdits on a realistic agent demo", () => {
 		}
 	});
 
+	it("never ends a zoom on a cut", () => {
+		const edges = new Set(result.keepRanges.flatMap((range) => [range.startMs, range.endMs]));
+		for (const zoom of result.zooms) {
+			expect(edges.has(zoom.endMs)).toBe(false);
+		}
+	});
+
+	it("speeds up every gap it does not cut", () => {
+		for (const cut of cutsOf(result)) {
+			expect(cut.endMs - cut.startMs).toBeGreaterThan(RAMP_MAX_GAP_MS);
+		}
+		for (const ramp of rampsOf(result)) {
+			expect(ramp.speed).toBeGreaterThanOrEqual(2);
+			expect(ramp.speed).toBeLessThanOrEqual(RAMP_MAX_SPEED);
+		}
+	});
+
 	it("captions only the titled scene", () => {
-		expect(result.captions).toEqual([{ startMs: 4950, endMs: 7450, text: "Open onboarding" }]);
+		expect(result.captions).toEqual([{ startMs: 4550, endMs: 6450, text: "Open onboarding" }]);
 	});
 });
 
@@ -213,23 +275,196 @@ describe("planAgentEdits", () => {
 		expect(planAgentEdits(log, Number.NaN, WIDE)).toBeNull();
 	});
 
-	it("returns null when the cut would be tiny and nothing is zoomed", () => {
-		const log = buildLog([{ startMs: 200, steps: [["hold", "wait", 8800]] }]);
-		expect(planAgentEdits(log, 9500, WIDE)).toBeNull();
+	it("returns null when the recording is already as short as the cut", () => {
+		const log = buildLog([{ startMs: 200, steps: [["hold", "wait", 600]] }]);
+		expect(planAgentEdits(log, 900, 0.8)).toBeNull();
 	});
 
-	it("plans a single scene: lead-in cut, final tail kept, click zoomed", () => {
+	it("plans a single scene: lead-in cut, split hold, ramped middle, click zoomed", () => {
 		const result = plan(buildLog([clickScene(1000, button(0.25, 0.75))]), 10000);
-		expect(result.keepRanges).toEqual([{ startMs: 700, endMs: 5200 }]);
+		expect(result.keepRanges).toEqual([
+			{ startMs: 300, endMs: 2200 },
+			{ startMs: 2200, endMs: 2550, speed: 2 },
+			{ startMs: 2550, endMs: 3350, speed: 4 },
+			{ startMs: 3350, endMs: 3700, speed: 2 },
+			{ startMs: 3700, endMs: 5200 },
+		]);
 		expect(result.zooms).toEqual([
-			{ startMs: 1000, endMs: 4000, depth: 3, focus: { cx: 0.25, cy: 0.75 } },
+			{ startMs: 1000, endMs: 1950, depth: 2, focus: { cx: 0.25, cy: 0.75 } },
 		]);
 		expect(result.captions).toEqual([]);
 	});
 
-	it("merges adjacent scenes with tiny gaps instead of micro-cutting", () => {
+	it("keeps 0.7 s of run-up so a cut clears the previous step's settle", () => {
+		expect(plan(buildLog([clickScene(4000)]), 12000).keepRanges[0].startMs).toBe(3300);
+	});
+
+	it("splits a hold instead of keeping it whole", () => {
+		const log = buildLog([
+			{
+				startMs: 1000,
+				steps: [
+					["motion", "click", 700, button(0.5, 0.5)],
+					["hold", "wait", 10000],
+					["motion", "click", 700, button(0.5, 0.5)],
+				],
+			},
+		]);
+		const result = plan(log, 20000);
+		expect(result.keepRanges).toEqual([
+			{ startMs: 300, endMs: 2200 },
+			{ startMs: 11000, endMs: 13600 },
+		]);
+		expect(keptWithin(result, 1700, 11700)).toBe(1200);
+	});
+
+	it("gives a hold after a settle reading time, capped at four seconds", () => {
+		const log = buildLog([
+			{
+				startMs: 1000,
+				steps: [
+					["motion", "click", 700, button(0.5, 0.5)],
+					["wait", "wait", 2000],
+					["hold", "wait", 9000],
+					["motion", "click", 700, button(0.5, 0.5)],
+					["hold", "wait", 1500],
+				],
+			},
+		]);
+		const result = plan(log, 30000);
+		expect(keptWithin(result, 3700, 12000)).toBe(HOLD_READ_KEEP_MAX_MS - 300);
+		expect(keptWithin(result, 7400, 12000)).toBe(0);
+	});
+
+	it("shortens a long wait to 1.5 s", () => {
+		const log = buildLog([
+			{
+				startMs: 1000,
+				steps: [
+					["motion", "click", 700, button(0.2, 0.2)],
+					["wait", "wait", 10000],
+					["motion", "click", 700, button(0.8, 0.8)],
+					["hold", "wait", 2000],
+				],
+			},
+		]);
+		const result = plan(log, 20000);
+		expect(result.keepRanges[0]).toEqual({ startMs: 300, endMs: 2900 });
+		expect(keptWithin(result, 2900, 11000)).toBe(0);
+	});
+
+	it("speeds a short gap up instead of cutting it", () => {
 		const result = plan(buildLog([clickScene(1000), clickScene(5000)]), 12000);
-		expect(result.keepRanges).toEqual([{ startMs: 700, endMs: 9200 }]);
+		expect(cutsOf(result)).toEqual([]);
+		expect(rampsOf(result)).toHaveLength(6);
+		const sourceMs = result.keepRanges.reduce(
+			(sum, range) => sum + range.endMs - range.startMs,
+			0,
+		);
+		expect(screenMsOf(result)).toBeLessThan(sourceMs);
+	});
+
+	it("eases into and out of a ramp with a slower clip at each end", () => {
+		const ramps = rampsOf(plan(buildLog([clickScene(1000)]), 10000));
+		expect(ramps.map(speedOf)).toEqual([2, 4, 2]);
+		expect(ramps[0].endMs - ramps[0].startMs).toBe(ramps[2].endMs - ramps[2].startMs);
+	});
+
+	it("cuts a gap longer than three seconds rather than speeding it up", () => {
+		const log = buildLog([
+			{
+				startMs: 1000,
+				steps: [
+					["motion", "click", 700, button(0.5, 0.5)],
+					["wait", "wait", 8000],
+					["motion", "click", 700, button(0.5, 0.5)],
+					["hold", "wait", 1200],
+				],
+			},
+		]);
+		const result = plan(log, 20000);
+		expect(cutsOf(result)).toHaveLength(1);
+		expect(rampsOf(result)).toEqual([]);
+	});
+
+	it("keeps every ramp between four and eight times speed", () => {
+		for (const holdMs of [1600, 2200, 2800, 3200]) {
+			const log = buildLog([
+				{
+					startMs: 1000,
+					steps: [
+						["motion", "click", 700, button(0.5, 0.5)],
+						["hold", "wait", holdMs],
+						["motion", "click", 700, button(0.5, 0.5)],
+						["hold", "wait", 1200],
+					],
+				},
+			]);
+			const ramps = rampsOf(plan(log, 20000));
+			if (ramps.length === 0) continue;
+			const fastest = Math.max(...ramps.map(speedOf));
+			expect(fastest).toBeGreaterThanOrEqual(RAMP_MIN_SPEED);
+			expect(fastest).toBeLessThanOrEqual(RAMP_MAX_SPEED);
+		}
+	});
+
+	it("snaps both sides of a cut to a moment with no screen change", () => {
+		const log = buildLog([
+			{
+				startMs: 1000,
+				steps: [
+					["motion", "click", 700, button(0.5, 0.5)],
+					["wait", "wait", 8000],
+					["motion", "click", 700, button(0.5, 0.5)],
+					["hold", "wait", 1200],
+				],
+			},
+		]);
+		const changeTimesMs = [0, 250, 2150, 2400, 9500, 9700, 9900, 10400, 12000];
+		const result = plan(log, 20000, WIDE, changeTimesMs);
+		expect(cutsOf(result)).toHaveLength(1);
+		for (const cut of cutsOf(result)) {
+			for (const edge of [cut.startMs, cut.endMs]) {
+				expect(
+					Math.min(...changeTimesMs.map((timeMs) => Math.abs(timeMs - edge))),
+				).toBeGreaterThanOrEqual(QUIET_RADIUS_MS);
+			}
+		}
+	});
+
+	it("leaves a boundary alone when no quiet moment is within reach", () => {
+		const log = buildLog([
+			{
+				startMs: 1000,
+				steps: [
+					["motion", "click", 700, button(0.5, 0.5)],
+					["wait", "wait", 8000],
+					["motion", "click", 700, button(0.5, 0.5)],
+					["hold", "wait", 1200],
+				],
+			},
+		]);
+		const busy = Array.from({ length: 400 }, (_, index) => index * 50);
+		expect(plan(log, 20000, WIDE, busy).keepRanges[0].startMs).toBe(300);
+	});
+
+	it("cuts a gap nothing happens in rather than speeding up a still frame", () => {
+		const log = buildLog([
+			{
+				startMs: 1000,
+				steps: [
+					["motion", "click", 700, button(0.5, 0.5)],
+					["hold", "wait", 3000],
+				],
+			},
+		]);
+		const quietGap = plan(log, 10000, WIDE, [0, 1000, 1500, 2100, 4600, 5000]);
+		expect(rampsOf(quietGap)).toEqual([]);
+		expect(cutsOf(quietGap)).toHaveLength(1);
+
+		const busyGap = plan(log, 10000, WIDE, [0, 1000, 1500, 2100, 3000, 4600, 5000]);
+		expect(rampsOf(busyGap).length).toBeGreaterThan(0);
+		expect(cutsOf(busyGap)).toEqual([]);
 	});
 
 	it("survives overlapping, unsorted, out-of-range and corrupt spans", () => {
@@ -247,44 +482,9 @@ describe("planAgentEdits", () => {
 				{ kind: "think", action: "wait", startMs: 8000, endMs: 9000 } as unknown as never,
 			],
 		};
-		const result = plan(log, 10000);
-		expect(result.keepRanges).toEqual([
+		expect(shotsOf(plan(log, 10000))).toEqual([
 			{ startMs: 0, endMs: 1900 },
-			{ startMs: 3700, endMs: 7200 },
-		]);
-	});
-
-	it("keeps a long explicit hold", () => {
-		const log = buildLog([
-			{
-				startMs: 1000,
-				steps: [
-					["motion", "click", 700, button(0.5, 0.5)],
-					["hold", "wait", 10000],
-					["motion", "click", 700, button(0.5, 0.5)],
-				],
-			},
-		]);
-		expect(plan(log, 20000).keepRanges).toEqual([{ startMs: 700, endMs: 13600 }]);
-	});
-
-	it("shortens a long wait to 0.8 s", () => {
-		const log = buildLog([
-			{
-				startMs: 1000,
-				steps: [
-					["motion", "click", 700, button(0.2, 0.2)],
-					["wait", "wait", 10000],
-					["motion", "click", 700, button(0.8, 0.8)],
-					["hold", "wait", 2000],
-				],
-			},
-		]);
-		const result = plan(log, 20000);
-		expect(keptWithin(result, 1700, 11700)).toBe(800);
-		expect(result.keepRanges).toEqual([
-			{ startMs: 700, endMs: 2200 },
-			{ startMs: 11400, endMs: 15600 },
+			{ startMs: 4000, endMs: 7200 },
 		]);
 	});
 
@@ -295,19 +495,29 @@ describe("planAgentEdits", () => {
 			{ ...clickScene(13000), title: "Retake" },
 		]);
 		const result = plan(log, 20000);
-		expect(result.keepRanges).toEqual([
-			{ startMs: 700, endMs: 4400 },
-			{ startMs: 12700, endMs: 17200 },
-		]);
-		expect(result.zooms.every((zoom) => zoom.endMs <= 4400 || zoom.startMs >= 12700)).toBe(
+		expect(keptWithin(result, 7300, 12300)).toBe(0);
+		expect(result.zooms.every((zoom) => zoom.endMs <= 4600 || zoom.startMs >= 12300)).toBe(
 			true,
 		);
 		expect(result.captions.map((caption) => caption.text)).toEqual(["Retake"]);
 	});
 
+	it("never speeds a failed take up instead of cutting it", () => {
+		const log = buildLog([
+			clickScene(1000),
+			{ startMs: 5000, steps: [["motion", "click", 300, button(0.1, 0.1)]], failed: true },
+			clickScene(7000),
+		]);
+		const result = plan(log, 20000);
+		expect(keptWithin(result, 5000, 6300)).toBe(0);
+		for (const ramp of rampsOf(result)) {
+			expect(ramp.startMs >= 6300 || ramp.endMs <= 5000).toBe(true);
+		}
+	});
+
 	it("cuts a failed last scene to the end and never keeps nothing", () => {
 		const log = buildLog([clickScene(1000), { ...clickScene(4500), failed: true }]);
-		expect(plan(log, 15000).keepRanges).toEqual([{ startMs: 700, endMs: 4500 }]);
+		expect(plan(log, 15000).keepRanges.at(-1)?.endMs).toBe(4600);
 		const allFailed = buildLog([{ ...clickScene(1000), failed: true }]);
 		expect(planAgentEdits(allFailed, 15000, WIDE)).toBeNull();
 	});
@@ -318,25 +528,50 @@ describe("planAgentEdits", () => {
 			{ startMs: 4500, steps: [["motion", "click", 200, button(0.5, 0.5)]], failed: true },
 			{ startMs: 5100, steps: [["motion", "click", 200, button(0.5, 0.5)]], failed: true },
 		]);
-		expect(plan(log, 15000).keepRanges).toEqual([{ startMs: 700, endMs: 4500 }]);
+		expect(plan(log, 15000).keepRanges.at(-1)?.endMs).toBe(4600);
+	});
+
+	it("never leaves a shot under 0.9 s", () => {
+		const log = buildLog([
+			{ startMs: 1000, steps: [["motion", "key", 50]] },
+			{ startMs: 9000, steps: [["motion", "key", 50]] },
+		]);
+		for (const shot of shotsOf(plan(log, 20000))) {
+			expect(shot.endMs - shot.startMs).toBeGreaterThanOrEqual(MIN_SHOT_MS);
+		}
 	});
 
 	it("adds no zooms to tall sources", () => {
 		const result = plan(buildLog([clickScene(3000)]), 10000, 0.8);
 		expect(result.zooms).toEqual([]);
-		expect(result.keepRanges).toEqual([{ startMs: 2700, endMs: 7200 }]);
+		expect(shotsOf(result)).toEqual([
+			{ startMs: 2300, endMs: 4200 },
+			{ startMs: 5700, endMs: 7200 },
+		]);
 	});
 
-	it("picks the depth from the target size and skips big targets", () => {
+	it("picks 1.5x for a small target, 1.25x for a medium one and nothing for a big one", () => {
 		const zoomFor = (target: AgentActivityTarget) =>
 			plan(buildLog([clickScene(3000, target)]), 10000).zooms;
 		expect(zoomFor({ cx: 0.5, cy: 0.5, width: 0.5 })).toEqual([]);
-		expect(zoomFor({ cx: 0.5, cy: 0.5, width: 0.2 })[0].depth).toBe(2);
-		expect(zoomFor({ cx: 0.5, cy: 0.5, width: 0.05 })[0].depth).toBe(3);
+		expect(zoomFor({ cx: 0.5, cy: 0.5, width: 0.2 })[0].depth).toBe(1);
+		expect(zoomFor({ cx: 0.5, cy: 0.5, width: 0.05 })[0].depth).toBe(2);
 		expect(zoomFor({ cx: 1.4, cy: -0.2 })[0]).toMatchObject({
-			depth: 3,
+			depth: 2,
 			focus: { cx: 1, cy: 0 },
 		});
+	});
+
+	it("ends every zoom before its shot ends", () => {
+		const result = plan(buildLog([clickScene(1000), clickScene(6000)]), 14000);
+		expect(result.zooms.length).toBeGreaterThan(0);
+		for (const zoom of result.zooms) {
+			const shot = shotsOf(result).find(
+				(range) => range.startMs <= zoom.startMs && zoom.startMs < range.endMs,
+			);
+			expect(shot).toBeDefined();
+			expect(zoom.endMs).toBeLessThanOrEqual((shot?.endMs ?? 0) - ZOOM_KEEP_TAIL_MS);
+		}
 	});
 
 	it("no zoom for scroll, key or move-only motion", () => {
@@ -368,63 +603,7 @@ describe("planAgentEdits", () => {
 			},
 		]);
 		expect(plan(log, 12000).zooms).toEqual([
-			{ startMs: 1000, endMs: 6200, depth: 2, focus: { cx: 0.3, cy: 0.4 } },
-		]);
-
-		const late = buildLog([
-			{
-				startMs: 1000,
-				steps: [
-					["motion", "click", 700, field],
-					["hold", "wait", 3300],
-					["motion", "type", 1000],
-					["hold", "wait", 2000],
-				],
-			},
-		]);
-		expect(plan(late, 12000).zooms).toEqual([
-			{ startMs: 1000, endMs: 4700, depth: 2, focus: { cx: 0.3, cy: 0.4 } },
-		]);
-	});
-
-	it("splits a zoom at a cut and drops short pieces", () => {
-		const log = buildLog([
-			{
-				startMs: 1000,
-				steps: [
-					["motion", "click", 700, button(0.5, 0.5)],
-					["wait", "wait", 2000],
-					["motion", "click", 700, button(0.52, 0.5)],
-					["hold", "wait", 2000],
-				],
-			},
-		]);
-		const result = plan(log, 10000);
-		expect(result.keepRanges).toEqual([
-			{ startMs: 700, endMs: 2200 },
-			{ startMs: 3400, endMs: 7600 },
-		]);
-		expect(result.zooms).toEqual([
-			{ startMs: 1000, endMs: 2200, depth: 3, focus: { cx: 0.5, cy: 0.5 } },
-			{ startMs: 3400, endMs: 6400, depth: 3, focus: { cx: 0.5, cy: 0.5 } },
-		]);
-
-		const trailing = buildLog([
-			{
-				startMs: 1000,
-				steps: [
-					["motion", "click", 700, button(0.5, 0.5)],
-					["wait", "wait", 1500],
-				],
-			},
-		]);
-		const trailingPlan = plan(trailing, 10000);
-		expect(trailingPlan.keepRanges).toEqual([
-			{ startMs: 700, endMs: 2200 },
-			{ startMs: 2900, endMs: 4400 },
-		]);
-		expect(trailingPlan.zooms).toEqual([
-			{ startMs: 1000, endMs: 2200, depth: 3, focus: { cx: 0.5, cy: 0.5 } },
+			{ startMs: 1000, endMs: 4450, depth: 1, focus: { cx: 0.3, cy: 0.4 } },
 		]);
 	});
 
@@ -440,8 +619,8 @@ describe("planAgentEdits", () => {
 			},
 		]);
 		expect(plan(log, 10000).zooms).toEqual([
-			{ startMs: 1000, endMs: 1800, depth: 3, focus: { cx: 0.1, cy: 0.1 } },
-			{ startMs: 1800, endMs: 4300, depth: 3, focus: { cx: 0.9, cy: 0.9 } },
+			{ startMs: 1000, endMs: 1800, depth: 2, focus: { cx: 0.1, cy: 0.1 } },
+			{ startMs: 1800, endMs: 2550, depth: 2, focus: { cx: 0.9, cy: 0.9 } },
 		]);
 	});
 
@@ -461,8 +640,8 @@ describe("planAgentEdits", () => {
 			{ ...clickScene(29000), title: "x".repeat(100) },
 		]);
 		expect(plan(log, 40000).captions).toEqual([
-			{ startMs: 700, endMs: 3100, text: "Open settings" },
-			{ startMs: 28700, endMs: 31200, text: "x".repeat(80) },
+			{ startMs: 300, endMs: 2700, text: "Open settings" },
+			{ startMs: 28300, endMs: 30200, text: "x".repeat(80) },
 		]);
 	});
 
@@ -478,10 +657,18 @@ describe("planAgentEdits", () => {
 				],
 			},
 		]);
-		const result = plan(log, 10000);
-		expect(result.keepRanges).toEqual([
-			{ startMs: 700, endMs: 4400 },
-			{ startMs: 7700, endMs: 10000 },
-		]);
+		expect(plan(log, 10000).keepRanges.at(-1)?.endMs).toBe(10000);
+	});
+
+	it("ignores a change log that is empty, unsorted or corrupt", () => {
+		const log = buildLog([clickScene(1000), clickScene(6000)]);
+		const baseline = plan(log, 14000);
+		expect(plan(log, 14000, WIDE, []).keepRanges).toEqual(baseline.keepRanges);
+		expect(plan(log, 14000, WIDE, [Number.NaN, Number.POSITIVE_INFINITY]).keepRanges).toEqual(
+			baseline.keepRanges,
+		);
+		const unsorted = plan(log, 14000, WIDE, [9000, 1000, 4000, 2000]);
+		const sorted = plan(log, 14000, WIDE, [1000, 2000, 4000, 9000]);
+		expect(unsorted.keepRanges).toEqual(sorted.keepRanges);
 	});
 });
