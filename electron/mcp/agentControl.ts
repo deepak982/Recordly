@@ -530,6 +530,11 @@ function rank(elements: AgentElement[], text: string, role?: string): Ranked {
 const describeTarget = ({ text, role }: { text?: string; role?: string }) =>
 	text ? `"${text}"${role ? ` (${role})` : ""}` : `a ${role}`;
 
+const stillMoving = (target: AgentTarget) =>
+	`${describeTarget(target)} is in the window but kept moving, so the pointer never settled ` +
+	"on it. The view is still animating: add a waitFor for it, or waitFor settled: true, before " +
+	"this step, then try again.";
+
 function matchLines(elements: AgentElement[], numbered: boolean) {
 	return elements.slice(0, LISTED).map((element, index) => {
 		const { x, y } = centreOf(element);
@@ -1003,11 +1008,13 @@ export function createAgentControl(
 	): Promise<Aimed> {
 		const deadline = deps.now() + TARGET_WAIT_MS;
 		let at = start;
+		let seen = false;
 		for (let attempt = 1; ; attempt += 1) {
 			const window = await requireTarget();
 			const fresh = await Promise.race([nearest(target, window, run), run.aborted]);
 			let aimed: Aimed | null = null;
 			if (fresh) {
+				seen = true;
 				const centre = toGlobal(window, centreOf(fresh));
 				const delta = Math.hypot(centre.x - at.x, centre.y - at.y);
 				const reach = Math.max(AIM_NUDGE_PT, Math.min(fresh.width, fresh.height) / 2);
@@ -1025,6 +1032,7 @@ export function createAgentControl(
 					);
 				}
 			} else if (attempt >= AIM_TRIES || deps.now() >= deadline) {
+				if (seen) throw new Error(stillMoving(target));
 				throw await notFound(target, [], window, run);
 			}
 			const again = await resolveTarget(target, run);

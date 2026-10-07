@@ -2157,6 +2157,19 @@ describe("aiming at a moving target", () => {
 		expect(count("click")).toBe(0);
 	});
 
+	it("says the target kept moving instead of calling it not found", async () => {
+		const { agent, count } = setup(
+			{ findWindow: vi.fn(async () => ({ pid: 42, frame: { ...FRAME, width: 2800 } })) },
+			{ find: sliding("Tasks", 54, 0.3, Number.POSITIVE_INFINITY), click: tick },
+		);
+		await expect(
+			agent.perform([{ action: "click", target: { text: "Tasks" }, durationMs: 100 }]),
+		).rejects.toThrow(
+			/"Tasks" is in the window but kept moving, so the pointer never settled on it\. The view is still animating: add a waitFor for it, or waitFor settled: true, before this step, then try again\./,
+		);
+		expect(count("click")).toBe(0);
+	});
+
 	it("re-resolves both ends of a drag before pressing", async () => {
 		const screen = () => [
 			element("Card", clock.ms >= 1_150 ? 74 : 54, 200),
