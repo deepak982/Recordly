@@ -161,6 +161,59 @@ Recordly also offers an MCP prompt, `record_demo`, that hands the agent this pla
 
 Where driving the window is available, the plan has the agent drive it itself. On Wayland it is a recording-only plan: the agent selects the source and records while you perform the demo, and asks you to confirm the share dialog.
 
+## Asking for a demo
+
+The agent plans the scenes, rehearses the whole flow unrecorded and then records it, so your request should
+say **what to show and what must not happen** — not how to click. This shape works for any app or site:
+
+```
+Record a demo video with Recordly.
+
+Start at: <URL, or the name of the app window>
+Show: <the one thing a viewer should come away understanding>
+Path: <the steps, in order, in plain words>
+For: <who watches it>
+Don't: <anything that would change data>
+Save to: <absolute path>.mp4
+```
+
+A filled-in example:
+
+```
+Record a demo video with Recordly.
+
+Start at: https://example.com/orders
+Show: how to find an unpaid order and open its payment history.
+Path:
+  1. From the orders list, filter to unpaid.
+  2. Pause on the list so the viewer can read the columns.
+  3. Open the first order and show the payment history panel.
+For: a new support agent.
+Don't: edit, refund or save anything. Navigation only.
+Save to: ~/Movies/unpaid-orders.mp4
+```
+
+**Leave these out.** The agent handles them, and naming them makes the result worse:
+
+- **Coordinates or internal element names.** It finds controls by their visible text and checks them before clicking.
+- **Timings and waits.** It paces the motion and holds each result long enough to read. A `wait` you ask for
+  *replaces* that reading hold rather than adding to it.
+- **"Screenshot after every step."** It does that while rehearsing; during the take each extra call is another cut.
+
+**What spoils a take**
+
+- **A vague goal.** "Show me the product" gives a tour with no point. Name the one thing the viewer should learn.
+- **Asking for side effects.** Anything that submits, deletes or completes changes real data and cannot be
+  rehearsed safely. If the demo needs it, say so and use test data.
+- **Not saying where to start.** Without a URL or a window name the agent has to guess which window to drive.
+- **Touching the mouse or keyboard.** Any input of yours stops the agent at once. Stay hands-off from the start
+  of recording until the export finishes.
+- **An empty or shifting screen.** If a list has no rows, or a count changes between the rehearsal and the take,
+  targets whose text contains that number stop matching. Load the data first.
+
+**Two optional extras.** Ask for captions and each scene gets a title on screen (off by default); say "keep it
+brisk" or "take it slowly" to change how long results are held.
+
 ## Writing a good demo
 
 These habits make a clean video of any app or site, whether you ask in plain words or use `record_demo`:
