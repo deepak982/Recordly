@@ -7,6 +7,7 @@ import {
 	persistPendingCursorTelemetry,
 	snapshotCursorTelemetryForPersistence,
 } from "../cursor/telemetry";
+import { extractScreenChangeTimesMs } from "../ffmpeg/changeTimes";
 import {
 	lastNativeCaptureDiagnostics,
 	nativeCaptureMicrophonePath,
@@ -273,7 +274,9 @@ export async function finalizeStoredVideo(videoPath: string) {
 	}
 	snapshotAgentActivity(getCursorCaptureElapsedMs());
 	try {
-		await persistAgentActivity(videoPath);
+		await persistAgentActivity(videoPath, () =>
+			extractScreenChangeTimesMs(videoPath, (validation.durationSeconds ?? 0) * 1000),
+		);
 	} catch (error) {
 		console.warn("[mac-stop] Failed to persist agent activity:", error);
 	}

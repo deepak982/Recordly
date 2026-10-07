@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import { clamp, getCursorCaptureElapsedMs } from "../ipc/cursor/telemetry";
+import { MAX_CHANGE_TIMES } from "../ipc/ffmpeg/changeTimes";
 import { isCursorCaptureActive } from "../ipc/state";
 import { getAgentActivityPathForVideo, parseJsonWithByteOrderMark } from "../ipc/utils";
 
@@ -36,6 +37,7 @@ export interface AgentActivityLog {
 	version: 1;
 	scenes: AgentActivityScene[];
 	spans: AgentActivitySpan[];
+	changeTimesMs?: number[];
 }
 
 const KINDS = new Set<unknown>(["motion", "hold", "wait"]);
@@ -115,11 +117,22 @@ export function snapshotAgentActivity(stopMs: number): AgentActivityLog {
 	return { version: 1, scenes, spans };
 }
 
-export async function persistAgentActivity(videoPath: string) {
+export async function persistAgentActivity(
+	videoPath: string,
+	readChangeTimesMs?: () => Promise<number[] | null>,
+) {
 	const log: AgentActivityLog = { version: 1, scenes, spans };
 	scenes = [];
 	spans = [];
 	if (log.scenes.length === 0 && log.spans.length === 0) return;
+	if (readChangeTimesMs) {
+		try {
+			const changeTimesMs = await readChangeTimesMs();
+			if (changeTimesMs && changeTimesMs.length > 0) log.changeTimesMs = changeTimesMs;
+		} catch (error) {
+			console.warn("[agent-activity] Failed to extract screen change times:", error);
+		}
+	}
 	await fs.writeFile(
 		getAgentActivityPathForVideo(videoPath),
 		JSON.stringify(log, null, 2),
@@ -152,13 +165,32 @@ function normalizeTarget(raw: unknown): AgentActivityTarget | undefined {
 
 const byStart = (a: { startMs: number }, b: { startMs: number }) => a.startMs - b.startMs;
 
+function normalizeChangeTimes(raw: unknown): number[] | undefined {
+	if (!Array.isArray(raw)) return undefined;
+	const sorted = raw
+		.filter(isFiniteNumber)
+		.map((timeMs) => Math.max(0, Math.round(timeMs)))
+		.sort((a, b) => a - b);
+	const times = sorted
+		.filter((timeMs, index) => index === 0 || timeMs !== sorted[index - 1])
+		.slice(0, MAX_CHANGE_TIMES);
+	return times.length > 0 ? times : undefined;
+}
+
 export function normalizeAgentActivityLog(raw: unknown): AgentActivityLog | null {
-	const log = raw as { version?: unknown; scenes?: unknown; spans?: unknown } | null;
+	const log = raw as {
+		version?: unknown;
+		scenes?: unknown;
+		spans?: unknown;
+		changeTimesMs?: unknown;
+	} | null;
 	if (!log || log.version !== 1) return null;
 	const rawScenes: unknown[] = Array.isArray(log.scenes) ? log.scenes : [];
 	const rawSpans: unknown[] = Array.isArray(log.spans) ? log.spans : [];
+	const changeTimesMs = normalizeChangeTimes(log.changeTimesMs);
 	return {
 		version: 1,
+		...(changeTimesMs ? { changeTimesMs } : {}),
 		scenes: rawScenes
 			.flatMap((raw) => {
 				const times = normalizeTimes(raw);

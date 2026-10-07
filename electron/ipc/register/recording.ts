@@ -39,6 +39,7 @@ import {
 	writeCursorTelemetry,
 } from "../cursor/telemetry";
 import { getFfmpegBinaryPath } from "../ffmpeg/binary";
+import { extractScreenChangeTimesMs } from "../ffmpeg/changeTimes";
 import { getMonitorHandles } from "../monitorResolver";
 import {
 	ensureNativeCaptureHelperBinary,
@@ -1045,7 +1046,12 @@ export function registerRecordingHandlers(
 						);
 					}
 					try {
-						await persistAgentActivity(finalVideoPath);
+						await persistAgentActivity(finalVideoPath, () =>
+							extractScreenChangeTimesMs(
+								finalVideoPath,
+								(validation.durationSeconds ?? 0) * 1000,
+							),
+						);
 					} catch (error) {
 						console.warn("Failed to persist agent activity during native stop:", error);
 					}

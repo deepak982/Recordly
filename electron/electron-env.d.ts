@@ -1200,6 +1200,7 @@ interface AgentActivityLog {
 	version: 1;
 	scenes: AgentActivityScene[];
 	spans: AgentActivitySpan[];
+	changeTimesMs?: number[];
 }
 
 interface SystemCursorAsset {

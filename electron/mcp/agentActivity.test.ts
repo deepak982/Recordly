@@ -10,6 +10,7 @@ import {
 	resetCursorCaptureClock,
 	resumeCursorCapture,
 } from "../ipc/cursor/telemetry";
+import { MAX_CHANGE_TIMES } from "../ipc/ffmpeg/changeTimes";
 import { setCursorCaptureStartTimeMs, setIsCursorCaptureActive } from "../ipc/state";
 import {
 	beginScene,
@@ -204,6 +205,50 @@ describe("persistence", () => {
 		expect(await readAgentActivity(empty)).toBeNull();
 	});
 
+	it("stores the screen change times alongside the log", async () => {
+		const video = path.join(dir, "changes.mp4");
+		startRecording();
+		at(100);
+		const span = beginSpan("motion", "click", { cx: 0.5, cy: 0.5 });
+		at(600);
+		span();
+		stopRecording(1_000);
+		await persistAgentActivity(video, async () => [0, 120, 480]);
+		expect(await readAgentActivity(video)).toMatchObject({ changeTimesMs: [0, 120, 480] });
+	});
+
+	it("never asks for change times for a recording without agent activity", async () => {
+		const video = path.join(dir, "plain.mp4");
+		const extract = vi.fn(async () => [0, 120]);
+		await persistAgentActivity(video, extract);
+		expect(extract).not.toHaveBeenCalled();
+		expect(await readAgentActivity(video)).toBeNull();
+	});
+
+	it("still saves the log when the change times cannot be extracted", async () => {
+		const video = path.join(dir, "noprobe.mp4");
+		startRecording();
+		at(100);
+		const span = beginSpan("motion", "click");
+		at(600);
+		span();
+		const log = stopRecording(1_000);
+		await persistAgentActivity(video, async () => {
+			throw new Error("ffprobe is missing");
+		});
+		expect(await readAgentActivity(video)).toEqual(log);
+
+		const emptyList = path.join(dir, "emptylist.mp4");
+		startRecording();
+		at(100);
+		const other = beginSpan("motion", "click");
+		at(600);
+		other();
+		stopRecording(1_000);
+		await persistAgentActivity(emptyList, async () => []);
+		expect(await readAgentActivity(emptyList)).not.toHaveProperty("changeTimesMs");
+	});
+
 	it("tolerates a byte order mark and rejects broken JSON", async () => {
 		const video = path.join(dir, "bom.mp4");
 		await fs.writeFile(
@@ -213,6 +258,39 @@ describe("persistence", () => {
 		expect(await readAgentActivity(video)).toEqual({ version: 1, scenes: [], spans: [] });
 		await fs.writeFile(`${video}.agent.json`, "{");
 		await expect(readAgentActivity(video)).rejects.toThrow();
+	});
+
+	it("normalizes change times: sorted, deduped, non-negative and capped", () => {
+		expect(
+			normalizeAgentActivityLog({
+				version: 1,
+				scenes: [],
+				spans: [],
+				changeTimesMs: [
+					900,
+					"400",
+					400.4,
+					400.6,
+					Number.NaN,
+					-20,
+					Number.POSITIVE_INFINITY,
+				],
+			}),
+		).toEqual({ version: 1, changeTimesMs: [0, 400, 401, 900], scenes: [], spans: [] });
+
+		for (const changeTimesMs of [undefined, null, [], "0,1", {}, [Number.NaN, "x"]]) {
+			expect(
+				normalizeAgentActivityLog({ version: 1, scenes: [], spans: [], changeTimesMs }),
+			).not.toHaveProperty("changeTimesMs");
+		}
+
+		const overLong = normalizeAgentActivityLog({
+			version: 1,
+			scenes: [],
+			spans: [],
+			changeTimesMs: Array.from({ length: MAX_CHANGE_TIMES + 500 }, (_, index) => index),
+		});
+		expect(overLong?.changeTimesMs).toHaveLength(MAX_CHANGE_TIMES);
 	});
 
 	it("normalizes malformed logs defensively", () => {
