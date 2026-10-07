@@ -59,6 +59,7 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 	private var lastSampleBuffer: CMSampleBuffer?
 	private var keepaliveTimer: DispatchSourceTimer?
 	private var lastVideoPresentationTime: CMTime = .zero
+	private var lastAppendWasKeepalive = false
 	private var lastVideoDuration: CMTime = .zero
 	private var lastInlineAudioPresentationTime: CMTime = .invalid
 	private var lastInlineAudioDuration: CMTime = .zero
@@ -363,6 +364,7 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 		frameCount = 0
 		firstSampleTime = .zero
 		lastVideoPresentationTime = .zero
+		lastAppendWasKeepalive = false
 		lastVideoDuration = .zero
 		startWindowValidationIfNeeded()
 		startKeepaliveTimer()
@@ -442,11 +444,13 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 
 			// Only a complete frame that the writer can accept may establish time zero.
 			guard let presentationTime = adjustedPresentationTime(for: sampleBuffer, outputType: outputType) else { return }
+			var appendTime = presentationTime
 			if frameCount > 0 && CMTimeCompare(presentationTime, lastVideoPresentationTime) <= 0 {
-				return
+				guard lastAppendWasKeepalive else { return }
+				appendTime = lastVideoPresentationTime + CMTime(value: 1, timescale: 600)
 			}
 
-			if appendVideoSample(sampleBuffer, to: videoInput, at: presentationTime) {
+			if appendVideoSample(sampleBuffer, to: videoInput, at: appendTime) {
 					if frameCount == 1 {
 						// Signal readiness only after AVAssetWriter has accepted a
 						// real frame, so countdown warm-start cannot pause too early.
@@ -529,6 +533,7 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 		if let adaptor = videoPixelBufferAdaptor, let pixelBuffer = lastCroppedPixelBuffer {
 			if adaptor.append(pixelBuffer, withPresentationTime: presentationTime) {
 				lastVideoPresentationTime = presentationTime
+				lastAppendWasKeepalive = true
 				frameCount += 1
 			}
 			return
@@ -542,6 +547,7 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 		if let retimed = try? CMSampleBuffer(copying: originalBuffer, withNewTiming: [timing]),
 		   videoInput.append(retimed) {
 			lastVideoPresentationTime = presentationTime
+			lastAppendWasKeepalive = true
 			frameCount += 1
 		}
 	}
@@ -562,6 +568,7 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 		if appended {
 			lastVideoPresentationTime = presentationTime
 			lastVideoDuration = sampleBuffer.duration
+			lastAppendWasKeepalive = false
 			frameCount += 1
 		}
 		return appended
@@ -769,6 +776,7 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 		firstInlineAudioSampleTime = nil
 		lastSampleBuffer = nil
 		lastVideoPresentationTime = .zero
+		lastAppendWasKeepalive = false
 		lastVideoDuration = .zero
 		stopKeepaliveTimer()
 		lastInlineAudioPresentationTime = .invalid
