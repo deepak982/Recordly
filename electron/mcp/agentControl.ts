@@ -16,11 +16,13 @@ import {
 	AGENT_KEY_ALIASES,
 	AGENT_KEY_NAMES,
 	AGENT_MODIFIER_ALIASES,
+	AGENT_ROLE_ALIASES,
 	type AgentButton,
 	type AgentCommand,
 	type AgentElement,
 	type AgentEvent,
 	type AgentFrame,
+	type AgentHit,
 	type AgentModifier,
 	type AgentResults,
 	type AgentWindow,
@@ -76,17 +78,21 @@ export type AgentElementView = AgentElement;
 export type AgentDryRunStep = {
 	index: number;
 	action: AgentStep["action"];
-	found: boolean;
+	found: boolean | null;
 	label?: string;
 	x?: number;
 	y?: number;
 	candidates?: number;
+	ambiguous?: boolean;
+	matches?: string[];
+	note?: string;
 };
 export type PerformResult = {
 	performed: number;
 	durationMs: number;
 	elements?: AgentElementView[];
 	dryRun?: AgentDryRunStep[];
+	page?: string;
 };
 
 export const AGENT_LIMITS = { steps: 200, waitMs: 30_000, totalMs: 600_000 };
@@ -116,6 +122,14 @@ const TARGET_TEXT_MAX = 200;
 const SCROLL_INSET = 24;
 const SCROLL_PAGE = 0.8;
 const LISTED = 5;
+const STABLE_SAMPLE_MS = 100;
+const STABLE_WAIT_MS = 1200;
+const AIM_SETTLED_PT = 4;
+const AIM_NUDGE_PT = 24;
+const AIM_NUDGE_MS = 120;
+const AIM_TRIES = 3;
+const HIT_OVERLAP = 0.6;
+const RUN_TIME_NOTE = "validated at run time";
 
 type Pace = { glide: number; hold: number };
 const PACES = new Map<string, Pace>([
@@ -180,6 +194,8 @@ type Run = {
 	deadline: number;
 };
 type Probe = Omit<AgentDryRunStep, "index" | "action">;
+type Resolved = { element: AgentElement; frame: WindowBounds; scrolled: boolean };
+type Aimed = { at: Point; ms: number };
 
 export type AgentControlDeps = {
 	input: Pick<AgentInput, "request" | "events">;
@@ -370,6 +386,11 @@ function checkStep(step: AgentStep) {
 	if (step.action === "waitFor") checkWaitFor(step);
 }
 
+const changesPage = (step: AgentStep) =>
+	step.action === "click" ||
+	step.action === "waitFor" ||
+	(step.action === "key" && normalizeKey(step.key) === "enter");
+
 const needsFrontmost = (step: AgentStep) =>
 	step.action === "type" ||
 	step.action === "key" ||
@@ -383,6 +404,11 @@ function readsAfter(steps: AgentStep[], index: number) {
 	if (!submits || next?.action === "wait" || next?.action === "waitFor") return false;
 	return !(step.action === "click" && (next?.action === "type" || next?.action === "key"));
 }
+
+const signatureOf = (frames: AgentFrame[]) =>
+	frames
+		.map(({ x, y, width, height }) => [x, y, width, height].map(Math.round).join(","))
+		.join(" ");
 
 const pacedGlideMs = (distance: number, pace: Pace) =>
 	Math.round(
@@ -468,20 +494,35 @@ function dedupe(elements: AgentElement[]) {
 }
 
 type Ranked = { element: AgentElement; grade: number }[];
-const BEST_GRADE = 7;
+const BEST_GRADE = 10;
+const ROLE_GRADE = 3;
+const ROLE_ALIASES = new Map(Object.entries(AGENT_ROLE_ALIASES));
 
-function rank(elements: AgentElement[], text: string): Ranked {
+function wantedRoles(role?: string) {
+	const query = role?.trim() ?? "";
+	if (!query) return null;
+	return ROLE_ALIASES.get(query.toLowerCase()) ?? [query];
+}
+
+const roleMatches = (role: string, wanted?: string) => wantedRoles(wanted)?.includes(role) === true;
+
+const bestGrade = (role?: string) => (wantedRoles(role) ? BEST_GRADE : BEST_GRADE - ROLE_GRADE);
+
+const normalizeLabel = (label: string) => label.trim().toLowerCase();
+
+function rank(elements: AgentElement[], text: string, role?: string): Ranked {
 	const unique = dedupe(elements);
 	const web = unique.some((element) => element.web);
-	const wanted = text.trim().toLowerCase();
+	const wanted = normalizeLabel(text);
 	return unique
 		.filter((element) => !web || element.web)
 		.map((element) => ({
 			element,
 			grade:
-				(element.label.trim().toLowerCase() === wanted ? 4 : 0) +
+				(normalizeLabel(element.label) === wanted ? 4 : 0) +
 				(isActionable(element) ? 2 : 0) +
-				(element.visible === false ? 0 : 1),
+				(element.visible === false ? 0 : 1) +
+				(roleMatches(element.role, role) ? ROLE_GRADE : 0),
 		}))
 		.sort((a, b) => b.grade - a.grade || readingOrder(a.element, b.element));
 }
@@ -489,15 +530,18 @@ function rank(elements: AgentElement[], text: string): Ranked {
 const describeTarget = ({ text, role }: { text?: string; role?: string }) =>
 	text ? `"${text}"${role ? ` (${role})` : ""}` : `a ${role}`;
 
-function listElements(elements: AgentElement[], numbered: boolean) {
-	const listed = elements.slice(0, LISTED).map((element, index) => {
+function matchLines(elements: AgentElement[], numbered: boolean) {
+	return elements.slice(0, LISTED).map((element, index) => {
 		const { x, y } = centreOf(element);
 		const where =
 			element.visible === false ? "off screen" : `at (${Math.round(x)}, ${Math.round(y)})`;
 		const at = `"${element.label}" (${element.role}) ${where}`;
 		return numbered ? `${index}: ${at}` : at;
 	});
-	return listed.join(", ") + (elements.length > LISTED ? ", …" : "");
+}
+
+function listElements(elements: AgentElement[], numbered: boolean) {
+	return matchLines(elements, numbered).join(", ") + (elements.length > LISTED ? ", …" : "");
 }
 
 function choose(ranked: Ranked, target: AgentTarget) {
@@ -609,6 +653,7 @@ export function createAgentControl(
 			case "move":
 			case "click":
 			case "scroll":
+			case "at":
 				return { ...command, ...point(command) };
 			case "drag": {
 				const from = point({ x: command.fromX, y: command.fromY });
@@ -625,6 +670,12 @@ export function createAgentControl(
 
 	function fromHelper(cmd: AgentCommand["cmd"], result: unknown) {
 		if (cmd === "cursor") return platform.fromHelperPoint(result as Point);
+		if (cmd === "at") {
+			const probed = result as AgentResults["at"];
+			const back = (hit: AgentHit | null) =>
+				hit ? { ...hit, ...platform.fromHelperRect(hit) } : null;
+			return { hit: back(probed.hit), parent: back(probed.parent) };
+		}
 		if (cmd !== "find") return result;
 		const found = result as AgentResults["find"];
 		return {
@@ -811,12 +862,22 @@ export function createAgentControl(
 	}
 
 	async function matchTarget(target: AgentTarget, window: TargetWindow, send: Post) {
-		const shown = await find(send, window, target, TARGET_FIND_LIMIT);
-		const first = rank(shown.elements, target.text);
+		const query = { text: target.text };
+		const shown = await find(send, window, query, TARGET_FIND_LIMIT);
+		const first = rank(shown.elements, target.text, target.role);
 		const top = first[target.index ?? 0];
-		if (top?.grade === BEST_GRADE && top.element.web) return first;
-		const all = await find(send, window, { ...target, offscreen: true }, TARGET_FIND_LIMIT);
-		return rank([...shown.elements, ...all.elements], target.text);
+		if (top?.grade === bestGrade(target.role) && top.element.web) return first;
+		const all = await find(send, window, { ...query, offscreen: true }, TARGET_FIND_LIMIT);
+		return rank([...shown.elements, ...all.elements], target.text, target.role);
+	}
+
+	async function nearest(target: AgentTarget, window: TargetWindow, run: Run) {
+		const { elements } = await find(run.post, window, { text: target.text }, TARGET_FIND_LIMIT);
+		try {
+			return choose(rank(elements, target.text, target.role), target);
+		} catch {
+			return undefined;
+		}
 	}
 
 	function checkDeadline(run: Run) {
@@ -866,14 +927,113 @@ export function createAgentControl(
 		);
 	}
 
-	async function pageSignature(window: TargetWindow, run: Run) {
-		const { elements } = await find(run.post, window, {}, FIND_LIMIT);
-		return elements
-			.map(({ x, y, width, height }) => [x, y, width, height].map(Math.round).join(","))
-			.join(" ");
+	async function pageSignature(send: Post, window: TargetWindow) {
+		const { elements } = await find(send, window, {}, FIND_LIMIT);
+		return signatureOf(elements);
 	}
 
-	async function resolveTarget(target: AgentTarget, run: Run) {
+	async function settle(target: AgentTarget, found: Resolved, run: Run): Promise<Resolved> {
+		const deadline = deps.now() + STABLE_WAIT_MS;
+		const endWait = beginSpan("wait", "wait");
+		try {
+			let last = found;
+			for (;;) {
+				await Promise.race([deps.sleep(STABLE_SAMPLE_MS), run.aborted]);
+				const window = await requireTarget();
+				const element = await Promise.race([nearest(target, window, run), run.aborted]);
+				if (!element) return last;
+				const next = { ...last, element, frame: window.frame };
+				if (sameFrame(last.element, element) && sameFrame(last.frame, window.frame)) {
+					return next;
+				}
+				if (deps.now() >= deadline) return next;
+				last = next;
+			}
+		} finally {
+			endWait();
+		}
+	}
+
+	function covers(hit: AgentFrame, element: AgentFrame) {
+		const shared = intersect(hit, element);
+		const smallest = Math.min(hit.width * hit.height, element.width * element.height);
+		return shared !== null && smallest > 0
+			? shared.width * shared.height >= HIT_OVERLAP * smallest
+			: false;
+	}
+
+	function hitFits(hit: AgentHit | null, element: AgentElement, role?: string) {
+		if (!hit) return false;
+		const named =
+			normalizeLabel(hit.label) === normalizeLabel(element.label) &&
+			(hit.role === element.role || roleMatches(hit.role, role));
+		return named || covers(hit, element);
+	}
+
+	async function blocker(
+		target: AgentTarget,
+		element: AgentElement,
+		window: TargetWindow,
+		at: Point,
+		run: Run,
+	) {
+		const probed = await run
+			.post({ cmd: "at", pid: window.pid, ...at })
+			.catch(() => null as AgentResults["at"] | null);
+		if (!probed?.hit) return null;
+		const global = {
+			...element,
+			x: element.x + window.frame.x,
+			y: element.y + window.frame.y,
+		};
+		if (
+			hitFits(probed.hit, global, target.role) ||
+			hitFits(probed.parent, global, target.role)
+		) {
+			return null;
+		}
+		return `"${probed.hit.label}" (${probed.hit.role})`;
+	}
+
+	async function aimAt(
+		target: AgentTarget,
+		start: Point,
+		run: Run,
+		approach?: (to: Point) => Promise<void>,
+	): Promise<Aimed> {
+		const deadline = deps.now() + TARGET_WAIT_MS;
+		let at = start;
+		for (let attempt = 1; ; attempt += 1) {
+			const window = await requireTarget();
+			const fresh = await Promise.race([nearest(target, window, run), run.aborted]);
+			let aimed: Aimed | null = null;
+			if (fresh) {
+				const centre = toGlobal(window, centreOf(fresh));
+				const delta = Math.hypot(centre.x - at.x, centre.y - at.y);
+				const reach = Math.max(AIM_NUDGE_PT, Math.min(fresh.width, fresh.height) / 2);
+				if (delta <= AIM_SETTLED_PT) aimed = { at, ms: 0 };
+				else if (delta <= reach) aimed = { at: centre, ms: AIM_NUDGE_MS };
+			}
+			if (aimed && fresh) {
+				const covered = await blocker(target, fresh, window, aimed.at, run);
+				if (!covered) return aimed;
+				if (attempt > 1) {
+					throw new Error(
+						`${describeTarget(target)} is at (${Math.round(aimed.at.x)}, ` +
+							`${Math.round(aimed.at.y)}), but the point is covered by ${covered}. ` +
+							"Dismiss it, or aim at another element.",
+					);
+				}
+			} else if (attempt >= AIM_TRIES || deps.now() >= deadline) {
+				throw await notFound(target, [], window, run);
+			}
+			const again = await resolveTarget(target, run);
+			at = toGlobal(await requireTarget(), centreOf(again.element));
+			await approach?.(at);
+		}
+	}
+
+	async function resolveTarget(target: AgentTarget, run: Run): Promise<Resolved> {
 		const deadline = deps.now() + TARGET_WAIT_MS;
 		let scrolls = 0;
 		let stalls = 0;
@@ -902,10 +1062,14 @@ export function createAgentControl(
 						await scrollAt(run, window, centring);
 						continue;
 					}
-					return { element, frame: window.frame, scrolled: scrolls > 0 };
+					return settle(
+						target,
+						{ element, frame: window.frame, scrolled: scrolls > 0 },
+						run,
+					);
 				}
 				if (element) {
-					const page = isStrip(element) ? await pageSignature(window, run) : "";
+					const page = isStrip(element) ? await pageSignature(run.post, window) : "";
 					if (last) {
 						const moved = isStrip(element)
 							? sameFrame(last.element, element) && page !== last.page
@@ -988,27 +1152,46 @@ export function createAgentControl(
 				);
 			}
 			case "click": {
-				const ms = await glideMs(step.durationMs, point, run);
+				const press = (at: Point, ms: number) =>
+					run.post({
+						cmd: "click",
+						...at,
+						ms,
+						button: step.button ?? "left",
+						count: step.count ?? 1,
+						modifiers: normalizeModifiers(step.modifiers),
+					});
+				const aim = spots[0].target;
+				if (!aim) {
+					const ms = await glideMs(step.durationMs, point, run);
+					return logged(run, "motion", "click", () => press(point, ms), target);
+				}
+				const glide = async (to: Point) =>
+					void (await run.post({
+						cmd: "move",
+						...to,
+						ms: await glideMs(step.durationMs, to, run),
+					}));
 				return logged(
 					run,
 					"motion",
 					"click",
-					() =>
-						run.post({
-							cmd: "click",
-							...point,
-							ms,
-							button: step.button ?? "left",
-							count: step.count ?? 1,
-							modifiers: normalizeModifiers(step.modifiers),
-						}),
+					async () => {
+						await glide(point);
+						const fix = await aimAt(aim, point, run, glide);
+						await press(fix.at, fix.ms);
+					},
 					target,
 				);
 			}
 			case "drag": {
+				const from = spots[0].target
+					? (await aimAt(spots[0].target, point, run)).at
+					: point;
+				const to = spots[1].target ? (await aimAt(spots[1].target, end, run)).at : end;
 				const ms =
 					step.durationMs ??
-					pacedGlideMs(Math.hypot(end.x - point.x, end.y - point.y), run.pace);
+					pacedGlideMs(Math.hypot(to.x - from.x, to.y - from.y), run.pace);
 				return logged(
 					run,
 					"motion",
@@ -1016,10 +1199,10 @@ export function createAgentControl(
 					() =>
 						run.post({
 							cmd: "drag",
-							fromX: point.x,
-							fromY: point.y,
-							toX: end.x,
-							toY: end.y,
+							fromX: from.x,
+							fromY: from.y,
+							toX: to.x,
+							toY: to.y,
 							ms,
 							button: step.button ?? "left",
 							modifiers: normalizeModifiers(step.modifiers),
@@ -1206,9 +1389,17 @@ export function createAgentControl(
 		try {
 			element = choose(ranked, target);
 		} catch {
-			return { found: false, candidates };
+			return {
+				found: false,
+				ambiguous: true,
+				candidates,
+				matches: matchLines(
+					ranked.map(({ element: match }) => match),
+					true,
+				),
+			};
 		}
-		if (!element) return { found: false, candidates };
+		if (!element) return { found: false, ambiguous: false, candidates };
 		if (element.visible === false) return { found: true, label: element.label, candidates };
 		const { x, y } = centreOf(element);
 		return {
@@ -1245,7 +1436,17 @@ export function createAgentControl(
 		requireSupported();
 		const window = await requireTarget();
 		const report: AgentDryRunStep[] = [];
+		let live = false;
 		for (const [index, step] of steps.entries()) {
+			if (live) {
+				report.push({
+					index: index + 1,
+					action: step.action,
+					found: null,
+					note: RUN_TIME_NOTE,
+				});
+				continue;
+			}
 			try {
 				report.push({
 					index: index + 1,
@@ -1255,8 +1456,9 @@ export function createAgentControl(
 			} catch (error) {
 				throw stepError(index, step, error);
 			}
+			live = changesPage(step);
 		}
-		return report;
+		return { dryRun: report, page: await pageSignature(request, window) };
 	}
 
 	async function perform(steps: AgentStep[], options: PerformOptions = {}) {
@@ -1270,7 +1472,7 @@ export function createAgentControl(
 			const startedAt = deps.now();
 			const result: PerformResult = { performed: 0, durationMs: 0 };
 			if (options.dryRun) {
-				result.dryRun = await dryRun(steps);
+				Object.assign(result, await dryRun(steps));
 			} else {
 				const endScene = beginScene(options.title);
 				try {
@@ -1283,7 +1485,11 @@ export function createAgentControl(
 				result.performed = steps.length;
 			}
 			result.durationMs = Math.round(deps.now() - startedAt);
-			if (options.then === "elements") result.elements = (await listControls()).elements;
+			if (options.then === "elements") {
+				const listed = await listControls();
+				result.elements = listed.elements;
+				result.page = signatureOf(listed.elements);
+			}
 			return result;
 		});
 	}

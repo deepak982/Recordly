@@ -39,6 +39,21 @@ export type AgentWindowInfo = {
 	minimized: boolean;
 };
 
+export const AGENT_ROLE_ALIASES: Record<string, string[]> = {
+	button: ["AXButton", "AXMenuButton", "Button", "SplitButton"],
+	link: ["AXLink", "Hyperlink"],
+	textbox: ["AXTextField", "AXTextArea", "AXComboBox", "Edit", "ComboBox"],
+	textfield: ["AXTextField", "AXTextArea", "AXComboBox", "Edit", "ComboBox"],
+	checkbox: ["AXCheckBox", "CheckBox"],
+	radio: ["AXRadioButton", "RadioButton"],
+	tab: ["AXTabButton", "TabItem"],
+	menuitem: ["AXMenuItem", "AXMenuBarItem", "MenuItem"],
+	text: ["AXStaticText", "Text"],
+	statictext: ["AXStaticText", "Text"],
+	heading: ["AXHeading"],
+	image: ["AXImage"],
+};
+
 export type AgentElement = AgentFrame & {
 	role: string;
 	label: string;
@@ -46,6 +61,8 @@ export type AgentElement = AgentFrame & {
 	web?: boolean;
 	container?: AgentFrame;
 };
+
+export type AgentHit = AgentFrame & { role: string; label: string };
 
 export type AgentCommand =
 	| { cmd: "preflight" }
@@ -86,6 +103,7 @@ export type AgentCommand =
 	| { cmd: "raise"; pid: number; windowId: number; frame: AgentFrame }
 	| { cmd: "frontmost_window" }
 	| { cmd: "window_info"; windowId: number }
+	| { cmd: "at"; pid: number; x: number; y: number }
 	| {
 			cmd: "find";
 			pid: number;
@@ -112,6 +130,7 @@ export type AgentResults = {
 	frontmost_window: { window: AgentWindow | null };
 	window_info: { window: AgentWindowInfo | null };
 	find: { elements: AgentElement[]; truncated: boolean };
+	at: { hit: AgentHit | null; parent: AgentHit | null };
 };
 
 export type AgentRequest = AgentCommand & { id: number };

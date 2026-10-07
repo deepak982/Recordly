@@ -84,6 +84,7 @@ function setup(overrides: Partial<AgentControlDeps> = {}, handlers: Record<strin
 	const all: Record<string, Handler> = {
 		preflight: () => ({ postEvents: true, accessibility: true }),
 		frontmost_window: () => ({ window: CHROME }),
+		move: tick,
 		raise: () => ({ raised: true }),
 		cursor: () => pointer,
 		...handlers,
@@ -149,7 +150,7 @@ describe("perform", () => {
 				{ action: "type", text: "hi" },
 				{ action: "key", key: "enter" },
 			]),
-		).resolves.toEqual({ performed: 6, durationMs: 1_300 });
+		).resolves.toEqual({ performed: 6, durationMs: 1_750 });
 		expect(commands).toEqual([
 			{ cmd: "preflight" },
 			{ cmd: "frontmost_window" },
@@ -970,17 +971,24 @@ describe("targets", () => {
 		expect(commands.filter((command) => command.cmd === "find")).toEqual([
 			query,
 			{ ...query, offscreen: true },
+			query,
+			query,
 		]);
-		expect(commands.find((command) => command.cmd === "click")).toMatchObject({
+		expect(commands.find((command) => command.cmd === "move")).toMatchObject({
 			x: 440,
 			y: 265,
 			ms: 500,
 		});
-		expect(snapshotAgentActivity(clock.ms).spans[0]).toEqual({
+		expect(commands.find((command) => command.cmd === "click")).toMatchObject({
+			x: 440,
+			y: 265,
+			ms: 0,
+		});
+		expect(snapshotAgentActivity(clock.ms).spans[1]).toEqual({
 			kind: "motion",
 			action: "click",
-			startMs: 1_000,
-			endMs: 1_500,
+			startMs: 1_100,
+			endMs: 1_600,
 			target: { cx: 340 / 800, cy: 215 / 600, width: 0.1, height: 0.05 },
 		});
 	});
@@ -1043,9 +1051,10 @@ describe("targets", () => {
 		);
 		await agent.perform([{ action: "click", target: { text: "Save" }, durationMs: 100 }]);
 		expect(count("click")).toBe(1);
-		expect(snapshotAgentActivity(clock.ms).spans.slice(0, 2)).toMatchObject([
+		expect(snapshotAgentActivity(clock.ms).spans.slice(0, 3)).toMatchObject([
 			{ kind: "wait", action: "wait", startMs: 1_000, endMs: 1_750 },
-			{ kind: "motion", action: "click", startMs: 1_750, endMs: 1_850 },
+			{ kind: "wait", action: "wait", startMs: 1_750, endMs: 1_850 },
+			{ kind: "motion", action: "click", startMs: 1_850, endMs: 1_950 },
 		]);
 	});
 
@@ -1133,7 +1142,12 @@ describe("targets", () => {
 			x: 240,
 			y: 465,
 		});
-		expect(spansOf().slice(0, 3)).toEqual(["motion:scroll", "motion:scroll", "motion:click"]);
+		expect(spansOf().slice(0, 4)).toEqual([
+			"motion:scroll",
+			"motion:scroll",
+			"wait:wait",
+			"motion:click",
+		]);
 		expect(snapshotAgentActivity(clock.ms).spans[0].target).toEqual({
 			cx: 150 / 800,
 			cy: 575.5 / 600,
@@ -1183,15 +1197,24 @@ describe("targets", () => {
 			"frontmost_window",
 			"find",
 			"find",
+			"find",
 			"cursor",
+			"move",
+			"find",
+			"at",
 			"click",
 			"type",
 		]);
+		expect(commands.find((command) => command.cmd === "move")).toMatchObject({
+			x: 400,
+			y: 260,
+			ms: 515,
+		});
 		expect(commands.find((command) => command.cmd === "click")).toEqual({
 			cmd: "click",
 			x: 400,
 			y: 260,
-			ms: 515,
+			ms: 0,
 			button: "left",
 			count: 1,
 			modifiers: [],
@@ -1577,18 +1600,50 @@ describe("dry runs and results", () => {
 					y: 215,
 					candidates: 1,
 				},
-				{ index: 2, action: "type", found: false, candidates: 0 },
-				{ index: 3, action: "click", found: false, candidates: 2 },
-				{ index: 4, action: "move", found: true, label: "Pricing", candidates: 1 },
-				{ index: 5, action: "key", found: true },
-				{ index: 6, action: "move", found: true, x: 10, y: 20 },
-				{ index: 7, action: "waitFor", found: false, candidates: 0 },
-				{ index: 8, action: "waitFor", found: true },
+				{ index: 2, action: "type", found: null, note: "validated at run time" },
+				{ index: 3, action: "click", found: null, note: "validated at run time" },
+				{ index: 4, action: "move", found: null, note: "validated at run time" },
+				{ index: 5, action: "key", found: null, note: "validated at run time" },
+				{ index: 6, action: "move", found: null, note: "validated at run time" },
+				{ index: 7, action: "waitFor", found: null, note: "validated at run time" },
+				{ index: 8, action: "waitFor", found: null, note: "validated at run time" },
 			],
+			page: "300,200,80,30 100,100,80,30 400,100,80,30",
 		});
-		expect(names()).toEqual(Array.from({ length: 9 }, () => "find"));
+		expect(names()).toEqual(["find", "find", "find"]);
 		expect(deps.waitForStill).not.toHaveBeenCalled();
 		expect(snapshotAgentActivity(clock.ms)).toEqual({ version: 1, scenes: [], spans: [] });
+	});
+
+	it("tells an ambiguous target apart from a missing one", async () => {
+		const { agent } = setup(
+			{},
+			{ find: findOn([element("Save", 300, 200), element("Save", 300, 400)]) },
+		);
+		await expect(
+			agent.perform(
+				[
+					{ action: "move", target: { text: "Save" } },
+					{ action: "move", target: { text: "Nope" } },
+				],
+				{ dryRun: true },
+			),
+		).resolves.toMatchObject({
+			dryRun: [
+				{
+					index: 1,
+					action: "move",
+					found: false,
+					ambiguous: true,
+					candidates: 2,
+					matches: [
+						'0: "Save" (AXButton) at (340, 215)',
+						'1: "Save" (AXButton) at (340, 415)',
+					],
+				},
+				{ index: 2, action: "move", found: false, ambiguous: false, candidates: 0 },
+			],
+		});
 	});
 
 	it("refuses a dry run with a point outside the window", async () => {
@@ -1612,6 +1667,7 @@ describe("dry runs and results", () => {
 			performed: 1,
 			durationMs: 10,
 			elements: [{ role: "AXButton", label: "Save", x: 300, y: 200, width: 80, height: 30 }],
+			page: "300,200,80,30",
 		});
 		expect(commands.slice(-2)).toEqual([
 			{ cmd: "disarm" },
@@ -1748,7 +1804,7 @@ describe("ranking, scrolling and limits", () => {
 		);
 		await agent.perform([{ action: "click", target: { text: "Pricing" } }]);
 		expect(clickedAt(commands)).toEqual([[240, 365]]);
-		expect(count("find")).toBe(1);
+		expect(count("find")).toBe(3);
 	});
 
 	it("merges twins with the same label and frame, keeping the actionable one", async () => {
@@ -1842,7 +1898,7 @@ describe("ranking, scrolling and limits", () => {
 		await agent.perform([{ action: "click", target: { text: "Save" } }]);
 		expect(
 			commands.flatMap((command) => (command.cmd === "find" ? [command.offscreen] : [])),
-		).toEqual([undefined, true]);
+		).toEqual([undefined, true, undefined, undefined]);
 		expect(clickedAt(commands)).toEqual([[440, 265]]);
 	});
 
@@ -2021,6 +2077,247 @@ describe("ranking, scrolling and limits", () => {
 	});
 });
 
+describe("aiming at a moving target", () => {
+	beforeEach(() => {
+		clock.ms = 1_000;
+		resetAgentActivity();
+	});
+
+	const spansOf = () =>
+		snapshotAgentActivity(clock.ms).spans.map(({ kind, action }) => `${kind}:${action}`);
+	const posted = (commands: AgentCommand[], cmd: string) =>
+		commands.flatMap((command) =>
+			command.cmd === cmd && "x" in command ? [[command.x, command.y, command.ms]] : [],
+		);
+	const sliding = (label: string, from: number, rate: number, stop: number) =>
+		findOn(() => [element(label, Math.min(stop, from + (clock.ms - 1_000) * rate), 200)]);
+	const jumping = (label: string, from: number, to: number, at: number) =>
+		findOn(() => [element(label, clock.ms >= at ? to : from, 200)]);
+
+	it("waits for the frame to hold still for two samples before using it, logging the wait", async () => {
+		const { agent, commands } = setup(
+			{},
+			{ find: sliding("Tasks", 54, 0.3, 414), click: tick },
+		);
+		await agent.perform([{ action: "click", target: { text: "Tasks" }, durationMs: 100 }]);
+		expect(posted(commands, "click")).toEqual([[FRAME.x + 414 + 40, 265, 0]]);
+		expect(spansOf()[0]).toBe("wait:wait");
+		expect(snapshotAgentActivity(clock.ms).spans[0]).toMatchObject({
+			kind: "wait",
+			startMs: 1_000,
+			endMs: 2_200,
+		});
+	});
+
+	it("presses as-is when the frame holds still", async () => {
+		const { agent, commands, count } = setup(
+			{},
+			{ find: findOn([element("Save", 300, 200)]), click: tick },
+		);
+		await agent.perform([{ action: "click", target: { text: "Save" }, durationMs: 100 }]);
+		expect(posted(commands, "move")).toEqual([[440, 265, 100]]);
+		expect(posted(commands, "click")).toEqual([[440, 265, 0]]);
+		expect(count("at")).toBe(1);
+	});
+
+	it("nudges onto the new centre when the target shifts inside its own width", async () => {
+		const { agent, commands } = setup(
+			{},
+			{ find: jumping("Tasks", 54, 74, 1_200), click: tick },
+		);
+		await agent.perform([{ action: "click", target: { text: "Tasks" }, durationMs: 200 }]);
+		expect(posted(commands, "move")).toEqual([[194, 265, 200]]);
+		expect(posted(commands, "click")).toEqual([[214, 265, 120]]);
+	});
+
+	it("resolves again and glides a second time when the target moves further than a nudge", async () => {
+		const { agent, commands } = setup(
+			{},
+			{ find: jumping("Tasks", 54, 114, 1_200), click: tick },
+		);
+		await agent.perform([{ action: "click", target: { text: "Tasks" }, durationMs: 200 }]);
+		expect(posted(commands, "move")).toEqual([
+			[194, 265, 200],
+			[254, 265, 200],
+		]);
+		expect(posted(commands, "click")).toEqual([[254, 265, 0]]);
+	});
+
+	it("fails with the not-found message when the target is gone by the press", async () => {
+		const { agent, count } = setup(
+			{},
+			{
+				find: findOn(() => (clock.ms >= 1_200 ? [] : [element("Tasks", 54, 200)])),
+				click: tick,
+			},
+		);
+		await expect(
+			agent.perform([{ action: "click", target: { text: "Tasks" }, durationMs: 200 }]),
+		).rejects.toThrow(/"Tasks" was not found in the window within 5 s/);
+		expect(count("click")).toBe(0);
+	});
+
+	it("re-resolves both ends of a drag before pressing", async () => {
+		const screen = () => [
+			element("Card", clock.ms >= 1_150 ? 74 : 54, 200),
+			element("Bin", 500, 400),
+		];
+		const { agent, commands } = setup({}, { find: findOn(screen), drag: tick });
+		await agent.perform([
+			{ action: "drag", from: { text: "Card" }, to: { text: "Bin" }, durationMs: 300 },
+		]);
+		expect(commands.find((command) => command.cmd === "drag")).toMatchObject({
+			fromX: 214,
+			fromY: 265,
+			toX: 640,
+			toY: 465,
+		});
+	});
+
+	it("re-aims the click that a type with into makes", async () => {
+		const { agent, commands } = setup(
+			{},
+			{
+				find: findOn(() => [
+					element("Email", clock.ms >= 1_150 ? 74 : 54, 200, { role: "AXTextField" }),
+				]),
+			},
+		);
+		await agent.perform([{ action: "type", text: "hi", into: { text: "Email" } }]);
+		expect(posted(commands, "click")).toEqual([[214, 265, 120]]);
+	});
+});
+
+describe("role ranks instead of filtering", () => {
+	beforeEach(() => {
+		clock.ms = 1_000;
+		resetAgentActivity();
+	});
+
+	const link = { role: "AXLink" };
+
+	it("raises ambiguity over the links a role filter used to delete", async () => {
+		const { agent, commands, count } = setup(
+			{},
+			{
+				find: findOn([
+					element("Open assistant", 700, 500),
+					element("Open", 100, 100, link),
+					element("Open", 100, 200, link),
+					element("Open", 100, 300, link),
+				]),
+			},
+		);
+		await expect(
+			agent.perform([{ action: "click", target: { text: "Open", role: "button" } }]),
+		).rejects.toThrow(
+			'Step 1 (click): 3 elements match "Open" (button) equally well. Add an index ' +
+				"(0-based, best match first, then top to bottom): " +
+				'0: "Open" (AXLink) at (140, 115), 1: "Open" (AXLink) at (140, 215), ' +
+				'2: "Open" (AXLink) at (140, 315), 3: "Open assistant" (AXButton) at (740, 515).',
+		);
+		expect(count("click")).toBe(0);
+		expect(
+			commands.flatMap((command) => (command.cmd === "find" ? [command.role] : [])),
+		).toEqual([undefined, undefined]);
+	});
+
+	it("still resolves one match that the role singles out", async () => {
+		const { agent, commands } = setup(
+			{},
+			{
+				find: findOn([
+					element("Save", 100, 200, { role: "AXStaticText" }),
+					element("Save", 300, 200),
+				]),
+				click: tick,
+			},
+		);
+		await agent.perform([{ action: "click", target: { text: "Save", role: "button" } }]);
+		expect(commands.find((command) => command.cmd === "click")).toMatchObject({
+			x: 440,
+			y: 265,
+		});
+	});
+});
+
+describe("hit test before the press", () => {
+	beforeEach(() => {
+		clock.ms = 1_000;
+		resetAgentActivity();
+	});
+
+	const save = findOn([element("Save", 300, 200)]);
+	const hit = (role: string, label: string, box: Partial<AgentElement> = {}) => ({
+		role,
+		label,
+		x: 400,
+		y: 250,
+		width: 80,
+		height: 30,
+		...box,
+	});
+
+	it("refuses after one retry, naming what covers the point", async () => {
+		const { agent, count } = setup(
+			{},
+			{
+				find: save,
+				at: () => ({
+					hit: hit("AXButton", "Ask AI", { x: 400, y: 200, width: 60, height: 60 }),
+					parent: null,
+				}),
+			},
+		);
+		await expect(
+			agent.perform([{ action: "click", target: { text: "Save" } }]),
+		).rejects.toThrow(
+			'Step 1 (click): "Save" is at (440, 265), but the point is covered by "Ask AI" ' +
+				"(AXButton). Dismiss it, or aim at another element.",
+		);
+		expect(count("click")).toBe(0);
+		expect(count("at")).toBe(2);
+	});
+
+	it("accepts the target's own label on the hit element's parent", async () => {
+		const { agent, count } = setup(
+			{},
+			{
+				find: save,
+				at: () => ({
+					hit: hit("AXStaticText", "Save", { x: 430, y: 260, width: 20, height: 10 }),
+					parent: hit("AXButton", "Save"),
+				}),
+			},
+		);
+		await agent.perform([{ action: "click", target: { text: "Save" } }]);
+		expect(count("click")).toBe(1);
+	});
+
+	it("accepts an unlabelled hit that overlaps the target enough", async () => {
+		const { agent, count } = setup(
+			{},
+			{ find: save, at: () => ({ hit: hit("AXGroup", ""), parent: null }) },
+		);
+		await agent.perform([{ action: "click", target: { text: "Save" } }]);
+		expect(count("click")).toBe(1);
+	});
+
+	it("presses anyway when the helper cannot answer the hit test", async () => {
+		const { agent, count } = setup(
+			{},
+			{
+				find: save,
+				at: () => {
+					throw new Error("unknown command: at");
+				},
+			},
+		);
+		await agent.perform([{ action: "click", target: { text: "Save" } }]);
+		expect(count("click")).toBe(1);
+	});
+});
+
 describe("Windows and Linux", () => {
 	const DISPLAY = { id: 5, bounds: { x: 0, y: 0, width: 1000, height: 800 }, scaleFactor: 2 };
 	const double = (rect: { x: number; y: number; width: number; height: number }) => ({
@@ -2103,6 +2400,46 @@ describe("Windows and Linux", () => {
 		const click = snapshotAgentActivity(clock.ms).spans.find((span) => span.action === "click");
 		expect(click?.target).toEqual({ cx: 0.44, cy: 265 / 800, width: 0.08, height: 30 / 800 });
 		expect(remote.selectSource).not.toHaveBeenCalled();
+	});
+
+	it("does the re-aim maths in points, not helper pixels", async () => {
+		const shifting = () => ({
+			elements: [
+				{
+					role: "Button",
+					label: "Save",
+					...double({
+						x: FRAME.x + (clock.ms >= 1_200 ? 320 : 300),
+						y: FRAME.y + 200,
+						width: 80,
+						height: 30,
+					}),
+					container: double(FRAME),
+				},
+			],
+			truncated: false,
+		});
+		const { agent, commands } = setup(
+			{ platform: on("win32") },
+			{ find: shifting, click: tick },
+		);
+		await agent.perform([{ action: "click", target: { text: "Save" }, durationMs: 200 }]);
+		expect(commands.find((command) => command.cmd === "move")).toMatchObject({
+			x: 880,
+			y: 530,
+			ms: 200,
+		});
+		expect(commands.find((command) => command.cmd === "at")).toEqual({
+			cmd: "at",
+			pid: 42,
+			x: 920,
+			y: 530,
+		});
+		expect(commands.find((command) => command.cmd === "click")).toMatchObject({
+			x: 920,
+			y: 530,
+			ms: 120,
+		});
 	});
 
 	it("sets the control window from open_url on Linux without changing the recorded source", async () => {

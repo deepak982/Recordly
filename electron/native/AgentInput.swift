@@ -1006,6 +1006,52 @@ func walk(_ window: AXUIElement, roles: Set<String>?, text: String, bounds: CGRe
 	return (matches, false)
 }
 
+func describe(_ element: AXUIElement) -> [String: Any]? {
+	var raw: CFArray?
+	guard AXUIElementCopyMultipleAttributeValues(element, findAttributes, AXCopyMultipleAttributeOptions(rawValue: 0), &raw) == .success,
+		let values = raw as? [AnyObject], values.count == 10 else {
+		return nil
+	}
+	let field = values.map(usable)
+	guard let box = rect(position: field[7], size: field[8]) else {
+		return nil
+	}
+	let label = [field[2], field[3], field[4], field[5], field[6]]
+		.compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) }
+		.first { !$0.isEmpty } ?? ""
+	return [
+		"role": field[0] as? String ?? "",
+		"label": String(label.prefix(200)),
+		"x": box.minX,
+		"y": box.minY,
+		"width": box.width,
+		"height": box.height,
+	]
+}
+
+func axParent(_ element: AXUIElement) -> AXUIElement? {
+	guard let value = attribute(element, kAXParentAttribute), CFGetTypeID(value) == AXUIElementGetTypeID() else {
+		return nil
+	}
+	return (value as! AXUIElement)
+}
+
+func elementAt(_ request: [String: Any]) throws -> [String: Any] {
+	let pid = try pid(request)
+	let spot = try point(request, "x", "y")
+	guard AXIsProcessTrusted() else {
+		throw Failure("accessibility permission is not granted")
+	}
+	var found: AXUIElement?
+	let app = AXUIElementCreateApplication(pid)
+	guard AXUIElementCopyElementAtPosition(app, Float(spot.x), Float(spot.y), &found) == .success,
+		let hit = found else {
+		return ["hit": NSNull(), "parent": NSNull()]
+	}
+	let parent = axParent(hit).flatMap(describe)
+	return ["hit": describe(hit) ?? NSNull(), "parent": parent ?? NSNull()]
+}
+
 func find(_ request: [String: Any]) throws -> [String: Any] {
 	let pid = try pid(request)
 	let bounds = try frame(request)
@@ -1127,6 +1173,8 @@ func handle(_ line: String) {
 		workQueue.async { respond(id) { try raise(request) } }
 	case "find":
 		workQueue.async { respond(id) { try find(request) } }
+	case "at":
+		workQueue.async { respond(id) { try elementAt(request) } }
 	default:
 		send(["id": id, "ok": false, "error": "unknown command: \(command)"])
 	}
