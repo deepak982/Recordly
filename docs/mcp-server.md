@@ -23,7 +23,7 @@ Recording works everywhere; driving the window works on macOS, Windows and Linux
 1. Open **Settings → Advanced → AI agent control (MCP)**.
 2. Turn on **Let AI agents control Recordly**. Recordly generates a private token and starts listening; the panel then shows **Running at `http://127.0.0.1:43831/mcp`**.
 3. Press **Copy setup command** and paste it into a terminal. That one command registers Recordly with Claude Code, token included. For other tools, use the configuration below.
-4. On macOS, optionally turn on **Let agents use the mouse and keyboard**, which appears once the connection is on. Windows and Linux don't show it yet. It is off by default. Until you turn it on, an agent can record but not open pages or touch the window: `open_url` and every input tool refuse.
+4. Optionally turn on **Let agents use the mouse and keyboard**, which appears once the connection is on — on macOS, Windows and Linux with X11. On Wayland the row still appears, but the switch is disabled and the reason stands in place of the description. It is off by default. Until you turn it on, an agent can record but not open pages or touch the window: `open_url` and every input tool refuse.
 
 **Regenerate token** issues a new token and invalidates the old one. Every tool you have already configured stops working until you re-add it with the new token.
 
@@ -38,7 +38,7 @@ Settings always shows the address the running app is actually using — prefer i
 
 ## What an agent can do
 
-Two groups of tools — ten for recording and reviewing on every platform, and eleven more for driving the window on macOS — plus one prompt, [`record_demo`](#the-record_demo-prompt). The tools return plain JSON (`screenshot` and `review_recording` also return an image) and refuse with an explanatory message instead of opening a dialog, so an agent never leaves a prompt waiting for a human to click something.
+Two groups of tools — ten for recording and reviewing on every platform, and eleven more for driving the window, registered wherever mouse and keyboard control is supported (macOS, Windows and Linux with X11) — plus one prompt, [`record_demo`](#the-record_demo-prompt). The tools return plain JSON (`screenshot` and `review_recording` also return an image) and refuse with an explanatory message instead of opening a dialog, so an agent never leaves a prompt waiting for a human to click something.
 
 ### Recording
 
@@ -404,7 +404,7 @@ Driving your mouse and keyboard is far more powerful than recording, so it has i
 
 **`start_recording` waits on Linux.** On Wayland, the system share dialog has to be confirmed by a person; the agent asks you to, and the start gives up after 120 seconds. On X11, the **Entire screen** entry records with no prompt.
 
-**The agent has no `open_url`, `screenshot` or input tools.** They aren't offered on Wayland, or while the Recordly build lacks its mouse and keyboard helper for this platform (see [Mouse and keyboard control](#mouse-and-keyboard-control)); the agent can still record while you perform the demo. On Linux, check that the session is X11.
+**The agent has no `open_url`, `screenshot` or input tools.** They aren't offered on Wayland (see [Mouse and keyboard control](#mouse-and-keyboard-control)); the agent can still record while you perform the demo. On Linux, check that the session is X11. Everywhere else the tools are offered whether or not the build actually ships its mouse and keyboard helper — a build missing the helper offers them and every call fails with *Recordly's input helper could not start.*
 
 **`find_elements` finds nothing in a browser on Linux.** Chromium-based browsers and Electron apps join the accessibility bus only when started with `ACCESSIBILITY_ENABLED=1`. Quit the browser and start it that way, or let the agent aim with region screenshots.
 
