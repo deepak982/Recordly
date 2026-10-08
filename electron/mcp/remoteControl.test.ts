@@ -9,7 +9,7 @@ vi.mock("../ipc/state", () => ({}));
 vi.mock("../windows", () => ({}));
 
 import type { SelectedSource } from "../ipc/types";
-import { createRemoteControl, type RemoteControlDeps } from "./remoteControl";
+import { createRemoteControl, type DisplayInfo, type RemoteControlDeps } from "./remoteControl";
 
 const SOURCES = [
 	{
@@ -68,6 +68,7 @@ function setup(overrides: Partial<RemoteControlDeps> = {}, { ready = true } = {}
 		showHud: vi.fn(),
 		cancelCountdown: vi.fn(),
 		listSources: async () => SOURCES,
+		getDisplays: () => [],
 		selectSource: vi.fn(async () => undefined),
 		isWindowOnScreen: vi.fn(async () => true),
 		raiseWindow: vi.fn(async () => undefined),
@@ -699,5 +700,146 @@ describe("HUD lifecycle", () => {
 		expect(fixture.remote.getStatus().state).toBe("idle");
 		await expect(fixture.remote.startRecording()).rejects.toThrow(/crashed/);
 		expect(fixture.commands()).toHaveLength(1);
+	});
+});
+
+describe("display geometry", () => {
+	const display = (id: number, over: Partial<DisplayInfo> = {}): DisplayInfo => ({
+		id,
+		bounds: { x: 0, y: 0, width: 1440, height: 900 },
+		scaleFactor: 2,
+		primary: id === 1,
+		...over,
+	});
+	const screenSource = (n: number, displayId: string) => ({
+		id: `screen:${n}:0`,
+		name: n === 1 ? "Screen 1 (Primary)" : `Screen ${n}`,
+		sourceType: "screen" as const,
+		display_id: displayId,
+	});
+
+	it("gives each screen bounds, scale, pixel size and primary", async () => {
+		const { remote } = setup({
+			listSources: async () => [screenSource(1, "1"), screenSource(2, "2")],
+			getDisplays: () => [
+				display(1),
+				display(2, {
+					label: "LG HDR",
+					bounds: { x: 1440, y: -200, width: 2560, height: 1440 },
+					scaleFactor: 1,
+				}),
+			],
+		});
+		await expect(remote.listSources()).resolves.toEqual([
+			{
+				id: "screen:1:0",
+				name: "Screen 1 (Primary)",
+				type: "screen",
+				x: 0,
+				y: 0,
+				width: 1440,
+				height: 900,
+				scaleFactor: 2,
+				pixelWidth: 2880,
+				pixelHeight: 1800,
+				primary: true,
+			},
+			{
+				id: "screen:2:0",
+				name: "Screen 2",
+				type: "screen",
+				displayName: "LG HDR",
+				x: 1440,
+				y: -200,
+				width: 2560,
+				height: 1440,
+				scaleFactor: 1,
+				pixelWidth: 2560,
+				pixelHeight: 1440,
+				primary: false,
+			},
+		]);
+	});
+
+	it("omits scale and pixels when the scale factor is unavailable", async () => {
+		for (const scaleFactor of [undefined, 0, Number.NaN]) {
+			const { remote } = setup({
+				listSources: async () => [screenSource(1, "1")],
+				getDisplays: () => [display(1, { scaleFactor })],
+			});
+			const [entry] = await remote.listSources();
+			expect(entry).toMatchObject({ width: 1440, primary: true });
+			expect(entry).not.toHaveProperty("scaleFactor");
+			expect(entry).not.toHaveProperty("pixelWidth");
+		}
+	});
+
+	it("adds no geometry when the display is unknown, and leaves windows alone", async () => {
+		const { remote } = setup({
+			listSources: async () => [screenSource(3, "99"), SOURCES[1]],
+			getDisplays: () => [display(1)],
+		});
+		const listed = await remote.listSources();
+		expect(listed[0]).toEqual({ id: "screen:3:0", name: "Screen 3", type: "screen" });
+		expect(listed[1]).toEqual({
+			id: "window:1",
+			name: "Docs",
+			type: "window",
+			appName: "Google Chrome",
+		});
+	});
+
+	it("gives the Wayland portal entry no fake geometry", async () => {
+		const { remote } = setup({
+			platform: "linux",
+			isWayland: () => true,
+			getDisplays: () => [display(1)],
+		});
+		const [portal] = await remote.listSources();
+		expect(portal).toEqual({
+			id: "screen:linux-portal",
+			name: "Screen (chosen in the system share dialog)",
+			type: "screen",
+			needsUser: true,
+		});
+	});
+
+	it("tells two displays apart when a name is ambiguous, and matches a display label", async () => {
+		const fixture = {
+			listSources: async () => [screenSource(1, "1"), screenSource(2, "2")],
+			getDisplays: () => [
+				display(1, { label: "Built-in" }),
+				display(2, {
+					label: "LG HDR",
+					bounds: { x: 1440, y: 0, width: 2560, height: 1440 },
+				}),
+			],
+		};
+		const { remote, deps } = setup(fixture);
+		const ambiguous = remote.selectSource({ name: "screen" });
+		await expect(ambiguous).rejects.toThrow(/1440x900 at 0,0, primary/);
+		await expect(ambiguous).rejects.toThrow(/"LG HDR", 2560x1440 at 1440,0\)/);
+		expect(deps.selectSource).not.toHaveBeenCalled();
+		await expect(remote.selectSource({ name: "lg hdr" })).resolves.toMatchObject({
+			id: "screen:2:0",
+			displayName: "LG HDR",
+		});
+	});
+
+	it("reports a display unplugged since list_sources as an unknown id", async () => {
+		let displays = [display(1), display(2)];
+		let sources = [screenSource(1, "1"), screenSource(2, "2")];
+		const { remote, deps } = setup({
+			listSources: async () => sources,
+			getDisplays: () => displays,
+		});
+		const listed = await remote.listSources();
+		expect(listed).toHaveLength(2);
+		displays = [display(1)];
+		sources = [screenSource(1, "1")];
+		await expect(remote.selectSource({ id: "screen:2:0" })).rejects.toThrow(
+			/No capture source matches id "screen:2:0"/,
+		);
+		expect(deps.selectSource).not.toHaveBeenCalled();
 	});
 });

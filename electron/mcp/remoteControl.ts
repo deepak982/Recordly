@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { BrowserWindow, ipcMain, systemPreferences } from "electron";
+import { BrowserWindow, ipcMain, screen, systemPreferences } from "electron";
 import { isMacWindowOnScreen } from "../ipc/cursor/bounds";
 import { isCursorCapturePaused } from "../ipc/cursor/telemetry";
 import {
@@ -44,6 +44,7 @@ type RawSource = {
 	pid?: number;
 	onScreen?: boolean;
 	needsUser?: boolean;
+	display_id?: string;
 	x?: number;
 	y?: number;
 	width?: number;
@@ -66,6 +67,14 @@ type Ipc = {
 	on(channel: string, listener: IpcListener): unknown;
 };
 
+export type DisplayInfo = {
+	id: number | string;
+	label?: string;
+	bounds: { x: number; y: number; width: number; height: number };
+	scaleFactor?: number;
+	primary: boolean;
+};
+
 export type RemoteControlDeps = {
 	getPermissions: () => MacPermissions | undefined;
 	getSelectedSource: () => SelectedSource | null;
@@ -76,6 +85,7 @@ export type RemoteControlDeps = {
 	showHud: () => void;
 	cancelCountdown: () => void;
 	listSources: () => Promise<RawSource[]>;
+	getDisplays: () => DisplayInfo[];
 	selectSource: (source: SelectedSource) => Promise<unknown>;
 	isWindowOnScreen: (sourceId: string) => Promise<boolean>;
 	raiseWindow: (sourceId: string) => Promise<void>;
@@ -126,6 +136,16 @@ const defaultDeps = (): RemoteControlDeps => ({
 			thumbnailSize: { width: 0, height: 0 },
 			allSpaces: true,
 		}) as Promise<RawSource[]>,
+	getDisplays: () => {
+		const primaryId = screen.getPrimaryDisplay().id;
+		return screen.getAllDisplays().map((display) => ({
+			id: display.id,
+			label: display.label,
+			bounds: display.bounds,
+			scaleFactor: display.scaleFactor,
+			primary: display.id === primaryId,
+		}));
+	},
 	selectSource: (source) => selectSource(source, { focusApp: false }),
 	isWindowOnScreen: isMacWindowOnScreen,
 	raiseWindow: async (sourceId) => {
@@ -170,7 +190,42 @@ const WINDOW_FIELDS = [
 	"height",
 ] as const;
 
-function summarize(source: RawSource) {
+function displayOf(source: RawSource, displays: DisplayInfo[]) {
+	if (source.display_id === undefined) return undefined;
+	return displays.find((display) => String(display.id) === String(source.display_id));
+}
+
+function displayFacts(display: DisplayInfo | undefined) {
+	if (!display) return {};
+	const { x, y, width, height } = display.bounds;
+	const scale = display.scaleFactor;
+	const known = typeof scale === "number" && Number.isFinite(scale) && scale > 0;
+	return {
+		...(display.label ? { displayName: display.label } : {}),
+		x,
+		y,
+		width,
+		height,
+		...(known
+			? {
+					scaleFactor: scale,
+					pixelWidth: Math.round(width * scale),
+					pixelHeight: Math.round(height * scale),
+				}
+			: {}),
+		primary: display.primary,
+	};
+}
+
+function describeCandidate(source: RawSource, displays: DisplayInfo[]) {
+	const display = displayOf(source, displays);
+	if (!display) return `${source.name} (id: ${source.id})`;
+	const { x, y, width, height } = display.bounds;
+	const label = display.label ? `"${display.label}", ` : "";
+	return `${source.name} (id: ${source.id}, ${label}${width}x${height} at ${x},${y}${display.primary ? ", primary" : ""})`;
+}
+
+function summarize(source: RawSource, displays: DisplayInfo[] = []) {
 	return {
 		id: source.id,
 		name: source.name,
@@ -182,6 +237,7 @@ function summarize(source: RawSource) {
 				source[field],
 			]),
 		),
+		...displayFacts(displayOf(source, displays)),
 	};
 }
 
@@ -458,7 +514,8 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 		},
 		getStatus,
 		async listSources() {
-			return (await rawSources()).map(summarize);
+			const displays = deps.getDisplays();
+			return (await rawSources()).map((source) => summarize(source, displays));
 		},
 		async selectSource({ id, name }: { id?: string; name?: string }) {
 			const needle = name?.trim().toLowerCase();
@@ -469,11 +526,12 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 				throw new Error(`The source cannot change while Recordly is ${state}.`);
 			}
 			const sources = await rawSources();
+			const displays = deps.getDisplays();
 			let matches = sources.filter((source) =>
 				id
 					? source.id === id
-					: [source.name, source.appName].some((value) =>
-							value?.toLowerCase().includes(needle ?? ""),
+					: [source.name, source.appName, displayOf(source, displays)?.label].some(
+							(value) => value?.toLowerCase().includes(needle ?? ""),
 						),
 			);
 			const exact = matches.filter((source) => source.name.toLowerCase() === needle);
@@ -485,7 +543,7 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 			}
 			if (matches.length > 1) {
 				const candidates = matches
-					.map((source) => `${source.name} (id: ${source.id})`)
+					.map((source) => describeCandidate(source, displays))
 					.join("; ");
 				throw new Error(
 					`${matches.length} sources match "${id ?? name}": ${candidates}. Use a more specific name or the id.`,
@@ -505,11 +563,11 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 			}
 			await deps.selectSource(source);
 			if (deps.platform !== "darwin" || !source.id.startsWith("window:")) {
-				return summarize(matches[0]);
+				return summarize(matches[0], displays);
 			}
 			const onScreen = await waitUntilOnScreen(source.id);
 			return {
-				...summarize(matches[0]),
+				...summarize(matches[0], displays),
 				onScreen,
 				...(onScreen ? {} : { warning: WINDOW_OFF_SCREEN_MESSAGE }),
 			};
