@@ -173,7 +173,7 @@ export const zoomOps: EditorOpMap = {
 		requireObject(payload, "zoom.clear");
 		const count = context.timeline.zoomRegions.length;
 		if (count === 0)
-			return { removed: 0, note: "There were no zooms to clear.", undoable: true };
+			return { removed: 0, note: "There were no zooms to clear.", undoable: false };
 		context.timeline.setZoomRegions([]);
 		context.timeline.setSelectedZoomId(null);
 		return { removed: count, undoable: true };

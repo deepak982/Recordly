@@ -8,6 +8,7 @@ import {
 	RAMP_MAX_SPEED,
 	WAIT_KEEP_TAIL_MS,
 } from "../../agentEdits/planAgentEdits";
+import { appendImportedClip } from "../../clipImport";
 import {
 	packClipSequence,
 	reorderClipSequence,
@@ -22,21 +23,24 @@ import {
 	getClipSourceStartMs,
 	getTimelineDurationMs,
 	mapSourceTimeToTimelineTime,
-	SPEED_OPTIONS,
 	sortClipRegions,
 } from "../../types";
 import {
+	getPreviewPlaybackRateRange,
+	supportsPreviewPlaybackRate,
+} from "../../videoPlayback/playbackRate";
+import {
 	type EditorOpContext,
 	type EditorOpMap,
+	loadAgentActivity,
 	nextId,
+	rejectUnknown,
 	requireFiniteNumber,
 	requireObject,
 } from "./types";
 
 type Range = { startMs: number; endMs: number };
 
-const ACTIVITY_TIMEOUT_MS = 10_000;
-const ALLOWED_SPEEDS = [1, ...SPEED_OPTIONS.map((option) => option.speed)];
 const NO_CLIPS =
 	"The timeline has no clips yet. Wait for the recording to finish loading, then try again.";
 
@@ -146,7 +150,6 @@ function subtract(ranges: Range[], cut: Range): Range[] {
 	});
 }
 
-/** Source-time stretches the planner would shorten: hold/wait interiors, minus motion lead/tail and screen changes. */
 export function findIdleRanges(log: AgentActivityLog, sourceMs: number): Range[] {
 	const spans = log.spans
 		.filter((span) => Number.isFinite(span.startMs) && Number.isFinite(span.endMs))
@@ -179,38 +182,6 @@ export function findIdleRanges(log: AgentActivityLog, sourceMs: number): Range[]
 		.reduce((ranges, cut) => subtract(ranges, cut), interiors)
 		.filter((range) => range.endMs - range.startMs >= MIN_SHOT_MS)
 		.map(({ startMs, endMs }) => ({ startMs: Math.round(startMs), endMs: Math.round(endMs) }));
-}
-
-async function loadActivity(context: EditorOpContext, op: string) {
-	const advice = `Use timeline.speed or timeline.remove with explicit times instead of ${op}.`;
-	if (!context.videoSourcePath) throw new Error(`There is no recording loaded. ${advice}`);
-	const fetch = window.electronAPI?.getAgentActivity;
-	if (!fetch) throw new Error(`The activity log is unavailable here. ${advice}`);
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	try {
-		const result = await Promise.race([
-			fetch(context.videoSourcePath),
-			new Promise<never>((_, reject) => {
-				timer = setTimeout(
-					() =>
-						reject(
-							new Error(
-								`Timed out after ${ACTIVITY_TIMEOUT_MS / 1000} seconds waiting for the recording's activity log.`,
-							),
-						),
-					ACTIVITY_TIMEOUT_MS,
-				);
-			}),
-		]);
-		if (!result.success || !result.log || result.log.version !== 1) {
-			throw new Error(
-				`${result.message ?? result.error ?? "This recording has no agent activity log, so idle stretches cannot be told from action."} ${advice}`,
-			);
-		}
-		return result.log;
-	} finally {
-		clearTimeout(timer);
-	}
 }
 
 function clipsWithin(clips: ClipRegion[], range: Range): number {
@@ -267,13 +238,10 @@ function compressIdle(
 		),
 	);
 	const residual = capacityMs - reduceMs - durations.reduce((sum, value) => sum + value, 0);
-	const widest = durations.indexOf(Math.max(...durations));
-	if (residual !== 0 && widest >= 0) {
-		durations[widest] = Math.max(
-			0,
-			Math.min(slots[widest].duration, durations[widest] + residual),
-		);
-	}
+	const absorber = durations.findIndex(
+		(value, index) => value + residual >= 0 && value + residual <= slots[index].duration,
+	);
+	if (residual !== 0 && absorber >= 0) durations[absorber] += residual;
 	const replacements = new Map<string, ClipRegion | null>();
 	slots.forEach((slot, index) => {
 		const duration = durations[index];
@@ -378,6 +346,12 @@ export const timelineOps: EditorOpMap = {
 			);
 		}
 		context.timeline.setClipRegions(split);
+		const { selectedClipId } = context.timeline;
+		if (selectedClipId && !split.some((clip) => clip.id === selectedClipId)) {
+			context.timeline.setSelectedClipId(
+				split.find((clip) => clip.endMs === timeMs)?.id ?? null,
+			);
+		}
 		return { changed: true, durationMs: totalMs, clipCount: split.length };
 	},
 
@@ -407,9 +381,10 @@ export const timelineOps: EditorOpMap = {
 		const args = requireObject(payload, "timeline.speed");
 		const { clips, totalMs } = loadClips(context);
 		const speed = requireFiniteNumber(args.speed, "speed");
-		if (!ALLOWED_SPEEDS.includes(speed)) {
+		if (!supportsPreviewPlaybackRate(speed)) {
+			const { min, max } = getPreviewPlaybackRateRange();
 			throw new Error(
-				`speed ${speed} is not a playback speed the editor offers. Use one of ${ALLOWED_SPEEDS.join(", ")}.`,
+				`speed ${speed} is a rate this device cannot play. Use a speed from ${min} to ${max}; 1 restores normal speed.`,
 			);
 		}
 		const index = clipIndexFor(args, clips, "timeline.speed");
@@ -445,7 +420,10 @@ export const timelineOps: EditorOpMap = {
 		const { clips, totalMs } = loadClips(context);
 		const ms = Math.round(requireFiniteNumber(args.ms, "ms"));
 		if (ms <= 0) throw new Error("ms must be more than 0. Times are timeline milliseconds.");
-		const log = await loadActivity(context, "timeline.set_scene_duration");
+		const log = await loadAgentActivity(
+			context.videoSourcePath,
+			"Use timeline.speed or timeline.remove with explicit times instead of timeline.set_scene_duration.",
+		);
 		const scene = sceneAt(log, args.index);
 		const currentMs = clipsWithin(clips, scene);
 		if (currentMs === 0) {
@@ -473,11 +451,6 @@ export const timelineOps: EditorOpMap = {
 		const targetMs = Math.round(requireFiniteNumber(args.targetMs, "targetMs"));
 		if (targetMs <= 0)
 			throw new Error("targetMs must be more than 0. Times are timeline milliseconds.");
-		if (targetMs > sourceMs) {
-			throw new Error(
-				`targetMs (${targetMs}) is longer than the raw recording (${sourceMs} ms). fit only shortens an edit.`,
-			);
-		}
 		if (targetMs === totalMs)
 			return unchanged(totalMs, `The edit already lasts ${targetMs} ms.`);
 		if (targetMs > totalMs) {
@@ -485,11 +458,66 @@ export const timelineOps: EditorOpMap = {
 				`The edit lasts ${totalMs} ms, shorter than targetMs (${targetMs}). fit only shortens; use timeline.speed to slow clips down.`,
 			);
 		}
-		const log = await loadActivity(context, "timeline.fit");
+		const log = await loadAgentActivity(
+			context.videoSourcePath,
+			"Use timeline.speed or timeline.remove with explicit times instead of timeline.fit.",
+		);
 		const idle = findIdleRanges(log, sourceMs);
 		return {
 			...compressIdle(context, clips, idle, totalMs - targetMs, `${targetMs} ms`),
 			targetMs,
+		};
+	},
+	"timeline.join": async (payload, context) => {
+		const args = requireObject(payload, "timeline.join");
+		rejectUnknown(args, ["path", "index"], "timeline.join");
+		const { path } = args;
+		if (typeof path !== "string" || !path.trim()) {
+			throw new Error("timeline.join: path must be the absolute path of a recording to add.");
+		}
+		const current = context.videoSourcePath;
+		if (!current) throw new Error("timeline.join: there is no recording loaded to join onto.");
+		if (path === current) {
+			throw new Error("timeline.join: that is the recording already loaded.");
+		}
+		const { clips } = loadClips(context);
+		const index =
+			args.index === undefined
+				? clips.length
+				: requireIndex(args.index, "index", clips.length + 1);
+		const importRecording = window.electronAPI?.importRecording;
+		const finishRecordingImport = window.electronAPI?.finishRecordingImport;
+		if (!importRecording || !finishRecordingImport) {
+			throw new Error("timeline.join: joining recordings is unavailable here.");
+		}
+		const imported = await importRecording(current, path);
+		if (!imported.success) {
+			throw new Error(
+				`timeline.join: ${imported.error ?? "the recording could not be added."}`,
+			);
+		}
+		const media = imported.value;
+		let accepted = false;
+		try {
+			context.assertSameRecording();
+			const prepared = await finishRecordingImport(media.path);
+			if (!prepared.success) {
+				throw new Error(
+					`timeline.join: ${prepared.error ?? "the added media could not be finalized."}`,
+				);
+			}
+			context.assertSameRecording();
+			await finishRecordingImport(media.path, true);
+			accepted = true;
+		} finally {
+			if (!accepted) {
+				await finishRecordingImport(media.path, false).catch(() => undefined);
+			}
+		}
+		const joined = appendImportedClip(clips, media, nextId(context.ids.clip, "clip"), index);
+		return {
+			...applySequence(context, clips, joined),
+			joined: { path, durationMs: media.durationMs, sourcePath: media.path },
 		};
 	},
 };

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentActivityLog } from "../../agentEdits/planAgentEdits";
 import { type ClipRegion, getTimelineDurationMs } from "../../types";
 import { findIdleRanges, timelineOps } from "./timeline";
@@ -8,13 +8,12 @@ const clip = (id: string, startMs: number, endMs: number, extra: Partial<ClipReg
 	({ id, startMs, endMs, speed: 1, ...extra }) as ClipRegion;
 
 function makeContext(clips: ClipRegion[], duration = 20) {
+	type Region = { id: string; startMs: number; endMs: number };
 	const state = {
 		clips,
-		zooms: [{ id: "z", startMs: 15000, endMs: 16000 }] as {
-			id: string;
-			startMs: number;
-			endMs: number;
-		}[],
+		zooms: [{ id: "z", startMs: 15000, endMs: 16000 }] as Region[],
+		annotations: [{ id: "n", startMs: 15000, endMs: 16000 }] as Region[],
+		audios: [{ id: "u", startMs: 15000, endMs: 18000 }] as Region[],
 		selected: null as string | null,
 		writes: 0,
 	};
@@ -40,8 +39,12 @@ function makeContext(clips: ClipRegion[], duration = 20) {
 			setZoomRegions: (next: unknown) => {
 				state.zooms = apply(state.zooms, next);
 			},
-			setAnnotationRegions: () => undefined,
-			setAudioRegions: () => undefined,
+			setAnnotationRegions: (next: unknown) => {
+				state.annotations = apply(state.annotations, next);
+			},
+			setAudioRegions: (next: unknown) => {
+				state.audios = apply(state.audios, next);
+			},
 		},
 		history: { undo: () => undefined, redo: () => undefined },
 		ids: {
@@ -51,6 +54,7 @@ function makeContext(clips: ClipRegion[], duration = 20) {
 			annotation: { current: 1 },
 			annotationZIndex: { current: 1 },
 		},
+		assertSameRecording: () => undefined,
 	} as unknown as EditorOpContext;
 	return { state, context };
 }
@@ -73,9 +77,47 @@ const log: AgentActivityLog = {
 	],
 };
 
+const exactLog: AgentActivityLog = {
+	version: 1,
+	scenes: [{ startMs: 0, endMs: 40000, failed: false }],
+	spans: [
+		{ kind: "motion", action: "click", startMs: 0, endMs: 1000 },
+		{ kind: "wait", action: "wait", startMs: 2000, endMs: 11500 },
+		{ kind: "motion", action: "click", startMs: 12700, endMs: 13700 },
+		{ kind: "wait", action: "wait", startMs: 14700, endMs: 17200 },
+		{ kind: "motion", action: "click", startMs: 18200, endMs: 19200 },
+		{ kind: "wait", action: "wait", startMs: 20200, endMs: 22700 },
+		{ kind: "motion", action: "click", startMs: 23700, endMs: 24700 },
+		{ kind: "wait", action: "wait", startMs: 25700, endMs: 28200 },
+		{ kind: "motion", action: "click", startMs: 29200, endMs: 30200 },
+	],
+};
+
+const exactClips = (): ClipRegion[] => [
+	clip("a", 0, 3200, { sourceStartMs: 0 }),
+	clip("b", 3200, 4200, { sourceStartMs: 3200, speed: 8 }),
+	clip("c", 4200, 8900, { sourceStartMs: 11200 }),
+	clip("d", 8900, 9900, { sourceStartMs: 15900 }),
+	clip("e", 9900, 14400, { sourceStartMs: 16900 }),
+	clip("f", 14400, 15400, { sourceStartMs: 21400 }),
+	clip("g", 15400, 19900, { sourceStartMs: 22400 }),
+	clip("h", 19900, 20900, { sourceStartMs: 26900 }),
+	clip("i", 20900, 33000, { sourceStartMs: 27900 }),
+];
+
 function stubActivity(result: unknown) {
 	vi.stubGlobal("window", { electronAPI: { getAgentActivity: async () => result } });
 }
+
+beforeEach(() =>
+	vi.stubGlobal("document", {
+		createElement: () => ({
+			set playbackRate(rate: number) {
+				if (rate > 16) throw new DOMException("Unsupported rate", "NotSupportedError");
+			},
+		}),
+	}),
+);
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -114,10 +156,18 @@ describe("timeline.split", () => {
 		const { context } = makeContext([]);
 		expect(() => run("timeline.split", { timeMs: 1 }, context)).toThrow(/no clips/);
 	});
+
+	it("moves the selection to the left half instead of leaving it on a deleted id", () => {
+		const { state, context } = makeContext([clip("a", 0, 10000)]);
+		state.selected = "a";
+		run("timeline.split", { timeMs: 4000 }, context);
+		expect(state.clips.map((c) => c.id)).toEqual(["clip-1", "clip-2"]);
+		expect(state.selected).toBe("clip-1");
+	});
 });
 
 describe("timeline.remove", () => {
-	it("drops the span, closes the gap and ripples zooms", () => {
+	it("drops the span, closes the gap and ripples every region type", () => {
 		const { state, context } = makeContext([clip("a", 0, 20000)]);
 		const result = run("timeline.remove", { startMs: 5000, endMs: 10000 }, context);
 		expect(result.durationMs).toBe(15000);
@@ -125,7 +175,9 @@ describe("timeline.remove", () => {
 			[0, 5000, 0],
 			[5000, 15000, 10000],
 		]);
-		expect(state.zooms[0].startMs).toBe(10000);
+		expect(state.zooms).toEqual([{ id: "z", startMs: 10000, endMs: 11000 }]);
+		expect(state.annotations).toEqual([{ id: "n", startMs: 10000, endMs: 11000 }]);
+		expect(state.audios).toEqual([{ id: "u", startMs: 10000, endMs: 13000 }]);
 	});
 
 	it("refuses to remove everything and an inverted range", () => {
@@ -183,11 +235,28 @@ describe("timeline.speed", () => {
 		]);
 	});
 
-	it("rejects a speed that is not offered by name instead of rounding", () => {
+	it("accepts the rates the clip slider offers, not only the speed-region presets", () => {
+		const { state, context } = makeContext([clip("a", 0, 8000)]);
+		run("timeline.speed", { speed: 4 }, context);
+		expect(state.clips.map((c) => [c.endMs, c.speed])).toEqual([[2000, 4]]);
+	});
+
+	it("restores normal speed without leaving a sped-up clip behind", () => {
+		const { state, context } = makeContext([clip("a", 0, 10000), clip("b", 10000, 20000)]);
+		run("timeline.speed", { clipIndex: 0, speed: 2 }, context);
+		run("timeline.speed", { clipIndex: 0, speed: 1 }, context);
+		expect(state.clips.map((c) => [c.startMs, c.endMs, c.speed])).toEqual([
+			[0, 10000, 1],
+			[10000, 20000, 1],
+		]);
+	});
+
+	it("rejects a rate the device cannot play, and zero", () => {
 		const { state, context } = makeContext([clip("a", 0, 10000)]);
-		expect(() => run("timeline.speed", { speed: 3 }, context)).toThrow(/not a playback speed/);
-		expect(() => run("timeline.speed", { speed: 1.9 }, context)).toThrow(
-			/not a playback speed/,
+		expect(() => run("timeline.speed", { speed: 40 }, context)).toThrow(/cannot play/);
+		expect(() => run("timeline.speed", { speed: 0 }, context)).toThrow(/cannot play/);
+		expect(() => run("timeline.speed", { speed: Number.NaN }, context)).toThrow(
+			/must be a number/,
 		);
 		expect(state.writes).toBe(0);
 	});
@@ -250,6 +319,24 @@ describe("timeline.fit", () => {
 		expect(state.clips.filter((c) => c.speed === 1).length).toBeGreaterThanOrEqual(2);
 	});
 
+	it("shortens an edit that slowed clips made longer than the raw recording", async () => {
+		stubActivity({ success: true, log });
+		const { state, context } = makeContext([
+			clip("a", 0, 40000, { speed: 0.5, sourceStartMs: 0 }),
+		]);
+		const result = await run("timeline.fit", { targetMs: 35000 }, context);
+		expect(result.durationMs).toBe(35000);
+		expect(getTimelineDurationMs(state.clips, 20000)).toBe(35000);
+	});
+
+	it("absorbs the rounding residual in a slot that has room for it", async () => {
+		stubActivity({ success: true, log: exactLog });
+		const { state, context } = makeContext(exactClips(), 40);
+		const result = await run("timeline.fit", { targetMs: 32998 }, context);
+		expect(result.durationMs).toBe(32998);
+		expect(getTimelineDurationMs(state.clips, 40000)).toBe(32998);
+	});
+
 	it("trims once speed alone is not enough", async () => {
 		stubActivity({ success: true, log });
 		const { state, context } = makeContext([clip("a", 0, 20000)]);
@@ -267,12 +354,12 @@ describe("timeline.fit", () => {
 		expect(state.writes).toBe(0);
 	});
 
-	it("rejects zero, over-long and non-shortening targets", async () => {
+	it("rejects zero and non-shortening targets", async () => {
 		stubActivity({ success: true, log });
 		const { state, context } = makeContext([clip("a", 0, 10000)], 20);
 		await expect(run("timeline.fit", { targetMs: 0 }, context)).rejects.toThrow(/more than 0/);
 		await expect(run("timeline.fit", { targetMs: 25000 }, context)).rejects.toThrow(
-			/raw recording/,
+			/only shortens/,
 		);
 		await expect(run("timeline.fit", { targetMs: 15000 }, context)).rejects.toThrow(
 			/only shortens/,
@@ -313,5 +400,95 @@ describe("timeline.set_scene_duration", () => {
 			run("timeline.set_scene_duration", { index: 0, ms: 13000 }, context),
 		).rejects.toThrow(/only be shortened/);
 		expect(state.writes).toBe(0);
+	});
+
+	describe("timeline.join", () => {
+		const media = { path: "/media/joined.mp4", sourceStartMs: 20_000, durationMs: 5_000 };
+
+		const api = (over: Record<string, unknown> = {}) => {
+			const electronAPI = {
+				importRecording: vi.fn(async () => ({ success: true, value: media })),
+				finishRecordingImport: vi.fn(async () => ({ success: true })),
+				...over,
+			} as {
+				importRecording: ReturnType<typeof vi.fn>;
+				finishRecordingImport: ReturnType<typeof vi.fn>;
+			};
+			vi.stubGlobal("window", { electronAPI });
+			return electronAPI;
+		};
+
+		const run = (payload: Record<string, unknown>, context: EditorOpContext) =>
+			timelineOps["timeline.join"](payload, context) as Promise<Record<string, unknown>>;
+
+		it("lays the joined recording after the existing clips and commits the media", async () => {
+			const { finishRecordingImport } = api();
+			const { state, context } = makeContext([clip("a", 0, 6000)]);
+			const result = await run({ path: "/videos/second.mp4" }, context);
+			expect(state.clips.map((c) => c.id)).toEqual(["a", "clip-1"]);
+			expect(state.clips[1]).toMatchObject({ startMs: 6000, endMs: 11_000 });
+			expect(result.joined).toMatchObject({ path: "/videos/second.mp4", durationMs: 5_000 });
+			expect(finishRecordingImport.mock.calls).toEqual([
+				["/media/joined.mp4"],
+				["/media/joined.mp4", true],
+			]);
+		});
+
+		it("releases the imported media when finalizing fails, and changes nothing", async () => {
+			const { finishRecordingImport } = api({
+				finishRecordingImport: vi.fn(async (_path: string, commit?: boolean) =>
+					commit === undefined
+						? { success: false, error: "disk full" }
+						: { success: true },
+				),
+			});
+			const { state, context } = makeContext([clip("a", 0, 6000)]);
+			await expect(run({ path: "/videos/second.mp4" }, context)).rejects.toThrow(/disk full/);
+			expect(state.clips.map((c) => c.id)).toEqual(["a"]);
+			expect(finishRecordingImport).toHaveBeenCalledWith("/media/joined.mp4", false);
+		});
+
+		it("releases the imported media when the editor moved on mid-import", async () => {
+			const { finishRecordingImport } = api();
+			const { state, context } = makeContext([clip("a", 0, 6000)]);
+			const moved = {
+				...context,
+				assertSameRecording: () => {
+					throw new Error(
+						"The editor loaded a different recording while this was running.",
+					);
+				},
+			} as unknown as EditorOpContext;
+			await expect(run({ path: "/videos/second.mp4" }, moved)).rejects.toThrow(
+				/different recording/,
+			);
+			expect(state.clips.map((c) => c.id)).toEqual(["a"]);
+			expect(finishRecordingImport).toHaveBeenCalledWith("/media/joined.mp4", false);
+		});
+
+		it.each([
+			["a missing path", {}, /path must be the absolute path/],
+			["an empty path", { path: "  " }, /path must be the absolute path/],
+			["the recording already loaded", { path: "/tmp/a.mp4" }, /already loaded/],
+			["an unknown field", { path: "/videos/b.mp4", at: 1 }, /unknown field at/],
+			["an index past the end", { path: "/videos/b.mp4", index: 9 }, /index/],
+		])("refuses %s without importing anything", async (_label, payload, message) => {
+			const { importRecording } = api();
+			const { state, context } = makeContext([clip("a", 0, 6000)]);
+			await expect(run(payload as Record<string, unknown>, context)).rejects.toThrow(message);
+			expect(importRecording).not.toHaveBeenCalled();
+			expect(state.clips.map((c) => c.id)).toEqual(["a"]);
+		});
+
+		it("reports why the recording could not be added", async () => {
+			api({
+				importRecording: vi.fn(async () => ({ success: false, error: "not in Videos" })),
+			});
+			const { state, context } = makeContext([clip("a", 0, 6000)]);
+			await expect(run({ path: "/videos/gone.mp4" }, context)).rejects.toThrow(
+				/not in Videos/,
+			);
+			expect(state.clips.map((c) => c.id)).toEqual(["a"]);
+		});
 	});
 });

@@ -33,6 +33,7 @@ function makeContext(initial: ZoomRegion[] = [], duration = 10) {
 			annotation: { current: 1 },
 			annotationZIndex: { current: 1 },
 		},
+		assertSameRecording: () => undefined,
 	} as unknown as EditorOpContext;
 	return { state, context };
 }
@@ -46,6 +47,7 @@ const region = (over: Partial<ZoomRegion> = {}): ZoomRegion => ({
 	mode: "auto",
 	...over,
 });
+const zoomTwo = () => region({ id: "zoom-2", startMs: 5000, endMs: 6000 });
 const run = (op: string, payload: unknown, context: EditorOpContext) =>
 	zoomOps[op](payload, context) as Record<string, unknown>;
 
@@ -76,7 +78,14 @@ describe("zoom.add", () => {
 			{ startMs: 1000, endMs: 10000, focus: { cx: 0, cy: 1 }, depth: 6 },
 			context,
 		);
-		expect(state.regions).toHaveLength(2);
+		expect(state.regions[1]).toEqual({
+			id: "zoom-2",
+			startMs: 1000,
+			endMs: 10000,
+			depth: 6,
+			focus: { cx: 0, cy: 1 },
+			mode: "manual",
+		});
 	});
 
 	it.each([
@@ -91,6 +100,8 @@ describe("zoom.add", () => {
 		[{ startMs: -1, endMs: 1000 }, /0 <= startMs < endMs/],
 		[{ startMs: 1000, endMs: 10001 }, /past the end of the timeline/],
 		[{ startMs: 1500, endMs: 2500 }, /overlaps zoom "zoom-1"/],
+		[{ startMs: 1200, endMs: 1800 }, /overlaps zoom "zoom-1"/],
+		[{ startMs: 500, endMs: 2500 }, /overlaps zoom "zoom-1"/],
 		[{ startMs: 1000, endMs: 3000, scale: 2 }, /unknown field scale/],
 	])("refuses %j and changes nothing", (payload, message) => {
 		const { state, context } = makeContext([region()]);
@@ -106,7 +117,7 @@ describe("zoom.add", () => {
 		);
 	});
 
-	it("picks an id that is not taken", () => {
+	it("numbers a new zoom from the editor's own counter, as a hand edit would", () => {
 		const { state, context } = makeContext([region({ id: "zoom-1" })]);
 		run("zoom.add", { startMs: 5000, endMs: 6000 }, context);
 		expect(state.regions[1].id).toBe("zoom-2");
@@ -145,7 +156,7 @@ describe("zoom.update", () => {
 
 describe("zoom.remove and zoom.clear", () => {
 	it("removes one zoom and drops the selection if it was selected", () => {
-		const { state, context } = makeContext([region(), region({ id: "zoom-2" })]);
+		const { state, context } = makeContext([region(), zoomTwo()]);
 		state.selected = "zoom-1";
 		run("zoom.remove", { id: "zoom-1" }, context);
 		expect(state.regions.map((r) => r.id)).toEqual(["zoom-2"]);
@@ -159,13 +170,15 @@ describe("zoom.remove and zoom.clear", () => {
 	});
 
 	it("clears every zoom, including auto ones, and says how many", () => {
-		const { state, context } = makeContext([region(), region({ id: "zoom-2" })]);
-		expect(run("zoom.clear", {}, context).removed).toBe(2);
+		const { state, context } = makeContext([region(), zoomTwo()]);
+		state.selected = "zoom-2";
+		expect(run("zoom.clear", {}, context)).toMatchObject({ removed: 2, undoable: true });
 		expect(state.regions).toEqual([]);
+		expect(state.selected).toBeNull();
 	});
 
 	it("reports an already-empty timeline instead of pretending to clear", () => {
 		const { context } = makeContext();
-		expect(run("zoom.clear", {}, context)).toMatchObject({ removed: 0 });
+		expect(run("zoom.clear", {}, context)).toMatchObject({ removed: 0, undoable: false });
 	});
 });
