@@ -39,9 +39,34 @@ const PROBES: Record<string, unknown> = {
 	cameraSpringMassMultiplier: 1,
 };
 
+const LOOK_STATE: Record<string, unknown> = {
+	wallpaper: "#112233",
+	padding: { top: 20, bottom: 20, left: 20, right: 20, linked: true },
+	borderRadius: 12,
+	shadowIntensity: 0.4,
+	backgroundBlur: 2,
+	cropRegion: { x: 0.1, y: 0.1, width: 0.5, height: 0.5 },
+	webcam: {
+		...DEFAULT_WEBCAM_OVERLAY,
+		sourcePath: "/tmp/cam.webm",
+		visibleRanges: [{ startMs: 0, endMs: 1000 }],
+		cornerRadius: 8,
+	},
+};
+
+const LOOK_WRITES: Record<string, unknown> = {
+	wallpaper: "#abcdef",
+	padding: { top: 40, bottom: 40, left: 40, right: 40, linked: true },
+	borderRadius: 30,
+	shadowIntensity: 0.9,
+	backgroundBlur: 6,
+	cropRegion: { x: 0, y: 0, width: 1, height: 1 },
+	webcam: { size: 55, corner: "top-left", enabled: true },
+};
+
 function appearanceStub() {
 	const state: Record<string, unknown> = {
-		webcam: DEFAULT_WEBCAM_OVERLAY,
+		...LOOK_STATE,
 		...PROBES,
 		zoomMotionBlurTuning: DEFAULT_ZOOM_MOTION_BLUR_TUNING,
 	};
@@ -104,5 +129,78 @@ describe("look.motion and get_editor_state agree on the motion settings", () => 
 		const reported = Object.keys((await getEditorState(context())).motion);
 		const readableButUnsettable = reported.filter((field) => !accepts(field));
 		expect(readableButUnsettable).toEqual([]);
+	});
+});
+
+async function lookOf(ctx: EditorOpContext) {
+	return (await getEditorState(ctx)).look as Record<string, unknown>;
+}
+
+describe("look.set and get_editor_state agree on the look", () => {
+	beforeEach(() => {
+		vi.stubGlobal("window", {
+			electronAPI: { getAgentActivity: vi.fn(async () => ({ success: false })) },
+		});
+	});
+
+	it("reports every look field and accepts the whole report back unchanged", async () => {
+		const ctx = context();
+		const before = await lookOf(ctx);
+		expect(Object.keys(before).sort()).toEqual(Object.keys(LOOK_STATE).sort());
+		lookOps["look.set"](before, ctx);
+		expect(await lookOf(ctx)).toEqual(before);
+	});
+
+	it.each(Object.keys(LOOK_STATE))("accepts the reported %s on its own", async (field) => {
+		const ctx = context();
+		const before = await lookOf(ctx);
+		lookOps["look.set"]({ [field]: before[field] }, ctx);
+		expect(await lookOf(ctx)).toEqual(before);
+	});
+
+	it.each(
+		Object.keys(LOOK_WRITES),
+	)("reads back exactly what was written to %s", async (field) => {
+		const ctx = context();
+		lookOps["look.set"]({ [field]: LOOK_WRITES[field] }, ctx);
+		expect((await lookOf(ctx))[field]).toMatchObject(LOOK_WRITES[field] as object);
+	});
+
+	it("reads back the written value for crop, the other name for cropRegion", async () => {
+		const ctx = context();
+		lookOps["look.set"]({ crop: { x: 0.2, y: 0.2, width: 0.8, height: 0.8 } }, ctx);
+		expect((await lookOf(ctx)).cropRegion).toEqual({ x: 0.2, y: 0.2, width: 0.8, height: 0.8 });
+	});
+
+	it("reports linked false when linked is omitted, which is what the editor now holds", async () => {
+		const ctx = context();
+		const result = lookOps["look.set"](
+			{ padding: { top: 40, bottom: 40, left: 40, right: 40 } },
+			ctx,
+		) as { applied: { padding: unknown } };
+		expect(result.applied.padding).toEqual({
+			top: 40,
+			bottom: 40,
+			left: 40,
+			right: 40,
+			linked: false,
+		});
+		expect((await lookOf(ctx)).padding).toEqual(result.applied.padding);
+	});
+
+	it("round-trips unlinked padding past the linked vertical limit", async () => {
+		const ctx = context();
+		lookOps["look.set"](
+			{ padding: { top: 250, bottom: 0, left: 100, right: 0, linked: false } },
+			ctx,
+		);
+		const padding = (await lookOf(ctx)).padding;
+		expect(padding).toEqual({ top: 250, bottom: 0, left: 100, right: 0, linked: false });
+		lookOps["look.set"]({ padding }, ctx);
+		expect((await lookOf(ctx)).padding).toEqual(padding);
+	});
+
+	it("still refuses an unknown look field by name", () => {
+		expect(() => lookOps["look.set"]({ glow: 1 }, context())).toThrow(/unknown field glow/);
 	});
 });

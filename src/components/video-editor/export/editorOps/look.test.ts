@@ -104,6 +104,39 @@ describe("look.set", () => {
 		[{ padding: 101 }, /padding must be between 0 and 100/],
 		[{ padding: { top: 251, bottom: 0, left: 0, right: 0 } }, /padding.top must be between/],
 		[{ padding: { top: 1, bottom: 1, left: 1 } }, /padding.right must be a number/],
+		[{ padding: { top: 1, bottom: 1, left: 1, right: 1, margin: 2 } }, /unknown field margin/],
+		[
+			{ padding: { top: 1, bottom: 1, left: 1, right: 1, linked: "yes" } },
+			/padding.linked must be true or false/,
+		],
+		[
+			{ padding: { top: 101, bottom: 0, left: 0, right: 0, linked: true } },
+			/padding.top must be between 0 and 100/,
+		],
+		[
+			{ padding: { top: 251, bottom: 0, left: 0, right: 0, linked: false } },
+			/padding.top must be between 0 and 250/,
+		],
+		[
+			{ padding: { top: 10, bottom: 20, left: 10, right: 10, linked: true } },
+			/padding is linked/,
+		],
+		[
+			{ padding: { top: 0, bottom: 0, left: 101, right: 0, linked: false } },
+			/padding.left must be between 0 and 100/,
+		],
+		[
+			{
+				crop: { x: 0, y: 0, width: 1, height: 1 },
+				cropRegion: { x: 0, y: 0, width: 1, height: 1 },
+			},
+			/either crop or cropRegion/,
+		],
+		[{ cropRegion: { x: 0.5, y: 0, width: 0.6, height: 1 } }, /cropRegion: x \+ width/],
+		[
+			{ webcam: { visibleRanges: [{ startMs: 0, endMs: 5 }] } },
+			/webcam.visibleRanges is read-only/,
+		],
 		[{ borderRadius: 51 }, /borderRadius must be between 0 and 50/],
 		[{ borderRadius: Number.NaN }, /borderRadius must be a number/],
 		[{ shadowIntensity: -0.1 }, /shadowIntensity must be between 0 and 1/],
@@ -114,7 +147,7 @@ describe("look.set", () => {
 		[{ crop: { x: 0, y: 0, width: 1, height: 1, z: 1 } }, /unknown field z/],
 		[{ webcam: { size: 5 } }, /webcam.size must be between 10 and 100/],
 		[{ webcam: { corner: "middle" } }, /webcam.corner must be one of/],
-		[{ webcam: { sourcePath: "/etc/passwd" } }, /unknown field sourcePath/],
+		[{ webcam: { sourcePath: "/etc/passwd" } }, /webcam.sourcePath is read-only/],
 		[{ webcam: { enabled: true } }, /no webcam recording/],
 		[{ webcam: { mirror: "yes" } }, /webcam.mirror must be true or false/],
 	])("refuses %j and changes nothing", (payload, message) => {

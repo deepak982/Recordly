@@ -92,6 +92,7 @@ const WEBCAM_FIELDS = [
 	"positionPreset",
 	"cropRegion",
 ];
+const WEBCAM_READ_ONLY = ["sourcePath", "visibleRanges", "cornerRadius"] as const;
 
 function requireInRange(value: unknown, field: string, [min, max]: Range) {
 	const number = requireFiniteNumber(value, field);
@@ -139,22 +140,35 @@ function requirePadding(value: unknown): Padding {
 		return { top: all, bottom: all, left: all, right: all, linked: true };
 	}
 	const padding = requireObject(value, "padding");
-	rejectUnknown(padding, ["top", "bottom", "left", "right"], "padding");
-	return {
-		top: requireInRange(padding.top, "padding.top", [0, ADVANCED_VERTICAL_PADDING_MAX]),
-		bottom: requireInRange(padding.bottom, "padding.bottom", [
-			0,
-			ADVANCED_VERTICAL_PADDING_MAX,
-		]),
+	rejectUnknown(padding, ["top", "bottom", "left", "right", "linked"], "padding");
+	const linked =
+		padding.linked === undefined ? false : requireBoolean(padding.linked, "padding.linked");
+	const verticalMax = linked ? 100 : ADVANCED_VERTICAL_PADDING_MAX;
+	const next = {
+		top: requireInRange(padding.top, "padding.top", [0, verticalMax]),
+		bottom: requireInRange(padding.bottom, "padding.bottom", [0, verticalMax]),
 		left: requireInRange(padding.left, "padding.left", [0, 100]),
 		right: requireInRange(padding.right, "padding.right", [0, 100]),
-		linked: false,
+		linked,
 	};
+	if (linked && new Set([next.top, next.bottom, next.left, next.right]).size > 1) {
+		throw new Error(
+			"padding is linked, so top, bottom, left and right must all be equal. Set linked to false to give each side its own value.",
+		);
+	}
+	return next;
 }
 
 function requireWebcam(value: unknown, current: WebcamOverlaySettings) {
 	const args = requireObject(value, "webcam");
-	rejectUnknown(args, WEBCAM_FIELDS, "webcam");
+	rejectUnknown(args, [...WEBCAM_FIELDS, ...WEBCAM_READ_ONLY], "webcam");
+	for (const key of WEBCAM_READ_ONLY) {
+		if (args[key] !== undefined && JSON.stringify(args[key]) !== JSON.stringify(current[key])) {
+			throw new Error(
+				`webcam.${key} is read-only: it describes the recording and cannot be changed here. Leave it out, or send back the value get_editor_state reports.`,
+			);
+		}
+	}
 	const next: WebcamOverlaySettings = { ...current };
 	const record = next as unknown as Record<string, unknown>;
 	for (const [key, range] of Object.entries(WEBCAM_NUMBERS)) {
@@ -235,11 +249,15 @@ export const lookOps: EditorOpMap = {
 				"shadowIntensity",
 				"backgroundBlur",
 				"crop",
+				"cropRegion",
 				"webcam",
 			],
 			"look.set",
 		);
 		nonEmptyArgs(args, "look.set");
+		if (args.crop !== undefined && args.cropRegion !== undefined) {
+			throw new Error("Send either crop or cropRegion, not both: they are the same setting.");
+		}
 		const updates: Record<string, unknown> = {};
 		if (args.wallpaper !== undefined) {
 			if (typeof args.wallpaper !== "string" || args.wallpaper.trim() === "") {
@@ -263,7 +281,10 @@ export const lookOps: EditorOpMap = {
 		if (args.backgroundBlur !== undefined) {
 			updates.backgroundBlur = requireInRange(args.backgroundBlur, "backgroundBlur", [0, 8]);
 		}
-		if (args.crop !== undefined) updates.cropRegion = requireCrop(args.crop, "crop");
+		const crop = args.crop === undefined ? args.cropRegion : args.crop;
+		if (crop !== undefined) {
+			updates.cropRegion = requireCrop(crop, args.crop === undefined ? "cropRegion" : "crop");
+		}
 		if (args.webcam !== undefined)
 			updates.webcam = requireWebcam(args.webcam, appearance.webcam);
 		applyAll(appearance, updates, "look.set");
