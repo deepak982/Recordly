@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentActivityLog } from "../../agentEdits/planAgentEdits";
-import { type ClipRegion, getTimelineDurationMs } from "../../types";
-import { findIdleRanges, timelineOps } from "./timeline";
+import {
+	type ClipRegion,
+	getClipSourceEndMs,
+	getClipSourceStartMs,
+	getTimelineDurationMs,
+} from "../../types";
+import { findHoldSlackRanges, findIdleRanges, timelineOps } from "./timeline";
 import type { EditorOpContext } from "./types";
 
 const clip = (id: string, startMs: number, endMs: number, extra: Partial<ClipRegion> = {}) =>
@@ -59,7 +64,18 @@ function makeContext(clips: ClipRegion[], duration = 20) {
 	return { state, context };
 }
 
-type Result = { changed: boolean; durationMs: number; clipCount: number; sceneMs: number };
+type Result = {
+	changed: boolean;
+	durationMs: number;
+	clipCount: number;
+	sceneMs: number;
+	levers: string[];
+};
+
+const footage = (clips: ClipRegion[]) =>
+	clips.map((c) => [getClipSourceStartMs(c), getClipSourceEndMs(c)]);
+
+const atNormalSpeed = (clips: ClipRegion[]) => footage(clips.filter((c) => c.speed === 1));
 
 const run = (op: string, payload: unknown, context: EditorOpContext) =>
 	timelineOps[op](payload, context) as Result;
@@ -105,8 +121,54 @@ const exactClips = (): ClipRegion[] => [
 	clip("i", 20900, 33000, { sourceStartMs: 27900 }),
 ];
 
+const compressedLog: AgentActivityLog = {
+	version: 1,
+	scenes: [
+		{ startMs: 0, endMs: 9000, failed: false },
+		{ startMs: 9000, endMs: 20000, failed: false },
+	],
+	spans: [
+		{ kind: "motion", action: "click", startMs: 0, endMs: 1000 },
+		{ kind: "wait", action: "wait", startMs: 1000, endMs: 1500 },
+		{ kind: "hold", action: "wait", startMs: 1500, endMs: 8000 },
+		{ kind: "motion", action: "click", startMs: 8000, endMs: 9000 },
+		{ kind: "wait", action: "wait", startMs: 9000, endMs: 9500 },
+		{ kind: "hold", action: "wait", startMs: 9500, endMs: 16000 },
+		{ kind: "motion", action: "click", startMs: 16000, endMs: 17000 },
+	],
+};
+
+const compressedClips = (): ClipRegion[] => [
+	clip("a", 0, 5200, { sourceStartMs: 0 }),
+	clip("b", 5200, 11100, { sourceStartMs: 7300 }),
+	clip("c", 11100, 14000, { sourceStartMs: 15300 }),
+];
+
+const floorHoldLog: AgentActivityLog = {
+	version: 1,
+	scenes: [{ startMs: 0, endMs: 10000, failed: false }],
+	spans: [
+		{ kind: "motion", action: "click", startMs: 0, endMs: 1000 },
+		{ kind: "hold", action: "wait", startMs: 1000, endMs: 2000 },
+	],
+};
+
 function stubActivity(result: unknown) {
 	vi.stubGlobal("window", { electronAPI: { getAgentActivity: async () => result } });
+}
+
+async function opsOnDeviceMaxRate(maxRate: number) {
+	vi.stubGlobal("document", {
+		createElement: () => ({
+			set playbackRate(rate: number) {
+				if (rate > maxRate) throw new DOMException("Unsupported rate", "NotSupportedError");
+			},
+		}),
+	});
+	vi.resetModules();
+	const { timelineOps: ops } = await import("./timeline");
+	return (op: string, payload: unknown, context: EditorOpContext) =>
+		ops[op](payload, context) as Promise<Result>;
 }
 
 beforeEach(() =>
@@ -345,11 +407,11 @@ describe("timeline.fit", () => {
 		expect(state.clips.every((c) => c.speed === 1 || c.speed >= 8)).toBe(true);
 	});
 
-	it("says how far short it fell and changes nothing", async () => {
+	it("says how far short it fell, names every lever it tried, and changes nothing", async () => {
 		stubActivity({ success: true, log });
 		const { state, context } = makeContext([clip("a", 0, 20000)]);
 		await expect(run("timeline.fit", { targetMs: 5000 }, context)).rejects.toThrow(
-			/6900 ms short/,
+			/every idle stretch, shaving every end-of-scene hold to its 800 ms floor and running the kept footage at 1\.25x together remove at most 11040 ms, which is 3960 ms short/,
 		);
 		expect(state.writes).toBe(0);
 	});
@@ -378,6 +440,151 @@ describe("timeline.fit", () => {
 	});
 });
 
+describe("findHoldSlackRanges", () => {
+	it("offers the generous part of each reading hold and keeps the floor", () => {
+		expect(findHoldSlackRanges(compressedLog, 20000)).toEqual([
+			{ startMs: 2000, endMs: 5200 },
+			{ startMs: 10000, endMs: 13200 },
+		]);
+	});
+
+	it("offers nothing from a hold the planner already keeps at its floor", () => {
+		expect(findHoldSlackRanges(floorHoldLog, 10000)).toEqual([]);
+		expect(findIdleRanges(floorHoldLog, 10000)).toEqual([]);
+	});
+
+	it("never offers footage the planner protects as action", () => {
+		const ranges = findHoldSlackRanges(
+			{ ...compressedLog, changeTimesMs: [2200, 10200] },
+			20000,
+		);
+		expect(ranges).toEqual([
+			{ startMs: 2600, endMs: 5200 },
+			{ startMs: 10600, endMs: 13200 },
+		]);
+	});
+});
+
+describe("timeline.fit on an edit the automatic pass already compressed", () => {
+	it("has no idle footage left to take", () => {
+		const idle = findIdleRanges(compressedLog, 20000);
+		expect(idle).toEqual([
+			{ startMs: 5200, endMs: 7300 },
+			{ startMs: 13200, endMs: 15300 },
+		]);
+		const overlapping = footage(compressedClips()).filter(([startMs, endMs]) =>
+			idle.some((range) => startMs < range.endMs && endMs > range.startMs),
+		);
+		expect(overlapping).toEqual([]);
+	});
+
+	it("shaves the reading holds once the idle stretches are gone", async () => {
+		stubActivity({ success: true, log: compressedLog });
+		const { state, context } = makeContext(compressedClips());
+		const result = await run("timeline.fit", { targetMs: 10000 }, context);
+		expect(result.levers).toEqual(["idle", "holds"]);
+		expect(result.durationMs).toBe(10000);
+		expect(getTimelineDurationMs(state.clips, 20000)).toBe(10000);
+		expect(atNormalSpeed(state.clips)).toEqual([
+			[0, 2000],
+			[7300, 10000],
+			[15300, 18200],
+		]);
+		expect(footage(state.clips.filter((c) => c.speed > 1))).toEqual([
+			[2000, 5200],
+			[10000, 13200],
+		]);
+	});
+
+	it("adds a mild speed-up over the kept footage when the holds are not enough", async () => {
+		stubActivity({ success: true, log: compressedLog });
+		const { state, context } = makeContext(compressedClips());
+		const result = await run("timeline.fit", { targetMs: 7000 }, context);
+		expect(result.levers).toEqual(["idle", "holds", "speed"]);
+		expect(result.durationMs).toBe(7000);
+		expect(getTimelineDurationMs(state.clips, 20000)).toBe(7000);
+		expect(footage(state.clips)).toEqual([
+			[0, 2000],
+			[7300, 10000],
+			[15300, 18200],
+		]);
+		expect(state.clips.every((c) => c.speed > 1 && c.speed <= 1.25)).toBe(true);
+	});
+
+	it("refuses a target that only a speed-up past 1.25x could reach", async () => {
+		stubActivity({ success: true, log: compressedLog });
+		const { state, context } = makeContext(compressedClips());
+		await expect(run("timeline.fit", { targetMs: 6000 }, context)).rejects.toThrow(
+			/remove at most 7920 ms, which is 80 ms short/,
+		);
+		expect(state.writes).toBe(0);
+	});
+
+	it("refuses when every hold is already at its floor and 1.25x is not enough", async () => {
+		stubActivity({ success: true, log: floorHoldLog });
+		const { state, context } = makeContext([clip("a", 0, 10000)], 10);
+		await expect(run("timeline.fit", { targetMs: 7000 }, context)).rejects.toThrow(
+			/remove at most 2000 ms, which is 1000 ms short/,
+		);
+		expect(state.writes).toBe(0);
+	});
+
+	it("still spends the idle stretches first and leaves the holds alone", async () => {
+		stubActivity({ success: true, log });
+		const { state, context } = makeContext([clip("a", 0, 20000)]);
+		const result = await run("timeline.fit", { targetMs: 15000 }, context);
+		expect(result.levers).toEqual(["idle"]);
+		expect(atNormalSpeed(state.clips)).toEqual([
+			[0, 3200],
+			[11300, 20000],
+		]);
+	});
+});
+
+describe("timeline.fit on a device with a slower top playback rate", () => {
+	it("ramps no faster than the device can play", async () => {
+		stubActivity({ success: true, log });
+		const onDevice = await opsOnDeviceMaxRate(4);
+		const { state, context } = makeContext([clip("a", 0, 20000)]);
+		const result = await onDevice("timeline.fit", { targetMs: 12500 }, context);
+		expect(result.durationMs).toBe(12500);
+		expect(getTimelineDurationMs(state.clips, 20000)).toBe(12500);
+		expect(state.clips.map((c) => c.speed)).toEqual([1, 4, 1]);
+	});
+
+	it("trims instead of writing a rate the device cannot play at all", async () => {
+		stubActivity({ success: true, log });
+		const onDevice = await opsOnDeviceMaxRate(1);
+		const { state, context } = makeContext([clip("a", 0, 20000)]);
+		const result = await onDevice("timeline.fit", { targetMs: 12500 }, context);
+		expect(result.durationMs).toBe(12500);
+		expect(getTimelineDurationMs(state.clips, 20000)).toBe(12500);
+		expect(state.clips.every((c) => c.speed === 1)).toBe(true);
+	});
+
+	it("offers no speed-up at all for a clip already faster than the device", async () => {
+		stubActivity({ success: true, log });
+		const onDevice = await opsOnDeviceMaxRate(1);
+		const { state, context } = makeContext([
+			clip("a", 0, 10000, { speed: 2, sourceStartMs: 0 }),
+		]);
+		await expect(onDevice("timeline.fit", { targetMs: 2000 }, context)).rejects.toThrow(
+			/remove at most 4400 ms, which is 3600 ms short/,
+		);
+		expect(state.writes).toBe(0);
+	});
+
+	it("counts a rate the device cannot play as capacity it does not have", async () => {
+		stubActivity({ success: true, log });
+		const onDevice = await opsOnDeviceMaxRate(1);
+		const { state, context } = makeContext([clip("a", 0, 20000)]);
+		await expect(onDevice("timeline.fit", { targetMs: 5000 }, context)).rejects.toThrow(
+			/remove at most 8800 ms, which is 6200 ms short/,
+		);
+		expect(state.writes).toBe(0);
+	});
+});
+
 describe("timeline.set_scene_duration", () => {
 	it("shortens one scene to the requested length", async () => {
 		stubActivity({ success: true, log });
@@ -385,6 +592,20 @@ describe("timeline.set_scene_duration", () => {
 		const result = await run("timeline.set_scene_duration", { index: 0, ms: 8000 }, context);
 		expect(result.durationMs).toBe(16000);
 		expect(result.sceneMs).toBe(8000);
+	});
+
+	it("gives a screen a shorter budget by shaving its reading hold", async () => {
+		stubActivity({ success: true, log: compressedLog });
+		const { state, context } = makeContext(compressedClips());
+		const result = await run("timeline.set_scene_duration", { index: 0, ms: 4000 }, context);
+		expect(result.levers).toEqual(["idle", "holds"]);
+		expect(result.sceneMs).toBe(4000);
+		expect(result.durationMs).toBe(11100);
+		expect(atNormalSpeed(state.clips)).toEqual([
+			[0, 2000],
+			[7300, 13200],
+			[15300, 18200],
+		]);
 	});
 
 	it("refuses a scene with no idle time to give and a bad index", async () => {

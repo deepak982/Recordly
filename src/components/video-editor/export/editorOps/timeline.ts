@@ -1,5 +1,7 @@
 import {
 	type AgentActivityLog,
+	type AgentActivitySpan,
+	HOLD_KEEP_MS,
 	holdKeepMs,
 	MIN_SHOT_MS,
 	MOTION_LEAD_MS,
@@ -40,6 +42,11 @@ import {
 } from "./types";
 
 type Range = { startMs: number; endMs: number };
+type Slot = { clip: ClipRegion; duration: number; sourceLength: number; fastest: number };
+type Shrink = { split: ClipRegion[]; slots: Slot[] };
+
+export const SPEEDUP_MAX = 1.25;
+export const HOLD_FLOOR_MS = HOLD_KEEP_MS - WAIT_KEEP_TAIL_MS;
 
 const NO_CLIPS =
 	"The timeline has no clips yet. Wait for the recording to finish loading, then try again.";
@@ -150,11 +157,14 @@ function subtract(ranges: Range[], cut: Range): Range[] {
 	});
 }
 
-export function findIdleRanges(log: AgentActivityLog, sourceMs: number): Range[] {
-	const spans = log.spans
+function activitySpans(log: AgentActivityLog): AgentActivitySpan[] {
+	return log.spans
 		.filter((span) => Number.isFinite(span.startMs) && Number.isFinite(span.endMs))
 		.sort((a, b) => a.startMs - b.startMs);
-	const protectedRanges: Range[] = [
+}
+
+function actionRanges(log: AgentActivityLog, spans: AgentActivitySpan[]): Range[] {
+	return [
 		...spans
 			.filter((span) => span.kind === "motion")
 			.map((span) => ({
@@ -165,6 +175,17 @@ export function findIdleRanges(log: AgentActivityLog, sourceMs: number): Range[]
 			.filter(Number.isFinite)
 			.map((time) => ({ startMs: time - QUIET_RADIUS_MS, endMs: time + QUIET_RADIUS_MS })),
 	];
+}
+
+function keepOutsideAction(ranges: Range[], action: Range[], minMs: number): Range[] {
+	return action
+		.reduce((current, cut) => subtract(current, cut), ranges)
+		.filter((range) => range.endMs - range.startMs >= minMs)
+		.map(({ startMs, endMs }) => ({ startMs: Math.round(startMs), endMs: Math.round(endMs) }));
+}
+
+export function findIdleRanges(log: AgentActivityLog, sourceMs: number): Range[] {
+	const spans = activitySpans(log);
 	const interiors = spans.flatMap((span, index): Range[] =>
 		span.kind === "motion"
 			? []
@@ -178,10 +199,26 @@ export function findIdleRanges(log: AgentActivityLog, sourceMs: number): Range[]
 					},
 				],
 	);
-	return protectedRanges
-		.reduce((ranges, cut) => subtract(ranges, cut), interiors)
-		.filter((range) => range.endMs - range.startMs >= MIN_SHOT_MS)
-		.map(({ startMs, endMs }) => ({ startMs: Math.round(startMs), endMs: Math.round(endMs) }));
+	return keepOutsideAction(interiors, actionRanges(log, spans), MIN_SHOT_MS);
+}
+
+export function findHoldSlackRanges(log: AgentActivityLog, sourceMs: number): Range[] {
+	const spans = activitySpans(log);
+	const heads = spans.flatMap((span, index): Range[] =>
+		span.kind === "motion"
+			? []
+			: [
+					{
+						startMs: Math.max(0, span.startMs + HOLD_FLOOR_MS),
+						endMs: Math.min(
+							sourceMs,
+							span.endMs,
+							span.startMs + holdKeepMs(span, spans[index - 1]) - WAIT_KEEP_TAIL_MS,
+						),
+					},
+				],
+	);
+	return keepOutsideAction(heads, actionRanges(log, spans), 1);
 }
 
 function clipsWithin(clips: ClipRegion[], range: Range): number {
@@ -194,15 +231,33 @@ function clipsWithin(clips: ClipRegion[], range: Range): number {
 	);
 }
 
-function compressIdle(
-	context: EditorOpContext,
-	clips: ClipRegion[],
-	idle: Range[],
-	reduceMs: number,
-	label: string,
-) {
-	const createId = idFactory(context);
-	const split = idle.reduce(
+function rampLimit(clip: ClipRegion) {
+	return Math.max(1, RAMP_MAX_SPEED / safeSpeed(clip));
+}
+
+function slotsFor(clips: ClipRegion[], limit: (clip: ClipRegion) => number): Slot[] {
+	return clips.map((clip) => {
+		const duration = clip.endMs - clip.startMs;
+		const sourceLength = duration * safeSpeed(clip);
+		return { clip, duration, sourceLength, fastest: duration / limit(clip) };
+	});
+}
+
+function totalMsOf(slots: Slot[]) {
+	return slots.reduce((sum, slot) => sum + slot.duration, 0);
+}
+
+function speedRoomOf(slots: Slot[]) {
+	return slots.reduce((sum, slot) => sum + slot.duration - slot.fastest, 0);
+}
+
+function midWithin(clip: ClipRegion, ranges: Range[]) {
+	const mid = (getClipSourceStartMs(clip) + getClipSourceEndMs(clip)) / 2;
+	return ranges.some((range) => mid >= range.startMs && mid < range.endMs);
+}
+
+function splitAtRanges(clips: ClipRegion[], ranges: Range[], createId: () => string) {
+	return ranges.reduce(
 		(current, range) =>
 			[range.startMs, range.endMs].reduce(
 				(inner, time) => splitAt(inner, mapSourceTimeToTimelineTime(time, inner), createId),
@@ -210,24 +265,15 @@ function compressIdle(
 			),
 		clips,
 	);
-	const isIdle = (clip: ClipRegion) => {
-		const mid = (getClipSourceStartMs(clip) + getClipSourceEndMs(clip)) / 2;
-		return idle.some((range) => mid >= range.startMs && mid < range.endMs);
-	};
-	const slots = split.filter(isIdle).map((clip) => {
-		const duration = clip.endMs - clip.startMs;
-		const sourceLength = duration * safeSpeed(clip);
-		const fastest =
-			safeSpeed(clip) >= RAMP_MAX_SPEED ? duration : sourceLength / RAMP_MAX_SPEED;
-		return { clip, duration, sourceLength, fastest };
-	});
-	const capacityMs = slots.reduce((sum, slot) => sum + slot.duration, 0);
-	if (reduceMs > capacityMs) {
-		throw new Error(
-			`${label} cannot be reached without cutting into action: speeding up and trimming every idle stretch removes at most ${capacityMs} ms, which is ${reduceMs - capacityMs} ms short. Nothing was changed. Ask for ${reduceMs - capacityMs} ms more, or cut action explicitly with timeline.remove. Times are timeline milliseconds.`,
-		);
-	}
-	const speedCapacity = slots.reduce((sum, slot) => sum + slot.duration - slot.fastest, 0);
+}
+
+function reduceSlots(
+	slots: Slot[],
+	reduceMs: number,
+	maxRate: number,
+): Map<string, ClipRegion | null> {
+	const capacityMs = totalMsOf(slots);
+	const speedCapacity = speedRoomOf(slots);
 	const fastestTotal = capacityMs - speedCapacity;
 	const speedOnly = reduceMs <= speedCapacity;
 	const durations = slots.map((slot) =>
@@ -250,21 +296,113 @@ function compressIdle(
 			replacements.set(slot.clip.id, null);
 			return;
 		}
-		const speed = speedOnly
-			? slot.sourceLength / duration
-			: Math.max(safeSpeed(slot.clip), RAMP_MAX_SPEED);
 		replacements.set(slot.clip.id, {
 			...slot.clip,
 			sourceStartMs: getClipSourceStartMs(slot.clip),
-			speed,
+			speed: Math.min(
+				maxRate,
+				speedOnly
+					? slot.sourceLength / duration
+					: Math.max(safeSpeed(slot.clip), RAMP_MAX_SPEED),
+			),
 			endMs: slot.clip.startMs + duration,
 		});
 	});
+	return replacements;
+}
+
+function commitReplacements(
+	context: EditorOpContext,
+	split: ClipRegion[],
+	replacements: Map<string, ClipRegion | null>,
+) {
 	const edited = split.flatMap((clip) => {
 		const replacement = replacements.get(clip.id);
 		return replacement === undefined ? [clip] : replacement ? [replacement] : [];
 	});
-	return { ...applySequence(context, split, edited), idleStretches: slots.length };
+	return applySequence(context, split, edited);
+}
+
+function shorten(
+	context: EditorOpContext,
+	clips: ClipRegion[],
+	log: AgentActivityLog,
+	sourceMs: number,
+	reduceMs: number,
+	label: string,
+	bounds?: Range,
+) {
+	const createId = idFactory(context);
+	const maxRate = getPreviewPlaybackRateRange().max;
+	const mildLimit = (clip: ClipRegion) =>
+		Math.max(1, Math.min(SPEEDUP_MAX, maxRate / safeSpeed(clip)));
+	const within = (ranges: Range[], minMs: number) =>
+		bounds ? clampRanges(ranges, bounds, minMs) : ranges;
+	const plan = (cuts: Range[], slack: Range[]): Shrink => {
+		const split = splitAtRanges(clips, cuts, createId);
+		return {
+			split,
+			slots: slotsFor(
+				split.filter((clip) => midWithin(clip, slack)),
+				rampLimit,
+			),
+		};
+	};
+	const idle = within(findIdleRanges(log, sourceMs), MIN_SHOT_MS);
+	const idleOnly = plan(idle, idle);
+	if (reduceMs <= totalMsOf(idleOnly.slots)) {
+		return {
+			...commitReplacements(
+				context,
+				idleOnly.split,
+				reduceSlots(idleOnly.slots, reduceMs, maxRate),
+			),
+			idleStretches: idleOnly.slots.length,
+			levers: ["idle"],
+		};
+	}
+	const slack = [...idle, ...within(findHoldSlackRanges(log, sourceMs), 1)];
+	const withHolds = plan(slack, slack);
+	if (reduceMs <= totalMsOf(withHolds.slots)) {
+		return {
+			...commitReplacements(
+				context,
+				withHolds.split,
+				reduceSlots(withHolds.slots, reduceMs, maxRate),
+			),
+			idleStretches: withHolds.slots.length,
+			levers: ["idle", "holds"],
+		};
+	}
+	const rated = plan(bounds ? [...slack, bounds] : slack, slack);
+	const slackMs = totalMsOf(rated.slots);
+	const rateSlots = slotsFor(
+		rated.split.filter(
+			(clip) => !midWithin(clip, slack) && (!bounds || midWithin(clip, [bounds])),
+		),
+		mildLimit,
+	);
+	const residualMs = reduceMs - slackMs;
+	const room = speedRoomOf(rateSlots);
+	if (residualMs > room) {
+		const maxMs = Math.round(slackMs + room);
+		const shortMs = reduceMs - maxMs;
+		throw new Error(
+			`${label} cannot be reached without cutting into action: speeding up and trimming every idle stretch, shaving every end-of-scene hold to its ${HOLD_KEEP_MS} ms floor and running the kept footage at ${SPEEDUP_MAX}x together remove at most ${maxMs} ms, which is ${shortMs} ms short. Nothing was changed. Ask for ${shortMs} ms more, or cut action explicitly with timeline.remove. Times are timeline milliseconds.`,
+		);
+	}
+	return {
+		...commitReplacements(
+			context,
+			rated.split,
+			new Map([
+				...reduceSlots(rated.slots, slackMs, maxRate),
+				...reduceSlots(rateSlots, residualMs, maxRate),
+			]),
+		),
+		idleStretches: rated.slots.length,
+		levers: ["idle", "holds", "speed"],
+	};
 }
 
 function sceneAt(log: AgentActivityLog, index: unknown) {
@@ -283,11 +421,11 @@ function sceneAt(log: AgentActivityLog, index: unknown) {
 	return scenes[at];
 }
 
-function clampRanges(ranges: Range[], bounds: Range): Range[] {
+function clampRanges(ranges: Range[], bounds: Range, minMs: number): Range[] {
 	return ranges.flatMap((range) => {
 		const startMs = Math.max(range.startMs, bounds.startMs);
 		const endMs = Math.min(range.endMs, bounds.endMs);
-		return endMs - startMs >= MIN_SHOT_MS ? [{ startMs, endMs }] : [];
+		return endMs - startMs >= minMs ? [{ startMs, endMs }] : [];
 	});
 }
 
@@ -438,9 +576,16 @@ export const timelineOps: EditorOpMap = {
 				`Scene ${args.index} lasts ${currentMs} ms and can only be shortened to ${ms} ms, not lengthened. Use timeline.speed to slow a clip down.`,
 			);
 		}
-		const idle = clampRanges(findIdleRanges(log, Math.round(context.duration * 1000)), scene);
 		return {
-			...compressIdle(context, clips, idle, currentMs - ms, `A ${ms} ms scene`),
+			...shorten(
+				context,
+				clips,
+				log,
+				Math.round(context.duration * 1000),
+				currentMs - ms,
+				`A ${ms} ms scene`,
+				scene,
+			),
 			sceneMs: ms,
 		};
 	},
@@ -462,9 +607,8 @@ export const timelineOps: EditorOpMap = {
 			context.videoSourcePath,
 			"Use timeline.speed or timeline.remove with explicit times instead of timeline.fit.",
 		);
-		const idle = findIdleRanges(log, sourceMs);
 		return {
-			...compressIdle(context, clips, idle, totalMs - targetMs, `${targetMs} ms`),
+			...shorten(context, clips, log, sourceMs, totalMs - targetMs, `${targetMs} ms`),
 			targetMs,
 		};
 	},
