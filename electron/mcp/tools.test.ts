@@ -78,6 +78,8 @@ function setup(
 	} as unknown as RemoteReview & Record<string, ReturnType<typeof vi.fn>>;
 	const editor = {
 		requestEditor: vi.fn(async (op: string) => ({ op })),
+		requestLong: vi.fn(async (op: string) => ({ status: "done", data: { op } })),
+		runningOp: vi.fn(() => null),
 		sampleFrames: vi.fn(async () => ({
 			image: { data: "aGk=", mimeType: "image/jpeg" as const, width: 900, height: 600 },
 			cols: 3,
@@ -345,6 +347,34 @@ describe("buildRecordlyMcpServer", () => {
 			});
 		}
 		expect(editor.requestEditor).toHaveBeenCalledTimes(cases.length);
+	});
+
+	it("tells an agent a long join is still running instead of reporting a failure", async () => {
+		const { call, editor } = setup();
+		editor.requestLong.mockResolvedValueOnce({
+			status: "still-running",
+			op: "timeline.join",
+			waitedMs: 61_000,
+		});
+		const { result } = await call("tools/call", {
+			name: "edit_timeline",
+			arguments: { op: "join", path: "/videos/second.mp4" },
+		});
+		expect(result.isError).toBeFalsy();
+		const body = JSON.parse(result.content[0].text);
+		expect(body.status).toBe("still-running");
+		expect(body.note).toMatch(/Do NOT call join again/);
+		expect(body.note).toMatch(/twice/);
+		expect(editor.requestEditor).not.toHaveBeenCalled();
+	});
+
+	it("reports which editor operation is running, so a long one can be polled", async () => {
+		const { call, editor } = setup();
+		editor.runningOp.mockReturnValueOnce({ op: "timeline.join", forMs: 73_000 });
+		const { result } = await call("tools/call", { name: "get_status", arguments: {} });
+		expect(JSON.parse(result.content[0].text).editor).toEqual({
+			running: { op: "timeline.join", forMs: 73_000 },
+		});
 	});
 
 	it("sweeps the whole video as a contact sheet", async () => {

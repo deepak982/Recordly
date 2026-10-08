@@ -614,7 +614,12 @@ export function buildRecordlyMcpServer(
 				"window chosen yet.",
 			annotations: { readOnlyHint: true },
 		},
-		async () => textResult({ ...remote.getStatus(), export: remoteExport.getStatus() }),
+		async () =>
+			textResult({
+				...remote.getStatus(),
+				export: remoteExport.getStatus(),
+				editor: { running: editor.runningOp() },
+			}),
 	);
 
 	server.registerTool(
@@ -879,16 +884,19 @@ export function buildRecordlyMcpServer(
 				"shorten it); split cuts at timeMs; remove drops a span and closes the gap; speed sets " +
 				"one clip's rate to anything this machine can play back, 1 being normal; " +
 				"reorder moves a clip. set_scene_duration makes one rehearsed scene last ms, and fit " +
-				"brings the whole video to targetMs — both only shorten, by speeding up and trimming " +
-				"the idle stretches the automatic edit already finds, never cutting into action, and " +
-				"both need the scene list from a recording an agent drove. If a target is out of reach " +
-				"nothing changes and the error says by how much it fell short. op join adds another " +
+				"brings the whole video to targetMs — both only shorten, and never cut into action: " +
+				"first the idle stretches, then the reading pause after each click down to a floor " +
+				"that stays readable, then the kept footage up to 1.25x. Both need the scene list " +
+				"from a recording an agent drove. If a target is still out of reach nothing changes " +
+				"and the error names every lever it tried and by how much it fell short. op join adds another " +
 				"recording to the end (or at index), as ONE continuous video: the two share a single " +
 				"media source, so the cursor does not jump and nothing needs re-scaling. You rarely " +
 				"need it — recording a whole screen keeps two apps in one take — so use it for " +
 				"genuinely separate takes or two different displays. It joins straight, with no " +
-				"crossfade. Times are milliseconds in the edited timeline. Reversible with history " +
-				"undo.",
+				"crossfade, and on a large recording it can outlive the wait: it then returns " +
+				'status "still-running" rather than an error — do NOT call it again or the recording ' +
+				"is added twice; poll get_status until editor.running is null. Times are milliseconds " +
+				"in the edited timeline. Reversible with history undo.",
 			inputSchema: z.object({
 				op: z.enum([
 					"trim",
@@ -927,10 +935,22 @@ export function buildRecordlyMcpServer(
 					.describe("op join: absolute path of another recording in the library"),
 			}),
 		},
-		async ({ op, ...rest }, ctx) =>
-			textResult(
+		async ({ op, ...rest }, ctx) => {
+			if (op === "join") {
+				const outcome = await editor.requestLong(`timeline.${op}`, rest, {
+					signal: ctx.mcpReq.signal,
+				});
+				if (outcome.status === "done") return textResult(outcome.data);
+				const seconds = Math.round(outcome.waitedMs / 1000);
+				return textResult({
+					status: "still-running",
+					note: `Joining is still running after ${seconds} s and will finish on its own. Do NOT call join again — the recording would be added twice. Poll get_status until editor.running is null, then get_editor_state to see the joined clip.`,
+				});
+			}
+			return textResult(
 				await editor.requestEditor(`timeline.${op}`, rest, { signal: ctx.mcpReq.signal }),
-			),
+			);
+		},
 	);
 
 	server.registerTool(
@@ -1406,7 +1426,11 @@ export function buildRecordlyMcpServer(
 				'and speed changes to the moment it came from; source: "raw" uses the untouched recording ' +
 				"instead. The frame is the recorded screen at that moment: it does not show zooms, " +
 				"annotations, captions or the background, so use it to check WHAT was on screen, not how " +
-				"the export will look. A time in a cut gap or past the end is refused.",
+				"the export will look — EXCEPT with rendered: true, which draws the blurs on so you " +
+				"can confirm a redaction covers what you meant before anyone sees the video. The " +
+				"result then lists each annotation at that moment and whether it was drawn; text, " +
+				"images and arrows are listed but not drawn. A zoom moves where a blur sits in the " +
+				"finished frame, not what it covers. A time in a cut gap or past the end is refused.",
 			inputSchema: z.object({
 				atMs: z.number().min(0).describe("Time in milliseconds"),
 				source: z
@@ -1428,7 +1452,13 @@ export function buildRecordlyMcpServer(
 					{
 						type: "text" as const,
 						text: JSON.stringify(
-							{ atMs: frame.atMs, source: frame.source, sourceMs: frame.sourceMs },
+							{
+								atMs: frame.atMs,
+								source: frame.source,
+								sourceMs: frame.sourceMs,
+								...(frame.annotations ? { annotations: frame.annotations } : {}),
+								...(frame.note ? { note: frame.note } : {}),
+							},
 							null,
 							2,
 						),
