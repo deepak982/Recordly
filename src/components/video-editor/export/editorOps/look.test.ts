@@ -3,7 +3,7 @@ import { DEFAULT_WEBCAM_OVERLAY, DEFAULT_ZOOM_MOTION_BLUR_TUNING } from "../../t
 import { lookOps } from "./look";
 import type { EditorOpContext } from "./types";
 
-function makeContext(webcam: object = {}) {
+function makeContext(webcam: object = {}, missingSetter?: string) {
 	const state: Record<string, unknown> = {
 		webcam: { ...DEFAULT_WEBCAM_OVERLAY, ...webcam },
 		zoomMotionBlurTuning: DEFAULT_ZOOM_MOTION_BLUR_TUNING,
@@ -16,6 +16,7 @@ function makeContext(webcam: object = {}) {
 	const appearance = new Proxy(state, {
 		get(target, key: string) {
 			if (key.startsWith("set")) {
+				if (key === missingSetter) return undefined;
 				return (value: unknown) => {
 					const field = key[3].toLowerCase() + key.slice(4);
 					calls.push(field);
@@ -54,7 +55,7 @@ describe("look.set", () => {
 	});
 
 	it("accepts the exact limits", () => {
-		const { calls, context } = makeContext();
+		const { state, context } = makeContext();
 		set(
 			{
 				padding: { top: 250, bottom: 0, left: 100, right: 0 },
@@ -65,7 +66,22 @@ describe("look.set", () => {
 			},
 			context,
 		);
-		expect(calls).toHaveLength(5);
+		expect(state).toMatchObject({
+			padding: { top: 250, bottom: 0, left: 100, right: 0, linked: false },
+			borderRadius: 50,
+			shadowIntensity: 1,
+			backgroundBlur: 8,
+			cropRegion: { x: 0, y: 0, width: 1, height: 1 },
+		});
+	});
+
+	it("changes nothing when the editor has no setter for a field", () => {
+		const { state, calls, context } = makeContext({}, "setShadowIntensity");
+		expect(() => set({ borderRadius: 30, shadowIntensity: 0.5 }, context)).toThrow(
+			/no control for shadowIntensity/,
+		);
+		expect(calls).toEqual([]);
+		expect(state.borderRadius).toBe(12);
 	});
 
 	it("merges webcam fields into the current settings", () => {
@@ -151,12 +167,37 @@ describe("look.motion", () => {
 	});
 
 	it("accepts both ends of a range and an overlap equal to the duration", () => {
-		const { calls, context } = makeContext();
+		const { state, context } = makeContext();
 		motion(
 			{ cursorSize: 0.5, cursorSway: 2, zoomInDurationMs: 600, zoomInOverlapMs: 600 },
 			context,
 		);
-		expect(calls).toHaveLength(4);
+		expect(state).toMatchObject({
+			cursorSize: 0.5,
+			cursorSway: 2,
+			zoomInDurationMs: 600,
+			zoomInOverlapMs: 600,
+		});
+	});
+
+	it("applies none of the 25 knobs when the last one is out of range", () => {
+		const { state, calls, context } = makeContext();
+		expect(() =>
+			motion(
+				{
+					cursorSize: 2,
+					zoomInEasing: "snappy",
+					zoomClassicMode: true,
+					cursorStyle: "dot",
+					zoomMotionBlurTuning: { maxDirectionalBlurPx: 10 },
+					cameraSpringMassMultiplier: 99,
+				},
+				context,
+			),
+		).toThrow(/cameraSpringMassMultiplier must be between 0.25 and 3/);
+		expect(calls).toEqual([]);
+		expect(state.zoomMotionBlurTuning).toEqual(DEFAULT_ZOOM_MOTION_BLUR_TUNING);
+		expect(state.cursorSize).toBeUndefined();
 	});
 
 	it.each([

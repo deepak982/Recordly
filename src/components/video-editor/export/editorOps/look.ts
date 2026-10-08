@@ -12,6 +12,7 @@ import {
 import {
 	type EditorOpContext,
 	type EditorOpMap,
+	rejectUnknown,
 	requireFiniteNumber,
 	requireObject,
 } from "./types";
@@ -91,15 +92,6 @@ const WEBCAM_FIELDS = [
 	"positionPreset",
 	"cropRegion",
 ];
-
-function rejectUnknown(args: Record<string, unknown>, allowed: string[], op: string) {
-	const unknown = Object.keys(args).filter((key) => !allowed.includes(key));
-	if (unknown.length > 0) {
-		throw new Error(
-			`${op}: unknown field ${unknown.join(", ")}. Accepted: ${allowed.join(", ")}.`,
-		);
-	}
-}
 
 function requireInRange(value: unknown, field: string, [min, max]: Range) {
 	const number = requireFiniteNumber(value, field);
@@ -212,9 +204,17 @@ function setterName(key: string) {
 	return `set${key[0].toUpperCase()}${key.slice(1)}`;
 }
 
-function apply(appearance: Appearance, key: string, value: unknown) {
-	const setter = (appearance as unknown as Record<string, (v: unknown) => void>)[setterName(key)];
-	setter(value);
+function applyAll(appearance: Appearance, updates: Record<string, unknown>, op: string) {
+	const pending = Object.entries(updates).map(([key, value]) => {
+		const setter = (appearance as unknown as Record<string, unknown>)[setterName(key)];
+		if (typeof setter !== "function") {
+			throw new Error(
+				`${op}: this editor has no control for ${key}, so nothing was changed.`,
+			);
+		}
+		return [setter as (v: unknown) => void, value] as const;
+	});
+	for (const [setter, value] of pending) setter(value);
 }
 
 function nonEmptyArgs(args: Record<string, unknown>, op: string) {
@@ -266,7 +266,7 @@ export const lookOps: EditorOpMap = {
 		if (args.crop !== undefined) updates.cropRegion = requireCrop(args.crop, "crop");
 		if (args.webcam !== undefined)
 			updates.webcam = requireWebcam(args.webcam, appearance.webcam);
-		for (const [key, value] of Object.entries(updates)) apply(appearance, key, value);
+		applyAll(appearance, updates, "look.set");
 		const { cropRegion, ...rest } = updates;
 		return {
 			applied: cropRegion ? { ...rest, crop: cropRegion } : rest,
@@ -330,7 +330,7 @@ export const lookOps: EditorOpMap = {
 			}
 			if (args.zoomInOverlapMs !== undefined) updates.zoomInOverlapMs = overlap;
 		}
-		for (const [key, value] of Object.entries(updates)) apply(appearance, key, value);
+		applyAll(appearance, updates, "look.motion");
 		return { applied: updates, undoable: false, note: NOT_UNDOABLE };
 	},
 };
