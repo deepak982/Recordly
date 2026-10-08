@@ -78,6 +78,7 @@ export type RemoteControlDeps = {
 	listSources: () => Promise<RawSource[]>;
 	selectSource: (source: SelectedSource) => Promise<unknown>;
 	isWindowOnScreen: (sourceId: string) => Promise<boolean>;
+	raiseWindow: (sourceId: string) => Promise<void>;
 	platform: NodeJS.Platform;
 	isWayland: () => boolean;
 	ipc: Ipc;
@@ -127,6 +128,22 @@ const defaultDeps = (): RemoteControlDeps => ({
 		}) as Promise<RawSource[]>,
 	selectSource: (source) => selectSource(source, { focusApp: false }),
 	isWindowOnScreen: isMacWindowOnScreen,
+	raiseWindow: async (sourceId) => {
+		const [{ parseWindowId }, { agentInput }, { agentPlatform }] = await Promise.all([
+			import("../ipc/utils"),
+			import("./agentInput"),
+			import("./agentPlatform"),
+		]);
+		const windowId = parseWindowId(sourceId);
+		const found = await agentPlatform.findWindow(sourceId);
+		if (!windowId || !found?.pid || !found.frame) return;
+		await agentInput.request({
+			cmd: "raise",
+			pid: found.pid,
+			windowId,
+			frame: agentPlatform.toHelperRect(found.frame),
+		});
+	},
 	platform: process.platform,
 	isWayland: () => isLikelyLinuxWaylandSession(process.env),
 	ipc: ipcMain as unknown as Ipc,
@@ -400,6 +417,9 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 	}
 
 	async function waitUntilOnScreen(sourceId: string) {
+		if (!(await deps.isWindowOnScreen(sourceId))) {
+			await deps.raiseWindow(sourceId).catch(() => undefined);
+		}
 		const deadline = Date.now() + deps.timeouts.onScreenMs;
 		while (!(await deps.isWindowOnScreen(sourceId))) {
 			if (Date.now() >= deadline) return false;
@@ -523,7 +543,7 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 			if (
 				deps.platform === "darwin" &&
 				sourceId?.startsWith("window:") &&
-				!(await deps.isWindowOnScreen(sourceId))
+				!(await waitUntilOnScreen(sourceId))
 			) {
 				throw new Error(WINDOW_OFF_SCREEN_MESSAGE);
 			}

@@ -70,6 +70,7 @@ function setup(overrides: Partial<RemoteControlDeps> = {}, { ready = true } = {}
 		listSources: async () => SOURCES,
 		selectSource: vi.fn(async () => undefined),
 		isWindowOnScreen: vi.fn(async () => true),
+		raiseWindow: vi.fn(async () => undefined),
 		platform: "darwin" as NodeJS.Platform,
 		isWayland: () => false,
 		ipc,
@@ -516,15 +517,34 @@ describe("select_source", () => {
 });
 
 describe("start_recording window checks", () => {
-	it("refuses a window that is not on this desktop, before touching the HUD", async () => {
+	it("refuses a window that stays off screen even after raising it, before touching the HUD", async () => {
+		vi.useFakeTimers();
 		const { remote, state, commands, deps } = setup({
 			isWindowOnScreen: vi.fn(async () => false),
 		});
 		state.source = { id: "window:2", name: "Slack" };
-		await expect(remote.startRecording()).rejects.toThrow(/minimized or on another desktop/);
+		const started = expect(remote.startRecording()).rejects.toThrow(
+			/minimized or on another desktop/,
+		);
+		await vi.advanceTimersByTimeAsync(2200);
+		await started;
+		expect(deps.raiseWindow).toHaveBeenCalledWith("window:2");
 		expect(commands()).toHaveLength(0);
 		expect(deps.showHud).not.toHaveBeenCalled();
-		expect(deps.isWindowOnScreen).toHaveBeenCalledWith("window:2");
+	});
+
+	it("raises a window on another desktop and proceeds once it is on screen", async () => {
+		vi.useFakeTimers();
+		let raised = false;
+		const fixture = setup({
+			raiseWindow: vi.fn(async () => {
+				raised = true;
+			}),
+			isWindowOnScreen: vi.fn(async () => raised),
+		});
+		fixture.state.source = { id: "window:2", name: "Slack" };
+		await startRecording(fixture);
+		expect(fixture.deps.raiseWindow).toHaveBeenCalledWith("window:2");
 	});
 
 	it("does not check screens", async () => {
