@@ -1179,6 +1179,38 @@ std::string raise(const Json& request) {
 	return std::string("\"raised\":") + boolText(isFront(window, owner));
 }
 
+// "bounds" are physical pixels (this process is per-monitor DPI aware) and describe the visible frame,
+// the same rectangle "frame" reports. SetWindowPos wants the outer rectangle, which includes the invisible
+// resize border Windows 10+ draws around a window, so that border is added back.
+std::string setBounds(const Json& request) {
+	const DWORD owner = pid(request);
+	const RECT current = frame(request);
+	const Json* raw = request["bounds"];
+	if (!raw || raw->kind != Json::Object) throw Failure{"missing bounds"};
+	const LONG x = static_cast<LONG>(std::lround(number(*raw, "x")));
+	const LONG y = static_cast<LONG>(std::lround(number(*raw, "y")));
+	const LONG width = static_cast<LONG>(std::lround(number(*raw, "width")));
+	const LONG height = static_cast<LONG>(std::lround(number(*raw, "height")));
+	if (width < 1 || height < 1) throw Failure{"width and height must be at least 1"};
+	const HWND window = matchWindow(request, owner, current);
+	if (!window) throw Failure{"the window could not be found"};
+	if (IsIconic(window) || IsZoomed(window)) ShowWindow(window, SW_RESTORE);
+	RECT outer, visible;
+	if (!GetWindowRect(window, &outer)) throw Failure{"the window could not be measured"};
+	if (!windowBounds(window, visible)) visible = outer;
+	const LONG left = visible.left - outer.left, top = visible.top - outer.top;
+	const LONG right = outer.right - visible.right, bottom = outer.bottom - visible.bottom;
+	if (!SetWindowPos(window, nullptr, x - left, y - top, width + left + right, height + top + bottom,
+			SWP_NOZORDER | SWP_NOACTIVATE)) {
+		throw Failure{GetLastError() == ERROR_ACCESS_DENIED
+			? "Windows blocked the move. The window belongs to an app running as administrator, so Recordly must run as administrator too"
+			: "Windows refused to move or resize this window"};
+	}
+	RECT actual;
+	if (!windowBounds(window, actual)) return "";
+	return "\"frame\":{" + boundsFields(actual) + "}";
+}
+
 // ---- UI Automation --------------------------------------------------------------------------------
 
 IUIAutomation* automation() {
@@ -1788,6 +1820,7 @@ void handle(const std::string& line) {
 			return "\"x\":" + num(location.x) + ",\"y\":" + num(location.y);
 		});
 	} else if (command == "raise") runWork(id, [request] { return raise(*request); });
+	else if (command == "set_bounds") runWork(id, [request] { return setBounds(*request); });
 	else if (command == "find") runWork(id, [request] { return find(*request); });
 	else if (command == "at") runWork(id, [request] { return elementAt(*request); });
 	else send("{\"id\":" + id + ",\"ok\":false,\"error\":" + quote("unknown command: " + command) + "}");

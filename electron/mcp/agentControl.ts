@@ -57,7 +57,8 @@ export type AgentStep =
 	| ({ action: "scroll"; deltaY: number; deltaX?: number; modifiers?: string[] } & At)
 	| { action: "type"; text: string; into?: AgentTarget }
 	| { action: "key"; key: string; modifiers?: string[]; repeat?: number }
-	| { action: "wait"; ms: number }
+	| { action: "wait" | "hold"; ms: number }
+	| { action: "expect"; target: AgentTarget; visible?: boolean }
 	| {
 			action: "waitFor";
 			text?: string;
@@ -73,6 +74,7 @@ export type PerformOptions = {
 	pace?: AgentPace;
 	dryRun?: boolean;
 	then?: "elements";
+	safeRegion?: AgentFrame;
 };
 export type AgentElementView = AgentElement;
 export type AgentDryRunStep = {
@@ -173,6 +175,10 @@ const KNOWN_BROWSERS = [
 	"com.vivaldi.Vivaldi",
 	"org.chromium.Chromium",
 ];
+const UNDO_NOTE =
+	"Best effort only: Recordly pressed the undo shortcut in the app that has focus. It cannot " +
+	"un-click or reverse an action itself, and the app may have nothing to undo or may undo " +
+	"something else. Take a screenshot to see what actually happened.";
 const LIMIT_PASSED = "the perform passed its 10-minute limit. Split the demo into shorter scenes.";
 const BROWSER_NOT_FOUND =
 	"The page opened, but Recordly could not find the browser window. Call list_sources, then " +
@@ -192,6 +198,7 @@ type Run = {
 	aborted: Promise<never>;
 	signal: AbortSignal;
 	deadline: number;
+	safeRegion?: AgentFrame;
 };
 type InputPolicy = {
 	tolerancePx?: number;
@@ -333,6 +340,8 @@ function spotsOf(step: AgentStep): Spot[] {
 			];
 		case "type":
 			return step.into ? [{ target: step.into, names: ["", "", "into"] }] : [];
+		case "expect":
+			return [{ target: step.target, names: ["", "", "target"] }];
 		default:
 			return [];
 	}
@@ -397,8 +406,8 @@ function checkStep(step: AgentStep) {
 			throw new Error(`A key's repeat must be a whole number from 1 to ${KEY_REPEAT_MAX}.`);
 		}
 	}
-	if (step.action === "wait" && step.ms > AGENT_LIMITS.waitMs) {
-		throw new Error(`A wait step may last at most ${AGENT_LIMITS.waitMs / 1000} s.`);
+	if ((step.action === "wait" || step.action === "hold") && step.ms > AGENT_LIMITS.waitMs) {
+		throw new Error(`A ${step.action} step may last at most ${AGENT_LIMITS.waitMs / 1000} s.`);
 	}
 	if (step.action === "waitFor") checkWaitFor(step);
 }
@@ -418,7 +427,13 @@ function readsAfter(steps: AgentStep[], index: number) {
 	const next = steps[index + 1];
 	const submits =
 		step.action === "click" || (step.action === "key" && normalizeKey(step.key) === "enter");
-	if (!submits || next?.action === "wait" || next?.action === "waitFor") return false;
+	if (
+		!submits ||
+		next?.action === "wait" ||
+		next?.action === "hold" ||
+		next?.action === "waitFor"
+	)
+		return false;
 	return !(step.action === "click" && (next?.action === "type" || next?.action === "key"));
 }
 
@@ -446,7 +461,10 @@ function stepBudgetMs(step: AgentStep, glideMs: number) {
 		case "key":
 			return (step.repeat ?? 1) * KEY_REPEAT_MS;
 		case "wait":
+		case "hold":
 			return step.ms;
+		case "expect":
+			return POLL_MS;
 		case "waitFor":
 			return step.timeoutMs ?? WAIT_FOR_MS;
 	}
@@ -659,6 +677,38 @@ function similarity(a: string, b: string) {
 	return total === 0 ? 0 : (2 * shared) / total;
 }
 
+export function checkSafeRegion(region: AgentFrame | undefined, { x, y }: Point) {
+	if (
+		!region ||
+		(x >= region.x &&
+			y >= region.y &&
+			x < region.x + region.width &&
+			y < region.y + region.height)
+	) {
+		return;
+	}
+	throw new Error(
+		`Point (${Math.round(x)}, ${Math.round(y)}) is outside the safe region (x ${region.x}, y ${region.y}, ` +
+			`${region.width} × ${region.height} points, window-relative). Nothing was clicked. ` +
+			"Take a fresh screenshot and re-aim, or widen safeRegion.",
+	);
+}
+
+function checkSafeRegionShape(region: AgentFrame | undefined) {
+	if (region === undefined) return;
+	const { x, y, width, height } = region;
+	if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) {
+		throw new Error(
+			"safeRegion needs numeric x, y, width and height, with a width and height above 0.",
+		);
+	}
+}
+
+const undoChord = (name: string): { key: string; modifiers: AgentModifier[] } => ({
+	key: "z",
+	modifiers: [name === "darwin" ? "cmd" : "ctrl"],
+});
+
 export function createAgentControl(
 	remote: Pick<RemoteControl, "getStatus" | "listSources" | "selectSource">,
 	overrides: Partial<AgentControlDeps> = {},
@@ -668,6 +718,7 @@ export function createAgentControl(
 	const webWindows = new Map<number, boolean>();
 	let busy = false;
 	let controlWindowId: number | null = null;
+	let lastInput = 0;
 	let policy: InputPolicy = { autoResumeAfterMs: 2000, onTakeover: "abort" };
 
 	function toHelper(command: AgentCommand): AgentCommand {
@@ -686,6 +737,12 @@ export function createAgentControl(
 			case "raise":
 			case "find":
 				return { ...command, frame: platform.toHelperRect(command.frame) };
+			case "set_bounds":
+				return {
+					...command,
+					frame: platform.toHelperRect(command.frame),
+					bounds: platform.toHelperRect(command.bounds),
+				};
 			default:
 				return command;
 		}
@@ -698,6 +755,10 @@ export function createAgentControl(
 			const back = (hit: AgentHit | null) =>
 				hit ? { ...hit, ...platform.fromHelperRect(hit) } : null;
 			return { hit: back(probed.hit), parent: back(probed.parent) };
+		}
+		if (cmd === "set_bounds") {
+			const { frame } = result as AgentResults["set_bounds"];
+			return frame ? { frame: platform.fromHelperRect(frame) } : {};
 		}
 		if (cmd !== "find") return result;
 		const found = result as AgentResults["find"];
@@ -925,7 +986,13 @@ export function createAgentControl(
 		);
 	}
 
-	async function notFound(target: AgentTarget, ranked: Ranked, window: TargetWindow, run: Run) {
+	async function notFound(
+		target: AgentTarget,
+		ranked: Ranked,
+		window: TargetWindow,
+		run: Run,
+		outcome = `was not found in the window within ${TARGET_WAIT_MS / 1000} s`,
+	) {
 		if (ranked.length > 0) {
 			return new Error(
 				`Only ${ranked.length} element${ranked.length === 1 ? " matches" : "s match"} ` +
@@ -943,7 +1010,7 @@ export function createAgentControl(
 			.sort((a, b) => b.score - a.score)
 			.map(({ element }) => element);
 		return new Error(
-			`${describeTarget(target)} was not found in the window within ${TARGET_WAIT_MS / 1000} s. ` +
+			`${describeTarget(target)} ${outcome}. ` +
 				(nearest.length > 0
 					? `Nearest visible labels: ${listElements(nearest, false)}.`
 					: "No labelled controls are visible."),
@@ -1037,7 +1104,10 @@ export function createAgentControl(
 				const delta = Math.hypot(centre.x - at.x, centre.y - at.y);
 				const reach = Math.max(AIM_NUDGE_PT, Math.min(fresh.width, fresh.height) / 2);
 				if (delta <= AIM_SETTLED_PT) aimed = { at, ms: 0 };
-				else if (delta <= reach) aimed = { at: centre, ms: AIM_NUDGE_MS };
+				else if (delta <= reach) {
+					checkSafeRegion(run.safeRegion, centreOf(fresh));
+					aimed = { at: centre, ms: AIM_NUDGE_MS };
+				}
 			}
 			if (aimed && fresh) {
 				const covered = await blocker(target, fresh, window, aimed.at, run);
@@ -1054,6 +1124,7 @@ export function createAgentControl(
 				throw await notFound(target, [], window, run);
 			}
 			const again = await resolveTarget(target, run);
+			checkSafeRegion(run.safeRegion, centreOf(again.element));
 			at = toGlobal(await requireTarget(), centreOf(again.element));
 			await approach?.(at);
 		}
@@ -1163,6 +1234,9 @@ export function createAgentControl(
 			}
 		}
 		const window = await requireTarget();
+		if (step.action !== "scroll") {
+			for (const each of located) checkSafeRegion(run.safeRegion, each.point);
+		}
 		const [point, end] = located.map((each) => toGlobal(window, each.point));
 		const last = located[located.length - 1];
 		const target = targetOf(window, last.point, last.size);
@@ -1291,11 +1365,37 @@ export function createAgentControl(
 		}
 	}
 
+	// One look, no scrolling and no waiting: a page that has diverged should stop the run now.
+	async function expectTarget(step: Extract<AgentStep, { action: "expect" }>, run: Run) {
+		const { target } = step;
+		const wantVisible = step.visible !== false;
+		const window = await requireTarget();
+		const all = await Promise.race([matchTarget(target, window, run.post), run.aborted]);
+		const ranked = all.filter(({ element }) => element.visible !== false);
+		const found = ranked.length > (target.index ?? 0);
+		if (found === wantVisible) return;
+		if (!wantVisible) {
+			throw new Error(
+				`${describeTarget(target)} is on screen, but the step expected it to be absent.`,
+			);
+		}
+		if (all.length > (target.index ?? 0)) {
+			throw new Error(
+				`${describeTarget(target)} is in the window but off screen, so this step cannot ` +
+					"act on it. Scroll it into view first, or wait for it with waitFor.",
+			);
+		}
+		throw await notFound(target, ranked, window, run, "is not in the window");
+	}
+
 	async function runStep(step: AgentStep, run: Run) {
 		if (needsFrontmost(step)) await requireFrontmost(run.start);
 		switch (step.action) {
 			case "wait":
+			case "hold":
 				return logged(run, "hold", "wait", () => deps.sleep(step.ms));
+			case "expect":
+				return expectTarget(step, run);
 			case "waitFor":
 				return logged(run, "wait", "wait", () => waitFor(step, run));
 			case "type":
@@ -1338,12 +1438,20 @@ export function createAgentControl(
 		}
 	}
 
-	async function runSteps(steps: AgentStep[], pace: Pace, deadline: number) {
+	async function runSteps(
+		steps: AgentStep[],
+		pace: Pace,
+		deadline: number,
+		safeRegion?: AgentFrame,
+	) {
 		await preflightInput();
 		const start = await requireTarget();
 		steps.forEach((step, index) => {
 			try {
-				for (const point of pointsOf(step)) toGlobal(start, point);
+				for (const point of pointsOf(step)) {
+					toGlobal(start, point);
+					if (step.action !== "scroll") checkSafeRegion(safeRegion, point);
+				}
 			} catch (error) {
 				throw stepError(index, step, error);
 			}
@@ -1364,7 +1472,6 @@ export function createAgentControl(
 		let stopped = false;
 		let tookOver = false;
 		let paused = false;
-		let lastInput = 0;
 		let cause: string | undefined;
 		const mode = { ...policy };
 		let controller = new AbortController();
@@ -1405,6 +1512,7 @@ export function createAgentControl(
 			aborted: freshAbort(),
 			signal: controller.signal,
 			deadline,
+			safeRegion,
 		};
 		const armHelper = () =>
 			request(
@@ -1433,10 +1541,12 @@ export function createAgentControl(
 			run.signal = controller.signal;
 			run.aborted = freshAbort();
 		};
+		let armed = false;
 		deps.setHudPassthrough(true);
-		await armHelper();
 		input.events.on("user-input", onUserInput);
 		try {
+			await armHelper();
+			armed = true;
 			for (const [index, step] of steps.entries()) {
 				for (;;) {
 					try {
@@ -1470,7 +1580,7 @@ export function createAgentControl(
 			stopped = true;
 			controller.abort();
 			input.events.off("user-input", onUserInput);
-			await request({ cmd: "disarm" }).catch(() => undefined);
+			if (armed) await request({ cmd: "disarm" }).catch(() => undefined);
 			deps.setHudPassthrough(false);
 		}
 	}
@@ -1504,7 +1614,11 @@ export function createAgentControl(
 		};
 	}
 
-	async function probe(step: AgentStep, window: TargetWindow): Promise<Probe> {
+	async function probe(
+		step: AgentStep,
+		window: TargetWindow,
+		safeRegion?: AgentFrame,
+	): Promise<Probe> {
 		if (step.action === "waitFor") {
 			if (step.settled) return { found: true };
 			const query = { text: step.text, role: step.role };
@@ -1519,13 +1633,14 @@ export function createAgentControl(
 			} else {
 				const point = { x: Number(x), y: Number(y) };
 				toGlobal(window, point);
+				if (step.action !== "scroll") checkSafeRegion(safeRegion, point);
 				probed = { found: true, ...point };
 			}
 		}
 		return probed;
 	}
 
-	async function dryRun(steps: AgentStep[]) {
+	async function dryRun(steps: AgentStep[], safeRegion?: AgentFrame) {
 		requireSupported();
 		const window = await requireTarget();
 		const report: AgentDryRunStep[] = [];
@@ -1544,7 +1659,7 @@ export function createAgentControl(
 				report.push({
 					index: index + 1,
 					action: step.action,
-					...(await probe(step, window)),
+					...(await probe(step, window, safeRegion)),
 				});
 			} catch (error) {
 				throw stepError(index, step, error);
@@ -1560,16 +1675,22 @@ export function createAgentControl(
 		if (options.then !== undefined && options.then !== "elements") {
 			throw new Error('then must be "elements".');
 		}
+		checkSafeRegionShape(options.safeRegion);
 		checkLimits(steps, pace);
 		return exclusive(async () => {
 			const startedAt = deps.now();
 			const result: PerformResult = { performed: 0, durationMs: 0 };
 			if (options.dryRun) {
-				Object.assign(result, await dryRun(steps));
+				Object.assign(result, await dryRun(steps, options.safeRegion));
 			} else {
 				const endScene = beginScene(options.title);
 				try {
-					await runSteps(steps, pace, startedAt + AGENT_LIMITS.totalMs);
+					await runSteps(
+						steps,
+						pace,
+						startedAt + AGENT_LIMITS.totalMs,
+						options.safeRegion,
+					);
 					endScene(false);
 				} catch (error) {
 					endScene(true);
@@ -1685,6 +1806,32 @@ export function createAgentControl(
 		throw new Error(BROWSER_NOT_FOUND);
 	}
 
+	// Only observed while the helper is armed — the OS is not polled when control is off.
+	function lastInputAt() {
+		return lastInput;
+	}
+
+	async function selectFrontWindow(app?: string) {
+		const wanted = (window: AgentWindow | null): window is AgentWindow =>
+			window !== null &&
+			!platform.isOwnWindow(window) &&
+			(normalizeAppName(app ?? "") ? platform.sameApp(app as string, window.appName) : true);
+		let candidate: number | null = null;
+		for (let waited = 0; waited < OPEN_URL_WAIT_MS; waited += POLL_MS) {
+			await deps.sleep(POLL_MS);
+			const { window } = await request({ cmd: "frontmost_window" });
+			if (wanted(window) && window.windowId === candidate) {
+				return await selectWindow(window.windowId);
+			}
+			candidate = wanted(window) ? window.windowId : null;
+		}
+		throw new Error(
+			app
+				? `${app} did not open a window in time. Call list_sources, then select_source.`
+				: "No window appeared in time. Call list_sources, then select_source.",
+		);
+	}
+
 	async function chooseWindow(id: string) {
 		requireSupported();
 		return selectControlWindow(id);
@@ -1698,8 +1845,114 @@ export function createAgentControl(
 		return policy;
 	}
 
+	async function windowFor(source?: string): Promise<TargetWindow> {
+		if (source === undefined) return requireTarget();
+		const windowId = parseWindowId(source) ?? (/^\d+$/.test(source) ? Number(source) : null);
+		if (!windowId) throw new Error(NO_WINDOW);
+		const found = await deps.findWindow(`window:${windowId}:0`);
+		if (!found?.frame) throw new Error(WINDOW_OFF_SCREEN_MESSAGE);
+		if (!found.pid) {
+			throw new Error(
+				"Recordly could not tell which app owns that window. Check the id with list_sources.",
+			);
+		}
+		if (platform.isOwnWindow({ pid: found.pid, windowId })) throw new Error(OWN_WINDOW);
+		return { pid: found.pid, windowId, frame: found.frame };
+	}
+
+	// Bounds are screen points, the same space as a window's frame; the platform layer converts
+	// them (Windows: physical pixels) on the way to the helper.
+	async function setWindowBounds(args: {
+		source?: string;
+		x: number;
+		y: number;
+		width: number;
+		height: number;
+		raise?: boolean;
+	}) {
+		requireSupported();
+		const { x, y, width, height } = args;
+		if (![x, y, width, height].every(Number.isFinite) || width < 1 || height < 1) {
+			throw new Error(
+				"set_window_bounds needs numeric x, y, width and height, with width and height of at least 1.",
+			);
+		}
+		const bounds = { x, y, width, height };
+		if (!deps.getDisplays().some((display) => intersect(display, bounds))) {
+			throw new Error(
+				`The rectangle (x ${x}, y ${y}, ${width} × ${height}) is not on any display, so the window would be unreachable. Pick a rectangle that overlaps a display.`,
+			);
+		}
+		return exclusive(async () => {
+			const target = await windowFor(args.source);
+			const { frame } = await request({
+				cmd: "set_bounds",
+				pid: target.pid,
+				windowId: target.windowId,
+				frame: target.frame,
+				bounds,
+			});
+			const applied = frame ?? bounds;
+			const raiseFailed = args.raise
+				? await raise({ ...target, frame: applied }).then(
+						() => null,
+						(error: unknown) =>
+							error instanceof Error ? error.message : String(error),
+					)
+				: null;
+			const adjusted = [
+				applied.x - x,
+				applied.y - y,
+				applied.width - width,
+				applied.height - height,
+			].some((delta) => Math.abs(delta) > 2);
+			const note = [
+				frame
+					? undefined
+					: "Recordly could not read the window's rectangle back, so frame is the one it asked for, not a measured result.",
+				adjusted
+					? "The app or window manager adjusted the rectangle (minimum size or screen edge); frame is what it ended up as."
+					: undefined,
+				raiseFailed
+					? `The window was moved, but bringing it to the front failed: ${raiseFailed}`
+					: undefined,
+			].filter(Boolean);
+			return {
+				windowId: target.windowId,
+				frame: applied,
+				adjusted,
+				...(note.length > 0 ? { note: note.join(" ") } : {}),
+			};
+		});
+	}
+
+	async function undoLastInput() {
+		await preflightInput();
+		return exclusive(async () => {
+			const { window } = await request({ cmd: "frontmost_window" });
+			if (window && platform.isOwnWindow(window)) {
+				throw new Error(
+					"Recordly's own window has focus, so the undo would go to Recordly instead of the " +
+						"app being demoed. Bring that app to the front (select_source, or screenshot " +
+						"to check) and try again.",
+				);
+			}
+			const { key, modifiers } = undoChord(platform.name);
+			await request({ cmd: "key", key, modifiers, repeat: 1 });
+			return {
+				sent: modifiers[0] === "cmd" ? "Cmd+Z" : "Ctrl+Z",
+				app: window?.appName ?? null,
+				note: UNDO_NOTE,
+			};
+		});
+	}
+
 	return {
 		preflightInput,
+		lastInputAt,
+		selectFrontWindow,
+		setWindowBounds,
+		undoLastInput,
 		setInputPolicy,
 		perform,
 		findElements,

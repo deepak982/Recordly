@@ -1328,6 +1328,33 @@ static bool cmd_raise(Json *r, Buf *out) {
 	return true;
 }
 
+// "bounds" use the same rectangle "frame" does: the client window, in X11 pixels. The window manager
+// may still adjust the result (minimum sizes, struts), so the rectangle actually applied is reported back.
+static bool cmd_set_bounds(Json *r, Buf *out) {
+	int pid = 0;
+	double frame[4], b[4] = {0, 0, 0, 0};
+	TRY(need_pid(r, &pid) && need_frame(r, frame));
+	Json *raw = j_get(r, "bounds");
+	if (!raw || raw->t != J_OBJ) return fail("missing bounds");
+	TRY(need_num(raw, "x", &b[0]) && need_num(raw, "y", &b[1]) && need_num(raw, "width", &b[2]) && need_num(raw, "height", &b[3]));
+	if (b[2] < 1 || b[3] < 1) return fail("width and height must be at least 1");
+	Display *d = XOpenDisplay(NULL);
+	if (!d) return fail(WAYLAND_MESSAGE);
+	Window w = match_window(d, pid, window_id(r), frame);
+	if (!w) {
+		XCloseDisplay(d);
+		return fail("the window could not be found");
+	}
+	XMoveResizeWindow(d, w, (int)lround(b[0]), (int)lround(b[1]), (unsigned)lround(b[2]), (unsigned)lround(b[3]));
+	XSync(d, False);
+	sleep_s(0.15);
+	double actual[4];
+	if (window_rect(d, w, actual))
+		b_printf(out, ",\"frame\":{\"x\":%.15g,\"y\":%.15g,\"width\":%.15g,\"height\":%.15g}", actual[0], actual[1], actual[2], actual[3]);
+	XCloseDisplay(d);
+	return true;
+}
+
 typedef struct { int x, y, width, height; } AtspiRect;
 enum {
 	R_CHECK_BOX = 7, R_CHECK_MENU_ITEM = 8, R_COMBO_BOX = 11, R_ICON = 26, R_IMAGE = 27, R_LABEL = 29, R_MENU = 33,
@@ -1907,7 +1934,7 @@ static void *signal_main(void *arg) {
 static const struct { const char *name; InputFn input; WorkFn work; } commands[] = {
 	{"move", cmd_move, NULL}, {"click", cmd_click, NULL}, {"drag", cmd_drag, NULL}, {"scroll", cmd_scroll, NULL},
 	{"type", cmd_type, NULL}, {"key", cmd_key, NULL}, {"frontmost_window", NULL, cmd_frontmost},
-	{"raise", NULL, cmd_raise}, {"find", NULL, cmd_find}, {"window_info", NULL, cmd_window_info}, {"at", NULL, cmd_at}, {"preflight", NULL, NULL}, {"cursor", NULL, NULL},
+	{"raise", NULL, cmd_raise}, {"set_bounds", NULL, cmd_set_bounds}, {"find", NULL, cmd_find}, {"window_info", NULL, cmd_window_info}, {"at", NULL, cmd_at}, {"preflight", NULL, NULL}, {"cursor", NULL, NULL},
 	{"arm", NULL, NULL}, {"disarm", NULL, NULL},
 };
 

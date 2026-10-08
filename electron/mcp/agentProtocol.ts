@@ -101,6 +101,13 @@ export type AgentCommand =
 	| { cmd: "type"; text: string; cps: number }
 	| { cmd: "key"; key: string; modifiers: AgentModifier[]; repeat: number }
 	| { cmd: "raise"; pid: number; windowId: number; frame: AgentFrame }
+	| {
+			cmd: "set_bounds";
+			pid: number;
+			windowId: number;
+			frame: AgentFrame;
+			bounds: AgentFrame;
+	  }
 	| { cmd: "frontmost_window" }
 	| { cmd: "window_info"; windowId: number }
 	| { cmd: "at"; pid: number; x: number; y: number }
@@ -127,6 +134,7 @@ export type AgentResults = {
 	type: Record<string, never>;
 	key: Record<string, never>;
 	raise: { raised: boolean };
+	set_bounds: { frame?: AgentFrame };
 	frontmost_window: { window: AgentWindow | null };
 	window_info: { window: AgentWindowInfo | null };
 	find: { elements: AgentElement[]; truncated: boolean };

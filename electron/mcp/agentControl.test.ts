@@ -364,6 +364,23 @@ describe("perform", () => {
 		expect([noTap.count("arm"), noTap.count("disarm")]).toEqual([1, 0]);
 	});
 
+	it("turns the HUD passthrough back off and drops the listener when arming fails", async () => {
+		const setHudPassthrough = vi.fn();
+		const noTap = setup(
+			{ setHudPassthrough },
+			{
+				arm: () => {
+					throw new Error("tap failed");
+				},
+			},
+		);
+		await expect(noTap.agent.perform([{ action: "wait", ms: 1 }])).rejects.toThrow(
+			"tap failed",
+		);
+		expect(setHudPassthrough.mock.calls.flat()).toEqual([true, false]);
+		expect(noTap.events.listenerCount("user-input")).toBe(0);
+	});
+
 	it.each([
 		["too many steps", Array.from({ length: 201 }, () => ({ action: "wait" as const, ms: 1 }))],
 		["no steps", []],
@@ -2626,5 +2643,265 @@ describe("input policy", () => {
 			cmd: "arm",
 			tolerancePx: 40,
 		});
+	});
+});
+
+describe("window bounds, hold, expect, safeRegion and undo", () => {
+	const BOUNDS = { x: 20, y: 30, width: 500, height: 400 };
+	const on = (platform: NodeJS.Platform) =>
+		createAgentPlatform({
+			platform,
+			env: { DISPLAY: ":0", XDG_SESSION_TYPE: "x11" },
+			ozonePlatform: () => "",
+			ownPid: 1,
+			ownWindowIds: () => [],
+			screen: () =>
+				({
+					getAllDisplays: () => [
+						{
+							id: 1,
+							bounds: { x: 0, y: 0, width: 3000, height: 2000 },
+							scaleFactor: 2,
+						},
+					],
+					getPrimaryDisplay: () => ({
+						id: 1,
+						bounds: { x: 0, y: 0, width: 3000, height: 2000 },
+						scaleFactor: 2,
+					}),
+					getDisplayNearestPoint: () => ({
+						id: 1,
+						bounds: { x: 0, y: 0, width: 3000, height: 2000 },
+						scaleFactor: 2,
+					}),
+					dipToScreenRect: (_: null, r: typeof FRAME) => ({
+						x: r.x * 2,
+						y: r.y * 2,
+						width: r.width * 2,
+						height: r.height * 2,
+					}),
+					screenToDipRect: (_: null, r: typeof FRAME) => ({
+						x: r.x / 2,
+						y: r.y / 2,
+						width: r.width / 2,
+						height: r.height / 2,
+					}),
+					dipToScreenPoint: ({ x, y }: { x: number; y: number }) => ({
+						x: x * 2,
+						y: y * 2,
+					}),
+					screenToDipPoint: ({ x, y }: { x: number; y: number }) => ({
+						x: x / 2,
+						y: y / 2,
+					}),
+				}) as never,
+		});
+
+	beforeEach(() => {
+		clock.ms = 1_000;
+		resetAgentActivity();
+	});
+
+	it("sends points to the macOS helper and raises through the existing raise command", async () => {
+		const { agent, commands } = setup(
+			{},
+			{ set_bounds: (c) => ({ frame: (c as { bounds: unknown }).bounds }) },
+		);
+		await expect(agent.setWindowBounds({ ...BOUNDS, raise: true })).resolves.toMatchObject({
+			frame: BOUNDS,
+			adjusted: false,
+		});
+		expect(commands).toEqual([
+			{ cmd: "set_bounds", pid: 42, windowId: 7, frame: FRAME, bounds: BOUNDS },
+			{ cmd: "raise", pid: 42, windowId: 7, frame: BOUNDS },
+		]);
+	});
+
+	it.each([
+		"win32",
+		"linux",
+	] as const)("converts bounds to helper pixels on %s and back", async (name) => {
+		const { agent, commands } = setup(
+			{ platform: on(name) },
+			{ set_bounds: () => ({ frame: { x: 40, y: 60, width: 1000, height: 800 } }) },
+		);
+		await agent.chooseWindow("window:7:0");
+		const result = await agent.setWindowBounds(BOUNDS);
+		expect(commands[0]).toMatchObject({
+			cmd: "set_bounds",
+			frame: { x: 200, y: 100, width: 1600, height: 1200 },
+			bounds: { x: 40, y: 60, width: 1000, height: 800 },
+		});
+		expect(result.frame).toEqual(BOUNDS);
+	});
+
+	it("reports an adjusted rectangle, accepts an off-display window by id, and refuses an unreachable target rectangle", async () => {
+		const { agent, deps } = setup(
+			{},
+			{ set_bounds: () => ({ frame: { ...BOUNDS, width: 300 } }) },
+		);
+		await expect(
+			agent.setWindowBounds({ ...BOUNDS, source: "window:9:0" }),
+		).resolves.toMatchObject({
+			adjusted: true,
+		});
+		expect(deps.findWindow).toHaveBeenCalledWith("window:9:0");
+		await expect(agent.setWindowBounds({ ...BOUNDS, x: -9000 })).rejects.toThrow(
+			/not on any display/,
+		);
+	});
+
+	it("logs a hold step as a hold span, same as wait", async () => {
+		const { agent } = setup();
+		await agent.perform([{ action: "hold", ms: 500 }]);
+		expect(snapshotAgentActivity(9_000).spans).toEqual([
+			{ kind: "hold", action: "wait", startMs: 1_000, endMs: 1_500 },
+		]);
+		await expect(agent.perform([{ action: "hold", ms: 99_000 }])).rejects.toThrow(
+			/hold step may last/,
+		);
+	});
+
+	it("expect passes when present, and fails the step at once, without scrolling or waiting, when absent", async () => {
+		const screen = [element("Save", 300, 200)];
+		const { agent, names, deps } = setup({}, { find: findOn(screen) });
+		await expect(
+			agent.perform([{ action: "expect", target: { text: "Save" } }]),
+		).resolves.toMatchObject({ performed: 1 });
+		const sleeps = vi.spyOn(deps, "sleep");
+		await expect(
+			agent.perform([{ action: "expect", target: { text: "Missing" } }]),
+		).rejects.toThrow(/Step 1 \(expect\).*"Missing" is not in the window/s);
+		expect(names()).not.toContain("scroll");
+		expect(sleeps).not.toHaveBeenCalled();
+	});
+
+	it("expect with visible: false fails when the target is there", async () => {
+		const { agent } = setup({}, { find: findOn([element("Save", 300, 200)]) });
+		await expect(
+			agent.perform([{ action: "expect", target: { text: "Save" }, visible: false }]),
+		).rejects.toThrow(/expected it to be absent/);
+		await expect(
+			agent.perform([{ action: "expect", target: { text: "Nope" }, visible: false }]),
+		).resolves.toMatchObject({ performed: 1 });
+	});
+
+	it("refuses a click outside safeRegion before posting anything, naming the point and the region", async () => {
+		const { agent, names } = setup();
+		const safeRegion = { x: 0, y: 100, width: 800, height: 400 };
+		await expect(
+			agent.perform([{ action: "click", x: 50, y: 10 }], { safeRegion }),
+		).rejects.toThrow(/Point \(50, 10\) is outside the safe region \(x 0, y 100, 800 × 400/);
+		expect(names()).toEqual(["preflight"]);
+		await expect(
+			agent.perform([{ action: "drag", fromX: 5, fromY: 150, toX: 5, toY: 590 }], {
+				safeRegion,
+			}),
+		).rejects.toThrow(/Point \(5, 590\)/);
+		await expect(
+			agent.perform([{ action: "click", x: 50, y: 150 }], { safeRegion }),
+		).resolves.toMatchObject({ performed: 1 });
+	});
+
+	it("also checks a resolved target against safeRegion at run time", async () => {
+		const { agent, count } = setup(
+			{},
+			{ find: findOn([element("Tab", 300, 10)]), click: tick },
+		);
+		await expect(
+			agent.perform([{ action: "click", target: { text: "Tab" } }], {
+				safeRegion: { x: 0, y: 100, width: 800, height: 400 },
+			}),
+		).rejects.toThrow(/outside the safe region/);
+		expect(count("click")).toBe(0);
+	});
+
+	it("refuses a nudge that would carry the click outside safeRegion", async () => {
+		const { agent, count } = setup(
+			{},
+			{
+				find: findOn(() => [element("Tasks", clock.ms >= 1_200 ? 74 : 54, 200)]),
+				click: tick,
+			},
+		);
+		await expect(
+			agent.perform([{ action: "click", target: { text: "Tasks" }, durationMs: 200 }], {
+				safeRegion: { x: 0, y: 0, width: 100, height: 400 },
+			}),
+		).rejects.toThrow(/outside the safe region/);
+		expect(count("click")).toBe(0);
+	});
+
+	it.each([
+		["darwin", "cmd", "Cmd+Z"],
+		["win32", "ctrl", "Ctrl+Z"],
+		["linux", "ctrl", "Ctrl+Z"],
+	] as const)("undo sends the %s chord and says it cannot un-click", async (name, modifier, sent) => {
+		const { agent, commands } = setup({ platform: on(name) });
+		const result = await agent.undoLastInput();
+		expect(commands.at(-1)).toEqual({ cmd: "key", key: "z", modifiers: [modifier], repeat: 1 });
+		expect(result).toMatchObject({ sent, app: "Google Chrome" });
+		expect(result.note).toMatch(/cannot un-click/);
+	});
+
+	it("refuses to undo into Recordly's own window", async () => {
+		const { agent, commands } = setup(
+			{},
+			{ frontmost_window: () => ({ window: { ...CHROME, pid: 1 } }) },
+		);
+		await expect(agent.undoLastInput()).rejects.toThrow(/own window has focus/);
+		expect(commands.some((command) => command.cmd === "key")).toBe(false);
+	});
+
+	it("refuses a click at a target that moved outside safeRegion while the pointer approached", async () => {
+		let finds = 0;
+		const { agent, count } = setup(
+			{},
+			{
+				find: findOn(() => {
+					finds += 1;
+					return [element("Tasks", finds >= 4 ? 200 : 54, 200)];
+				}),
+				click: tick,
+			},
+		);
+		await expect(
+			agent.perform([{ action: "click", target: { text: "Tasks" } }], {
+				safeRegion: { x: 0, y: 0, width: 140, height: 400 },
+			}),
+		).rejects.toThrow(/Point \(240, 215\) is outside the safe region/);
+		expect(count("click")).toBe(0);
+	});
+
+	it("says so when the helper could not measure the window it moved", async () => {
+		const { agent } = setup({}, { set_bounds: () => ({}) });
+		const result = await agent.setWindowBounds(BOUNDS);
+		expect(result).toMatchObject({ frame: BOUNDS, adjusted: false });
+		expect(result.note).toMatch(/could not read the window's rectangle back/);
+	});
+
+	it("keeps the moved rectangle when raising the window afterwards fails", async () => {
+		const { agent } = setup(
+			{},
+			{
+				set_bounds: (c) => ({ frame: (c as { bounds: unknown }).bounds }),
+				raise: () => {
+					throw new Error("the window vanished");
+				},
+			},
+		);
+		const result = await agent.setWindowBounds({ ...BOUNDS, raise: true });
+		expect(result).toMatchObject({ frame: BOUNDS, adjusted: false });
+		expect(result.note).toMatch(/bringing it to the front failed: the window vanished/);
+	});
+
+	it("expect says a target is off screen rather than missing", async () => {
+		const { agent } = setup(
+			{},
+			{ find: findOn([element("Save", 300, 200, { visible: false })]) },
+		);
+		await expect(
+			agent.perform([{ action: "expect", target: { text: "Save" } }]),
+		).rejects.toThrow(/"Save" is in the window but off screen/);
 	});
 });

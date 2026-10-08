@@ -828,6 +828,46 @@ func raise(_ request: [String: Any]) throws -> [String: Any] {
 	return ["raised": raised]
 }
 
+func axValue(_ type: AXValueType, _ value: UnsafeRawPointer) -> AXValue? {
+	AXValueCreate(type, value)
+}
+
+// Moves and resizes one window through AX. Position is written twice around the size because a
+// window that grows past the edge of its display is clamped back, and the second write corrects it.
+func setBounds(_ request: [String: Any]) throws -> [String: Any] {
+	let pid = try pid(request)
+	let current = try frame(request)
+	guard let raw = request["bounds"] as? [String: Any] else {
+		throw Failure("missing bounds")
+	}
+	var origin = CGPoint(x: try number(raw, "x"), y: try number(raw, "y"))
+	var extent = CGSize(width: try number(raw, "width"), height: try number(raw, "height"))
+	guard extent.width >= 1, extent.height >= 1 else {
+		throw Failure("width and height must be at least 1")
+	}
+	guard NSRunningApplication(processIdentifier: pid) != nil else {
+		throw Failure("process \(pid) is not running")
+	}
+	guard let window = matchWindow(AXUIElementCreateApplication(pid), id: windowId(request), frame: current, seconds: 1),
+		let position = axValue(.cgPoint, &origin), let size = axValue(.cgSize, &extent) else {
+		throw Failure("the window could not be found")
+	}
+	if (attribute(window, kAXMinimizedAttribute) as? Bool) == true {
+		AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+	}
+	let moved = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, position)
+	let resized = AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, size)
+	AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, position)
+	guard moved == .success || resized == .success else {
+		if (attribute(window, "AXFullScreen") as? Bool) == true {
+			throw Failure("this window is full screen, so it cannot be moved or resized. Leave full screen first")
+		}
+		throw Failure("the app refused to move or resize this window (AX error \(moved.rawValue))")
+	}
+	guard let actual = windowFrame(window) else { return [:] }
+	return ["frame": ["x": actual.minX, "y": actual.minY, "width": actual.width, "height": actual.height]]
+}
+
 func frontmostWindow() -> [String: Any] {
 	guard let front = DispatchQueue.main.sync(execute: { NSWorkspace.shared.frontmostApplication }) else {
 		return ["window": NSNull()]
@@ -1174,6 +1214,8 @@ func handle(_ line: String) {
 		}
 	case "raise":
 		workQueue.async { respond(id) { try raise(request) } }
+	case "set_bounds":
+		workQueue.async { respond(id) { try setBounds(request) } }
 	case "find":
 		workQueue.async { respond(id) { try find(request) } }
 	case "at":
