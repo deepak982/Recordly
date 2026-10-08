@@ -892,8 +892,10 @@ export function buildRecordlyMcpServer(
 		{
 			description:
 				"Wait until a file matching a path pattern has finished downloading, then return it. " +
-				"A part-written file never matches, and nor does a file that was already there. Use " +
-				"it when a demo downloads something you then open with open_file.",
+				"A part-written file never matches, and nor does a file that was already there — so if " +
+				"the download may have finished before you called, pass since_ms (epoch ms, e.g. the " +
+				"moment you clicked Download) and anything newer than that counts. Use it when a demo " +
+				"downloads something you then open with open_file.",
 			inputSchema: z.object({
 				glob: z
 					.string()
@@ -908,10 +910,20 @@ export function buildRecordlyMcpServer(
 					.max(300_000)
 					.optional()
 					.describe("Defaults to 60000"),
+				since_ms: z
+					.number()
+					.int()
+					.min(0)
+					.optional()
+					.describe(
+						"Epoch ms; a match modified at or after this counts even if it already existed",
+					),
 			}),
 		},
-		async ({ glob, timeout_ms }) =>
-			textResult(await files.waitForDownload({ glob, timeoutMs: timeout_ms })),
+		async ({ glob, timeout_ms, since_ms }) =>
+			textResult(
+				await files.waitForDownload({ glob, timeoutMs: timeout_ms, sinceMs: since_ms }),
+			),
 	);
 
 	server.registerTool(
@@ -1193,7 +1205,10 @@ export function buildRecordlyMcpServer(
 			description:
 				"Open a file in its usual app (or withApp), wait for its window and, with " +
 				"thenSelectSource, select it as the capture source — the one call for 'open the file " +
-				"that was just downloaded and record it'. Refused while recording.",
+				"that was just downloaded and record it'. While a whole screen is recorded this works " +
+				"mid-take and picks the window to drive, so a download and the file opening stay in one " +
+				"shot. While a single window is recorded it is refused: switching the captured source " +
+				"would end the take.",
 			inputSchema: z.object({
 				path: z.string().min(1).describe("Absolute path to the file"),
 				with_app: z
@@ -1209,10 +1224,14 @@ export function buildRecordlyMcpServer(
 		},
 		async ({ path, with_app, then_select_source }) => {
 			if (!isControlEnabled()) throw new Error(CONTROL_OFF);
-			if (remote.getStatus().state !== "idle") {
+			const { state, selectedSource } = remote.getStatus();
+			const recordsScreen =
+				linuxControl || selectedSource?.id?.startsWith("screen:") === true;
+			if (state !== "idle" && !recordsScreen) {
 				throw new Error(
-					"Recordly is recording, and opening a file now would switch away from the window " +
-						"being captured. Open it before start_recording, or stop first.",
+					"A single window is being recorded, so opening a file now would switch away from " +
+						"it and end the take. Record the whole screen instead, or open the file before " +
+						"start_recording.",
 				);
 			}
 			return textResult(

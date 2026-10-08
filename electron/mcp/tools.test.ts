@@ -355,15 +355,23 @@ describe("buildRecordlyMcpServer", () => {
 		expect(window.remote.selectSource).toHaveBeenCalledWith({ id: "window:77:0" });
 	});
 
-	it("refuses open_file while recording, as its description promises", async () => {
+	it("opens a file mid-take while a screen records, but not while a window does", async () => {
 		const recording = setup("recording");
 		const blocked = await recording.call("tools/call", {
 			name: "open_file",
 			arguments: { path: "/Users/me/Downloads/book.xlsx", then_select_source: true },
 		});
 		expect(blocked.result.isError).toBe(true);
-		expect(blocked.result.content[0].text).toContain("switch away from the window");
+		expect(blocked.result.content[0].text).toContain("end the take");
 		expect(recording.files.openFile).not.toHaveBeenCalled();
+
+		const onScreen = setup("recording", { sourceId: "screen:1:0" });
+		const midTake = await onScreen.call("tools/call", {
+			name: "open_file",
+			arguments: { path: "/Users/me/Downloads/book.xlsx", then_select_source: true },
+		});
+		expect(midTake.result.isError).toBeFalsy();
+		expect(onScreen.files.openFile).toHaveBeenCalled();
 
 		const idle = setup("idle");
 		const allowed = await idle.call("tools/call", {

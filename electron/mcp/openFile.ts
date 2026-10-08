@@ -86,7 +86,7 @@ export function createOpenFile(overrides: Partial<OpenFileDeps> = {}) {
 			return { path: target, sourceId: source?.id, source };
 		},
 
-		async waitForDownload(args: { glob: string; timeoutMs?: number }) {
+		async waitForDownload(args: { glob: string; timeoutMs?: number; sinceMs?: number }) {
 			const { dir, matches } = splitGlob(args.glob);
 			const timeout = Math.min(
 				Math.max(args.timeoutMs ?? DOWNLOAD_DEFAULT_TIMEOUT_MS, 1_000),
@@ -104,8 +104,18 @@ export function createOpenFile(overrides: Partial<OpenFileDeps> = {}) {
 				}
 				return found;
 			};
-			// Files already there (or unchanged) when the call began are not the download.
+			// A download that finished before the call is still the one asked for, so sinceMs
+			// counts anything modified after that moment as new.
+			if (args.sinceMs !== undefined && !Number.isFinite(args.sinceMs)) {
+				throw new Error("sinceMs must be a number of milliseconds since the epoch.");
+			}
+			const since = args.sinceMs;
 			const before = await scan();
+			if (since !== undefined) {
+				for (const [name, stat] of before) {
+					if (stat.mtimeMs >= since) before.delete(name);
+				}
+			}
 			const previous = new Map<string, number>();
 			const deadline = deps.now() + timeout;
 			for (;;) {

@@ -121,6 +121,33 @@ describe("waitForDownload", () => {
 		expect(path.basename(result.path)).toBe("new.xlsx");
 	});
 
+	it("finds a download that finished before the call when sinceMs is given", async () => {
+		const stale = path.join(dir, "old.xlsx");
+		const fresh = path.join(dir, "report.xlsx");
+		await fs.writeFile(stale, "old");
+		await fs.utimes(stale, new Date(1_000), new Date(1_000));
+		await fs.writeFile(fresh, "already finished");
+		const clicked = (await fs.stat(fresh)).mtimeMs;
+
+		const tools = createOpenFile(clock());
+		await expect(
+			tools.waitForDownload({ glob: path.join(dir, "*.xlsx"), timeoutMs: 2_000 }),
+		).rejects.toThrow(/No finished download/);
+
+		const found = await tools.waitForDownload({
+			glob: path.join(dir, "*.xlsx"),
+			sinceMs: clicked,
+		});
+		expect(path.basename(found.path)).toBe("report.xlsx");
+
+		await expect(
+			tools.waitForDownload({
+				glob: path.join(dir, "*.xlsx"),
+				sinceMs: Number.NaN,
+			}),
+		).rejects.toThrow(/sinceMs must be a number/);
+	});
+
 	it("times out with a plain message and caps the timeout", async () => {
 		const c = clock();
 		const tools = createOpenFile(c);
