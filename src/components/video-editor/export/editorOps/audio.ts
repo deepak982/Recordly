@@ -130,7 +130,11 @@ export const audioOps: EditorOpMap = {
 			}
 		}
 
-		const fileMs = await probeAudioDurationMs(path);
+		const supplied = args.fileDurationMs;
+		const fileMs =
+			typeof supplied === "number" && Number.isFinite(supplied) && supplied > 0
+				? supplied
+				: await probeAudioDurationMs(path);
 		if (!Number.isFinite(fileMs) || fileMs <= 0) {
 			throw new Error(`${path} has no playable audio.`);
 		}

@@ -1066,12 +1066,17 @@ export function buildRecordlyMcpServer(
 			}),
 		},
 		async ({ op, ...rest }, ctx) => {
+			const args: Record<string, unknown> = { ...rest };
 			if (op === "add" && typeof rest.path === "string") {
-				const { approveUserPath } = await import("../ipc/utils");
+				const [{ approveUserPath }, { probeAudioFile }] = await Promise.all([
+					import("../ipc/utils"),
+					import("./audioProbe"),
+				]);
 				approveUserPath(rest.path);
+				args.fileDurationMs = (await probeAudioFile(rest.path)).durationMs;
 			}
 			return textResult(
-				await editor.requestEditor(`audio.${op}`, rest, { signal: ctx.mcpReq.signal }),
+				await editor.requestEditor(`audio.${op}`, args, { signal: ctx.mcpReq.signal }),
 			);
 		},
 	);
