@@ -718,6 +718,37 @@ describe("display geometry", () => {
 		display_id: displayId,
 	});
 
+	it("leaves a window's own rect alone, even though it belongs to a display", async () => {
+		const { remote } = setup({
+			listSources: async () => [
+				{
+					id: "window:330:0",
+					name: "Code",
+					sourceType: "window",
+					appName: "Code",
+					display_id: "1",
+					x: 0,
+					y: 30,
+					width: 1440,
+					height: 800,
+				} as never,
+			],
+			getDisplays: () => [display(1)],
+		});
+		await expect(remote.listSources()).resolves.toEqual([
+			{
+				id: "window:330:0",
+				name: "Code",
+				type: "window",
+				appName: "Code",
+				x: 0,
+				y: 30,
+				width: 1440,
+				height: 800,
+			},
+		]);
+	});
+
 	it("gives each screen bounds, scale, pixel size and primary", async () => {
 		const { remote } = setup({
 			listSources: async () => [screenSource(1, "1"), screenSource(2, "2")],

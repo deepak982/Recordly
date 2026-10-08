@@ -192,6 +192,9 @@ const WINDOW_FIELDS = [
 
 function displayOf(source: RawSource, displays: DisplayInfo[]) {
 	if (source.display_id === undefined) return undefined;
+	const screen =
+		(source.sourceType ?? (source.id.startsWith("window:") ? "window" : "screen")) === "screen";
+	if (!screen) return undefined;
 	return displays.find((display) => String(display.id) === String(source.display_id));
 }
 
