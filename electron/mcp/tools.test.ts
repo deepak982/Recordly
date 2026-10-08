@@ -4,10 +4,13 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("./remoteControl", () => ({ MAX_COUNTDOWN_SECONDS: 10 }));
 
 import type { AgentControl } from "./agentControl";
+import type { OpenFileTools } from "./openFile";
 import type { RemoteControl } from "./remoteControl";
+import type { RemoteEditor } from "./remoteEditor";
 import type { RemoteExport } from "./remoteExport";
+import type { RemoteRecordings } from "./remoteRecordings";
 import type { RemoteReview } from "./reviewRecording";
-import { buildRecordlyMcpServer } from "./tools";
+import { buildRecordlyMcpServer, type CaptureControls } from "./tools";
 
 function setup(
 	state = "idle",
@@ -18,7 +21,11 @@ function setup(
 	}: { controlEnabled?: boolean; platform?: NodeJS.Platform; wayland?: boolean } = {},
 ) {
 	const remote = {
-		getStatus: () => ({ state, lastRecordingPath: "/rec/recording-1.mp4" }),
+		getStatus: () => ({
+			state,
+			lastRecordingPath: "/rec/recording-1.mp4",
+			selectedSource: { id: "window:421:0", name: "Numbers" },
+		}),
 		selectSource: vi.fn(async ({ id }: { id?: string }) => ({ id, type: "screen" })),
 		startRecording: vi.fn(async () => {
 			throw new Error("No capture source is selected.");
@@ -45,6 +52,12 @@ function setup(
 		})),
 		findElements: vi.fn(async () => ({ elements: [], truncated: false })),
 		chooseWindow: vi.fn(async (id: string) => ({ id, type: "window", control: true })),
+		setWindowBounds: vi.fn(async (args: { width: number; height: number }) => ({
+			windowId: 421,
+			frame: { x: 0, y: 0, width: args.width, height: args.height },
+			adjusted: false,
+		})),
+		undoLastInput: vi.fn(async () => ({ sent: "Cmd+Z", app: "Numbers", note: "best effort" })),
 		setInputPolicy: vi.fn((policy: unknown) => policy),
 	} as unknown as AgentControl & Record<string, ReturnType<typeof vi.fn>>;
 	const review = {
@@ -57,6 +70,49 @@ function setup(
 			},
 		})),
 	} as unknown as RemoteReview & Record<string, ReturnType<typeof vi.fn>>;
+	const editor = {
+		requestEditor: vi.fn(async () => ({})),
+		getState: vi.fn(async () => ({
+			videoPath: "/rec/recording-1.mp4",
+			durationMs: 52_000,
+			sourceDurationMs: 76_000,
+			clips: [],
+			zooms: [],
+			annotations: [],
+			audio: [],
+			captions: [],
+		})),
+		getFrame: vi.fn(async ({ atMs }: { atMs: number }) => ({
+			dataUrl: "data:image/png;base64,aGk=",
+			atMs,
+			source: "edited" as const,
+			sourceMs: atMs + 1_000,
+		})),
+	} as unknown as RemoteEditor & Record<string, ReturnType<typeof vi.fn>>;
+	const recordings = {
+		recoverRecording: vi.fn(async (path: string) => ({ path, telemetrySaved: false })),
+		listRecordings: vi.fn(async () => ({ recordings: [] })),
+		deleteRecording: vi.fn(async (path: string) => ({ path, removed: true })),
+		restoreRecording: vi.fn(async (path: string) => ({ path, removed: false })),
+	} as unknown as RemoteRecordings & Record<string, ReturnType<typeof vi.fn>>;
+	const files = {
+		openFile: vi.fn(async ({ path }: { path: string }) => ({ path })),
+		waitForDownload: vi.fn(async ({ glob }: { glob: string }) => ({
+			path: glob.replace("*", "book"),
+			sizeBytes: 12,
+		})),
+	} as unknown as OpenFileTools & Record<string, ReturnType<typeof vi.fn>>;
+	const capture = {
+		setOverlay: vi.fn(async () => ({ windowOpen: true, hidden: false })),
+		waitUntilQuiet: vi.fn(async () => ({ quiet: true, waitedMs: 1_200 })),
+		setDoNotDisturb: vi.fn(async (enabled: boolean) => ({
+			ok: true,
+			enabled,
+			message: "Done.",
+		})),
+		setHideCursor: vi.fn(),
+		getHideCursor: vi.fn(() => false),
+	} as unknown as CaptureControls & Record<string, ReturnType<typeof vi.fn>>;
 	const handler = createMcpHandler(() =>
 		buildRecordlyMcpServer(remote, remoteExport, "1.0.0", {
 			agent,
@@ -64,6 +120,10 @@ function setup(
 			platform,
 			support: wayland ? { supported: false, reason: "Needs X11." } : { supported: true },
 			review,
+			editor,
+			recordings,
+			files,
+			capture,
 		}),
 	);
 
@@ -89,7 +149,7 @@ function setup(
 		return { result: messages.at(-1).result, messages };
 	}
 
-	return { remote, remoteExport, agent, review, call };
+	return { remote, remoteExport, agent, review, editor, recordings, files, capture, call };
 }
 
 const PROTOCOL_INSTRUCTIONS = [
@@ -146,28 +206,42 @@ describe("buildRecordlyMcpServer", () => {
 		const { call } = setup();
 		const { result } = await call("tools/list");
 		expect(result.tools.map((tool: { name: string }) => tool.name).sort()).toEqual([
+			"arm_recording",
 			"cancel_recording",
 			"click",
+			"delete_recording",
 			"drag",
 			"export_video",
 			"find_elements",
+			"get_editor_state",
+			"get_frame",
 			"get_status",
+			"list_recordings",
 			"list_sources",
 			"move_pointer",
+			"open_file",
 			"open_url",
 			"pause_recording",
 			"perform",
 			"press_key",
+			"recover_recording",
+			"restore_recording",
 			"resume_recording",
 			"review_recording",
 			"screenshot",
 			"scroll",
 			"select_source",
+			"set_cursor",
+			"set_do_not_disturb",
 			"set_input_policy",
+			"set_overlay",
+			"set_window_bounds",
 			"start_recording",
 			"stop_recording",
 			"type_text",
+			"undo_last_input",
 			"wait_for",
+			"wait_for_download",
 		]);
 	});
 
@@ -182,6 +256,90 @@ describe("buildRecordlyMcpServer", () => {
 		});
 		expect(JSON.parse(result.content[1].text)).toMatchObject({ finalDurationMs: 52_000 });
 		expect(review.reviewRecording).toHaveBeenCalledWith({ signal: expect.anything() });
+	});
+
+	it("returns one frame as an image, with the source time it came from", async () => {
+		const { call, editor } = setup();
+		const { result } = await call("tools/call", {
+			name: "get_frame",
+			arguments: { atMs: 48_000 },
+		});
+		expect(result.isError).toBeFalsy();
+		expect(result.content[0]).toMatchObject({
+			type: "image",
+			mimeType: "image/png",
+			data: "aGk=",
+		});
+		expect(JSON.parse(result.content[1].text)).toMatchObject({
+			atMs: 48_000,
+			source: "edited",
+			sourceMs: 49_000,
+		});
+		expect(editor.getFrame).toHaveBeenCalledWith(
+			{ atMs: 48_000 },
+			{ signal: expect.anything() },
+		);
+	});
+
+	it("reports what the editor is about to export", async () => {
+		const { call } = setup();
+		const { result } = await call("tools/call", { name: "get_editor_state", arguments: {} });
+		expect(result.isError).toBeFalsy();
+		expect(JSON.parse(result.content[0].text)).toMatchObject({
+			videoPath: "/rec/recording-1.mp4",
+			durationMs: 52_000,
+			sourceDurationMs: 76_000,
+		});
+	});
+
+	it("refuses to move the window being recorded, but moves another one", async () => {
+		const recording = setup("recording");
+		const blocked = await recording.call("tools/call", {
+			name: "set_window_bounds",
+			arguments: { x: 0, y: 0, width: 1600, height: 1000 },
+		});
+		expect(blocked.result.isError).toBe(true);
+		expect(blocked.result.content[0].text).toContain("would wreck the framing");
+		expect(recording.agent.setWindowBounds).not.toHaveBeenCalled();
+
+		const sameWindow = await recording.call("tools/call", {
+			name: "set_window_bounds",
+			arguments: { source: "421", x: 0, y: 0, width: 1600, height: 1000 },
+		});
+		expect(sameWindow.result.isError).toBe(true);
+
+		const other = await recording.call("tools/call", {
+			name: "set_window_bounds",
+			arguments: { source: "window:77:0", x: 0, y: 0, width: 1600, height: 1000 },
+		});
+		expect(other.result.isError).toBeFalsy();
+
+		const idle = setup("idle");
+		const allowed = await idle.call("tools/call", {
+			name: "set_window_bounds",
+			arguments: { x: 0, y: 0, width: 1600, height: 1000 },
+		});
+		expect(allowed.result.isError).toBeFalsy();
+		expect(idle.agent.setWindowBounds).toHaveBeenCalled();
+	});
+
+	it("refuses open_file while recording, as its description promises", async () => {
+		const recording = setup("recording");
+		const blocked = await recording.call("tools/call", {
+			name: "open_file",
+			arguments: { path: "/Users/me/Downloads/book.xlsx", then_select_source: true },
+		});
+		expect(blocked.result.isError).toBe(true);
+		expect(blocked.result.content[0].text).toContain("switch away from the window");
+		expect(recording.files.openFile).not.toHaveBeenCalled();
+
+		const idle = setup("idle");
+		const allowed = await idle.call("tools/call", {
+			name: "open_file",
+			arguments: { path: "/Users/me/Downloads/book.xlsx" },
+		});
+		expect(allowed.result.isError).toBeFalsy();
+		expect(idle.files.openFile).toHaveBeenCalled();
 	});
 
 	it("returns controller refusals as tool errors the agent can read", async () => {
@@ -203,7 +361,7 @@ describe("buildRecordlyMcpServer", () => {
 		expect(remote.startRecording).not.toHaveBeenCalled();
 		const scenes = ["Open the project list"];
 		await call("tools/call", { name: "start_recording", arguments: { scenes } });
-		expect(remote.startRecording).toHaveBeenCalledWith({ scenes });
+		expect(remote.startRecording).toHaveBeenCalledWith({ scenes, hideCursor: false });
 		for (const bad of [[], Array.from({ length: 13 }, () => "scene"), [" "]]) {
 			const { result: refused } = await call("tools/call", {
 				name: "start_recording",
@@ -218,7 +376,7 @@ describe("buildRecordlyMcpServer", () => {
 		const { call, remote } = setup("idle", { controlEnabled: false });
 		const { result } = await call("tools/call", { name: "start_recording", arguments: {} });
 		expect(result.content[0].text).toContain("No capture source is selected.");
-		expect(remote.startRecording).toHaveBeenCalledWith({});
+		expect(remote.startRecording).toHaveBeenCalledWith({ hideCursor: false });
 	});
 
 	it("rejects an out-of-range countdown before reaching the controller", async () => {
@@ -637,16 +795,27 @@ describe("buildRecordlyMcpServer", () => {
 		const { call } = setup("idle", { platform: "linux", wayland: true });
 		const { result } = await call("tools/list");
 		expect(result.tools.map((tool: { name: string }) => tool.name).sort()).toEqual([
+			"arm_recording",
 			"cancel_recording",
+			"delete_recording",
 			"export_video",
+			"get_editor_state",
+			"get_frame",
 			"get_status",
+			"list_recordings",
 			"list_sources",
 			"pause_recording",
+			"recover_recording",
+			"restore_recording",
 			"resume_recording",
 			"review_recording",
 			"select_source",
+			"set_cursor",
+			"set_do_not_disturb",
+			"set_overlay",
 			"start_recording",
 			"stop_recording",
+			"wait_for_download",
 		]);
 		const descriptions = JSON.stringify(result.tools);
 		expect(descriptions).not.toContain("Raises the window");
@@ -730,7 +899,7 @@ describe("buildRecordlyMcpServer", () => {
 		expect(bad.result.isError).toBe(true);
 		const list = await call("tools/list", {});
 		const perform = list.result.tools.find((tool: { name: string }) => tool.name === "perform");
-		expect(perform.description).toContain("wait {ms} IS the hold");
+		expect(perform.description).toContain("hold {ms} (same as wait {ms}) is kept");
 	});
 
 	it("chooses the control window on Linux without changing what is recorded", async () => {

@@ -33,7 +33,7 @@ vi.mock("../appPaths", async () => {
 	};
 });
 vi.mock("electron", () => ({
-	app: { getVersion: () => "1.0.0" },
+	app: { getVersion: () => "1.0.0", on: vi.fn() },
 	clipboard: { writeText: vi.fn() },
 	ipcMain: {
 		handle: (channel: string, handler: (...args: unknown[]) => unknown) =>
@@ -57,6 +57,7 @@ vi.mock("./server", () => ({
 vi.mock("./agentControl", () => ({ createAgentControl: () => ({}) }));
 vi.mock("./agentInput", () => ({ agentInput: { stop: vi.fn() } }));
 vi.mock("./agentPlatform", () => ({ agentPlatform: { support: () => mocks.support } }));
+vi.mock("./remoteEditor", () => ({ createRemoteEditor: () => ({}) }));
 vi.mock("./remoteExport", () => ({ createRemoteExport: () => ({}) }));
 vi.mock("./reviewRecording", () => ({ createRemoteReview: () => ({}) }));
 vi.mock("./tools", () => ({ buildRecordlyMcpServer: vi.fn() }));

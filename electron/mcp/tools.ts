@@ -1,10 +1,15 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
+import { HUD_OVERLAY_CORNERS } from "../hudOverlayBounds";
+import type { HudOverlayOptions, HudOverlayState } from "../windows";
 import type { AgentControl, AgentStep, PerformOptions } from "./agentControl";
 import type { AgentSupport } from "./agentPlatform";
 import { AGENT_KEY_ALIASES, AGENT_KEY_NAMES, AGENT_MODIFIER_ALIASES } from "./agentProtocol";
+import type { OpenFileTools } from "./openFile";
 import { MAX_COUNTDOWN_SECONDS, type RemoteControl } from "./remoteControl";
+import type { RemoteEditor } from "./remoteEditor";
 import type { RemoteExport } from "./remoteExport";
+import type { RemoteRecordings } from "./remoteRecordings";
 import type { RemoteReview } from "./reviewRecording";
 
 const CONTROL_SWITCH = "'Let agents use the mouse and keyboard' in Recordly Settings → Advanced";
@@ -317,6 +322,18 @@ const stepSchema = z.discriminatedUnion("action", [
 		ms: z.number().int().min(0).max(30_000).describe("Pause in ms (at most 30000)"),
 	}),
 	z.object({ action: z.literal("waitFor"), ...waitForArgs }).refine(waitForValid, WAIT_FOR_RULE),
+	z.object({
+		action: z.literal("hold"),
+		ms: z.number().int().min(0).max(30_000).describe("Hold the screen in ms (at most 30000)"),
+	}),
+	z.object({
+		action: z.literal("expect"),
+		target: target("The element that must be on screen").unwrap(),
+		visible: z
+			.boolean()
+			.optional()
+			.describe("Defaults to true; false fails when the target IS on screen"),
+	}),
 ]);
 
 type DemoArgs = { goal: string; url?: string; app?: string; output_path?: string };
@@ -481,6 +498,20 @@ function demoPrompt(
 	].join("\n");
 }
 
+export type CaptureControls = {
+	setOverlay: (options: HudOverlayOptions) => Promise<HudOverlayState>;
+	waitUntilQuiet: (options: {
+		quietMs?: number;
+		timeoutMs?: number;
+		signal?: AbortSignal;
+	}) => Promise<{ quiet: boolean; waitedMs: number; message?: string }>;
+	setDoNotDisturb: (
+		enabled: boolean,
+	) => Promise<{ ok: boolean; enabled?: boolean; message: string }>;
+	setHideCursor: (hidden: boolean) => void;
+	getHideCursor: () => boolean;
+};
+
 export function buildRecordlyMcpServer(
 	remote: RemoteControl,
 	remoteExport: RemoteExport,
@@ -491,12 +522,20 @@ export function buildRecordlyMcpServer(
 		platform = process.platform,
 		support,
 		review,
+		editor,
+		recordings,
+		files,
+		capture,
 	}: {
 		agent: AgentControl;
 		isControlEnabled: () => boolean;
 		platform?: NodeJS.Platform;
 		support: AgentSupport;
 		review: RemoteReview;
+		editor: RemoteEditor;
+		recordings: RemoteRecordings;
+		files: OpenFileTools;
+		capture: CaptureControls;
 	},
 ) {
 	const mac = platform === "darwin";
@@ -650,7 +689,9 @@ export function buildRecordlyMcpServer(
 						"then start_recording with one short line per scene.",
 				);
 			}
-			return textResult(await remote.startRecording(args));
+			return textResult(
+				await remote.startRecording({ ...args, hideCursor: capture.getHideCursor() }),
+			);
 		},
 	);
 
@@ -721,6 +762,22 @@ export function buildRecordlyMcpServer(
 					.boolean()
 					.optional()
 					.describe("Replace an existing file at outputPath"),
+				videoPath: z
+					.string()
+					.min(1)
+					.optional()
+					.describe(
+						"Export this recording instead of the last one; the editor must have it " +
+							"loaded, so call recover_recording first",
+					),
+				aspect: z
+					.string()
+					.optional()
+					.describe('Letterbox to this ratio, e.g. "16:9"; mp4 only, never stretched'),
+				padTo: z
+					.string()
+					.optional()
+					.describe('Letterbox to exactly this size, e.g. "2880x1600"; mp4 only'),
 			}),
 		},
 		async (args, ctx) => {
@@ -743,7 +800,7 @@ export function buildRecordlyMcpServer(
 								.catch(() => undefined);
 			return textResult(
 				await remoteExport.exportVideo(
-					{ ...args, videoPath: lastRecordingPath },
+					{ ...args, videoPath: args.videoPath ?? lastRecordingPath },
 					{ signal: ctx.mcpReq.signal, onProgress },
 				),
 			);
@@ -773,6 +830,279 @@ export function buildRecordlyMcpServer(
 		},
 	);
 
+	server.registerTool(
+		"recover_recording",
+		{
+			description:
+				"Adopt a recording file Recordly lost track of, so review_recording and export_video " +
+				"can see it. Use it when a take was interrupted: the file is on disk but no tool can " +
+				"find it. list_recordings shows the candidates. It loads the file as the current " +
+				"recording; the editor window must be open for export_video to follow.",
+			inputSchema: z.object({
+				path: z.string().min(1).describe("Absolute path to the video file"),
+			}),
+		},
+		async ({ path }) => textResult(await recordings.recoverRecording(path)),
+	);
+
+	server.registerTool(
+		"list_recordings",
+		{
+			description:
+				"List the recordings in Recordly's library, newest first, with path, size and date. " +
+				"Use it to find a take that was interrupted, then recover_recording.",
+			inputSchema: z.object({}),
+		},
+		async () => textResult(await recordings.listRecordings()),
+	);
+
+	server.registerTool(
+		"delete_recording",
+		{
+			description:
+				"Move a recording to Recordly's own trash, which can be undone with " +
+				"restore_recording. Use this instead of deleting the file yourself. It only accepts a " +
+				"recording inside the library folder.",
+			inputSchema: z.object({
+				path: z.string().min(1).describe("Absolute path to the recording"),
+			}),
+		},
+		async ({ path }) => textResult(await recordings.deleteRecording(path)),
+	);
+
+	server.registerTool(
+		"restore_recording",
+		{
+			description: "Put a recording deleted with delete_recording back in the library.",
+			inputSchema: z.object({
+				path: z.string().min(1).describe("Absolute path to the recording"),
+			}),
+		},
+		async ({ path }) => textResult(await recordings.restoreRecording(path)),
+	);
+
+	server.registerTool(
+		"wait_for_download",
+		{
+			description:
+				"Wait until a file matching a path pattern has finished downloading, then return it. " +
+				"A part-written file never matches, and nor does a file that was already there. Use " +
+				"it when a demo downloads something you then open with open_file.",
+			inputSchema: z.object({
+				glob: z
+					.string()
+					.min(1)
+					.describe(
+						'Absolute path with * or ? in the file name, e.g. "/Users/me/Downloads/*.xlsx"',
+					),
+				timeout_ms: z
+					.number()
+					.int()
+					.min(1_000)
+					.max(300_000)
+					.optional()
+					.describe("Defaults to 60000"),
+			}),
+		},
+		async ({ glob, timeout_ms }) =>
+			textResult(await files.waitForDownload({ glob, timeoutMs: timeout_ms })),
+	);
+
+	server.registerTool(
+		"set_overlay",
+		{
+			description:
+				"Move, hide or unstick Recordly's floating control pill, which sits over the recorded " +
+				"window and is left out of the recording and of screenshot — so a control underneath " +
+				"it is unreachable and you cannot see why. It already lets clicks through while you " +
+				"act; use this when the pill still blocks something. hidden: true removes the " +
+				"on-screen Stop and Pause, leaving only the tray menu's Stop. Everything resets when " +
+				"the recording ends, and nothing applies until the pill exists, so call it after " +
+				"start_recording.",
+			inputSchema: z.object({
+				position: z
+					.enum([...HUD_OVERLAY_CORNERS, "default"])
+					.optional()
+					.describe("Which corner to park it in"),
+				hidden: z.boolean().optional().describe("Hide it completely"),
+				click_through: z
+					.enum(["auto", "on", "off"])
+					.optional()
+					.describe(
+						"auto (default) lets clicks through while you act; on always does; off makes " +
+							"the pill take clicks again, so a control under it becomes unreachable " +
+							"without showing up in a screenshot — only use off if the user asks",
+					),
+			}),
+		},
+		async ({ position, hidden, click_through }) => {
+			const state = await capture.setOverlay({
+				position,
+				hidden,
+				clickThrough: click_through,
+			});
+			if (!state.windowOpen) {
+				throw new Error(
+					"There is no control pill yet, so nothing changed. Call this after start_recording.",
+				);
+			}
+			return textResult(state);
+		},
+	);
+
+	server.registerTool(
+		"set_do_not_disturb",
+		{
+			description:
+				"Silence notification banners for a take, and restore them afterwards. Best effort: " +
+				"no operating system offers a stable way to do this, so it reports what happened " +
+				"instead of failing, and on macOS it needs two Shortcuts named 'Recordly Do Not " +
+				"Disturb On' and 'Recordly Do Not Disturb Off'. If it says it could not, ask the user " +
+				"to turn it on themselves before you record.",
+			inputSchema: z.object({
+				enabled: z.boolean().describe("true to silence, false to restore"),
+			}),
+		},
+		async ({ enabled }) => textResult(await capture.setDoNotDisturb(enabled)),
+	);
+
+	server.registerTool(
+		"set_cursor",
+		{
+			description:
+				"Leave the cursor out of the next recording, for scenes where the pointer is noise. " +
+				"It applies to the recording you start next, not the one running, and the user can " +
+				"turn the cursor back on in the editor.",
+			inputSchema: z.object({
+				hidden: z.boolean().describe("true to record without a cursor"),
+			}),
+		},
+		async ({ hidden }) => {
+			capture.setHideCursor(hidden);
+			return textResult({ hidden, note: "Applies to the next start_recording." });
+		},
+	);
+
+	server.registerTool(
+		"arm_recording",
+		{
+			description:
+				"Wait until the screen has been still for a moment, then start recording — so a " +
+				"notification, an animation or a late-loading page does not land in the first frames. " +
+				"Takes the same scenes as start_recording. If the screen never settles it starts " +
+				"nothing and says so, leaving you to fix what is moving.",
+			inputSchema: z.object({
+				wait_for_still_ms: z
+					.number()
+					.int()
+					.min(0)
+					.max(10_000)
+					.optional()
+					.describe("How long the screen must be still; defaults to 1000"),
+				timeout_ms: z
+					.number()
+					.int()
+					.min(1_000)
+					.max(120_000)
+					.optional()
+					.describe("Give up after this long; defaults to 30000"),
+				countdownSeconds: z
+					.number()
+					.int()
+					.min(0)
+					.max(MAX_COUNTDOWN_SECONDS)
+					.optional()
+					.describe("Countdown before capture starts; defaults to the user's setting"),
+				scenes: z
+					.array(z.string().trim().min(1).max(200))
+					.min(1)
+					.max(12)
+					.optional()
+					.describe(
+						"The scene list you rehearsed; required while the control switch is on",
+					),
+			}),
+		},
+		async ({ wait_for_still_ms, timeout_ms, ...start }, ctx) => {
+			if (isControlEnabled() && start.scenes === undefined) {
+				throw new Error(
+					"Pass scenes: the scene list you rehearsed. Rehearse the flow unrecorded first " +
+						"(perform with dryRun, then the steps for real), reset to the start state, " +
+						"then arm_recording with one short line per scene.",
+				);
+			}
+			const quiet = await capture.waitUntilQuiet({
+				quietMs: wait_for_still_ms,
+				timeoutMs: timeout_ms,
+				signal: ctx.mcpReq.signal,
+			});
+			if (!quiet.quiet) {
+				throw new Error(
+					`${quiet.message ?? "The screen did not settle."} Nothing was recorded.`,
+				);
+			}
+			return textResult({
+				...(await remote.startRecording({ ...start, hideCursor: capture.getHideCursor() })),
+				waitedMs: quiet.waitedMs,
+			});
+		},
+	);
+
+	server.registerTool(
+		"get_frame",
+		{
+			description:
+				"See one frame of the last recording, to check that a particular scene landed — " +
+				"review_recording only shows the frames before each cut, so it cannot answer 'what was on " +
+				"screen at 48 s'. atMs is a time in the edited timeline by default, mapped through the cuts " +
+				'and speed changes to the moment it came from; source: "raw" uses the untouched recording ' +
+				"instead. The frame is the recorded screen at that moment: it does not show zooms, " +
+				"annotations, captions or the background, so use it to check WHAT was on screen, not how " +
+				"the export will look. A time in a cut gap or past the end is refused.",
+			inputSchema: z.object({
+				atMs: z.number().min(0).describe("Time in milliseconds"),
+				source: z
+					.enum(["edited", "raw"])
+					.optional()
+					.describe(
+						'Defaults to edited (after cuts and speed); "raw" is the original recording',
+					),
+			}),
+		},
+		async (args, ctx) => {
+			const frame = await editor.getFrame(args, { signal: ctx.mcpReq.signal });
+			const parsed = /^data:([^;]+);base64,(.+)$/.exec(frame.dataUrl);
+			if (!parsed) throw new Error("The editor returned a frame Recordly could not read.");
+			const [, mimeType, data] = parsed;
+			return {
+				content: [
+					{ type: "image" as const, data, mimeType },
+					{
+						type: "text" as const,
+						text: JSON.stringify(
+							{ atMs: frame.atMs, source: frame.source, sourceMs: frame.sourceMs },
+							null,
+							2,
+						),
+					},
+				],
+			};
+		},
+	);
+
+	server.registerTool(
+		"get_editor_state",
+		{
+			description:
+				"List what the editor is about to export: the loaded recording, the raw and edited " +
+				"durations, and every clip, zoom, annotation, audio region and caption with its times. Use " +
+				"it before export_video to check an edit you made with trim, set_zoom or add_overlay " +
+				"landed, or to find the time range of a scene to pass to get_frame.",
+			inputSchema: z.object({}),
+		},
+		async (_args, ctx) => textResult(await editor.getState({ signal: ctx.mcpReq.signal })),
+	);
+
 	if (!control) return server;
 
 	server.registerTool(
@@ -790,6 +1120,102 @@ export function buildRecordlyMcpServer(
 		async ({ url }) => {
 			if (!isControlEnabled()) throw new Error(CONTROL_OFF);
 			return textResult(await agent.openUrl(url));
+		},
+	);
+
+	server.registerTool(
+		"set_window_bounds",
+		{
+			description:
+				"Move and resize a window, in screen coordinates as list_sources reports them. Use it " +
+				"to frame a demo before you record: put the window on the main display at a landscape " +
+				"size (at least 1.2 × as wide as tall, so automatic zooms work). It is also the fix " +
+				"for an app that opens off-screen or on another display. Pass source to aim at a " +
+				"window other than the selected one. The window manager may adjust the rectangle; the " +
+				"result says what it ended up as. Refused for the window being recorded once capture " +
+				"has started, because moving it mid-take wrecks the framing of the video.",
+			inputSchema: z.object({
+				source: z
+					.string()
+					.min(1)
+					.optional()
+					.describe("A list_sources window id; defaults to the selected window"),
+				x: z.number().describe("Screen x of the left edge"),
+				y: z.number().describe("Screen y of the top edge"),
+				width: z.number().min(1).describe("Width in points"),
+				height: z.number().min(1).describe("Height in points"),
+				raise: z.boolean().optional().describe("Also bring it to the front"),
+			}),
+		},
+		async (args) => {
+			if (!isControlEnabled()) throw new Error(CONTROL_OFF);
+			const { state, selectedSource } = remote.getStatus();
+			const recording = state === "recording" || state === "paused" || state === "countdown";
+			const windowId = args.source?.match(/\d+/)?.[0];
+			const aimsAtRecorded =
+				args.source === undefined ||
+				(windowId !== undefined && selectedSource?.id?.includes(windowId) === true);
+			if (recording && aimsAtRecorded) {
+				throw new Error(
+					"Recordly is recording this window, so moving or resizing it now would wreck the " +
+						"framing. Frame it before start_recording, or stop first.",
+				);
+			}
+			return textResult(await agent.setWindowBounds(args));
+		},
+	);
+
+	server.registerTool(
+		"undo_last_input",
+		{
+			description:
+				"Ask the focused app to undo, by sending its undo shortcut. Best effort and nothing " +
+				"more: it cannot take back a click, only ask the app to undo what the click did, and " +
+				"an app with nothing to undo ignores it. Use it right after a wrong step has changed " +
+				"something, then re-aim from a fresh screenshot.",
+			inputSchema: z.object({}),
+		},
+		async () => {
+			if (!isControlEnabled()) throw new Error(CONTROL_OFF);
+			return textResult(await agent.undoLastInput());
+		},
+	);
+
+	server.registerTool(
+		"open_file",
+		{
+			description:
+				"Open a file in its usual app (or withApp), wait for its window and, with " +
+				"thenSelectSource, select it as the capture source — the one call for 'open the file " +
+				"that was just downloaded and record it'. Refused while recording.",
+			inputSchema: z.object({
+				path: z.string().min(1).describe("Absolute path to the file"),
+				with_app: z
+					.string()
+					.min(1)
+					.optional()
+					.describe('Open it with this app instead, e.g. "Microsoft Excel"'),
+				then_select_source: z
+					.boolean()
+					.optional()
+					.describe("Select the window it opens as the capture source"),
+			}),
+		},
+		async ({ path, with_app, then_select_source }) => {
+			if (!isControlEnabled()) throw new Error(CONTROL_OFF);
+			if (remote.getStatus().state !== "idle") {
+				throw new Error(
+					"Recordly is recording, and opening a file now would switch away from the window " +
+						"being captured. Open it before start_recording, or stop first.",
+				);
+			}
+			return textResult(
+				await files.openFile({
+					path,
+					withApp: with_app,
+					thenSelectSource: then_select_source,
+				}),
+			);
 		},
 	);
 
@@ -990,6 +1416,8 @@ export function buildRecordlyMcpServer(
 				"onTakeover 'abort' (default) ends the perform at once. 'pause' stops acting, waits " +
 				"until the pointer has been still for autoResumeAfterMs (default 2000), then re-arms and " +
 				"carries on, re-running the interrupted step; the pause is logged as waiting and shortened. " +
+				"Because the whole step re-runs, a type interrupted halfway types the text again on top " +
+				"of what landed, so prefer 'abort' for scenes that type into fields. " +
 				"tolerancePx is how far the pointer may drift in one second before it counts as a " +
 				"takeover (default 8; macOS only). Esc always aborts. Settings last until changed.",
 			inputSchema: z.object({
@@ -1005,27 +1433,30 @@ export function buildRecordlyMcpServer(
 		"perform",
 		{
 			description:
-				"Run one rehearsed scene: steps executed back to back with exact timing (separate calls " +
-				"mean extra cuts). Each step takes the matching tool's own fields plus " +
-				"action: move, click, drag, scroll, type, key, wait {ms} or waitFor. A target {text, " +
-				"role?, index?} is found on screen when its step runs (waiting " +
-				"up to 5 s, scrolling it into view), so a scene may change page; prefer targets to " +
-				"coordinates. Leave out durationMs and waits: Recordly glides naturally and, after " +
-				"a click or Enter, waits for the screen to settle and holds the result. A wait " +
-				"or waitFor right after one replaces that hold. wait {ms} IS the hold, kept " +
-				"whole in the video, for longer reading; waitFor is shortened as waiting, for slow content; " +
-				"durationMs sets one move, click or drag's glide. dryRun acts on nothing: " +
-				"it probes up to and including the first step that can change the page and returns dryRun: " +
-				"[{index (1-based, as in 'Step n'), action, found, label?, candidates?, ambiguous?, " +
-				"matches?, note?}], the steps after it as found: null with note 'validated at run time'. " +
-				"found: false with candidates > 1 means ambiguous, not " +
-				"missing. dryRun and then: 'elements' also return page, a signature to compare between the " +
-				"rehearsal and the take; then: 'elements' adds the visible controls. Limits: 1–200 steps, " +
-				"waits up to 30000 ms, 10 min per call." +
-				" A failure says 'Step n (action)': the page has diverged, so " +
-				"cancel_recording and take the scene again. Returns " +
-				`{ performed, durationMs }. ${POINT_HELP} ${INPUT_NOTE} Errors, including 'the user took over' (it ends ` +
-				"the scene, not the recording), are explained in click's description.",
+				"Run one rehearsed scene: steps run back to back with exact timing (separate calls " +
+				"add cuts). Each step takes the matching tool's fields plus " +
+				"action: move, click, drag, scroll, type, key, wait/hold {ms}, expect or waitFor. A target {text, " +
+				"role?, index?} is found when its step runs (waiting up to 5 s, scrolling into " +
+				"view), so a scene may change page; prefer targets to coordinates. Leave out " +
+				"durationMs and waits: Recordly glides naturally and, after a click or Enter, lets " +
+				"the screen settle and holds the result. A wait or waitFor right after one " +
+				"replaces that hold. hold {ms} (same as wait {ms}) is kept whole in the video, for " +
+				"reading; waitFor is shortened, for slow content; durationMs sets one glide. " +
+				"expect {target} fails at once if missing. safeRegion refuses input outside it, " +
+				"not scrolling. " +
+				"dryRun acts on nothing: " +
+				"it probes to the first step that can change the page, inclusive, returning " +
+				"dryRun: [{index (1-based, as in 'Step n'), action, found, label?, candidates?, " +
+				"ambiguous?, matches?, note?}], later steps as found: null, note 'validated at run " +
+				"time'. found: false with " +
+				"candidates > 1 means ambiguous, not missing. dryRun and " +
+				"then: 'elements' also return page, a signature to compare between the rehearsal " +
+				"and the take; then: 'elements' adds the visible controls. Limits: 1–200 steps, waits up to " +
+				"30000 ms, 10 min a call." +
+				" A failure says 'Step n (action)': the page diverged, so cancel_recording and " +
+				`take the scene again. Returns { performed, durationMs }. ${POINT_HELP} ${INPUT_NOTE} ` +
+				"Errors, including 'the user took over' (it ends the scene, not the recording), " +
+				"are in click's description.",
 			inputSchema: z.object({
 				steps: z.array(stepSchema).min(1).max(200),
 				title: z
@@ -1049,6 +1480,17 @@ export function buildRecordlyMcpServer(
 					.literal("elements")
 					.optional()
 					.describe("Also return the visible controls after the last step"),
+				safeRegion: z
+					.object({
+						x: z.number(),
+						y: z.number(),
+						width: z.number().positive(),
+						height: z.number().positive(),
+					})
+					.optional()
+					.describe(
+						"Window-relative rectangle; a click, drag or move outside it is refused",
+					),
 			}),
 		},
 		async ({ steps, ...options }) =>

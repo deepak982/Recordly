@@ -1,14 +1,20 @@
 import { randomBytes } from "node:crypto";
 import { chmodSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { app, clipboard, ipcMain } from "electron";
+import { app, clipboard, ipcMain, screen } from "electron";
 import { USER_DATA_PATH } from "../appPaths";
 import { createAgentControl } from "./agentControl";
 import { agentInput } from "./agentInput";
 import { agentPlatform } from "./agentPlatform";
+import { waitUntilQuiet } from "./armRecording";
+import { restoreDoNotDisturb, setDoNotDisturb } from "./doNotDisturb";
+import { createOpenFile } from "./openFile";
 import type { RemoteControl } from "./remoteControl";
+import { createRemoteEditor } from "./remoteEditor";
 import { createRemoteExport } from "./remoteExport";
+import { createRemoteRecordings } from "./remoteRecordings";
 import { createRemoteReview } from "./reviewRecording";
+import { waitForStillWindow } from "./screenshot";
 import { createMcpHttpServer, MCP_PATH } from "./server";
 import { buildRecordlyMcpServer } from "./tools";
 
@@ -56,9 +62,42 @@ export function setupMcpServer({ isDev, remote }: { isDev: boolean; remote: Remo
 	let error: McpServerState["error"] = null;
 	let applying = Promise.resolve();
 	const remoteExport = createRemoteExport();
+	const editor = createRemoteEditor();
+	const recordings = createRemoteRecordings();
 	const agent = createAgentControl(remote);
 	const review = createRemoteReview({ remote });
 	const isControlEnabled = () => settings.enabled && settings.controlEnabled;
+	const files = createOpenFile({
+		selectFrontWindow: (appName?: string) =>
+			isControlEnabled()
+				? agent.selectFrontWindow(appName)
+				: Promise.reject(new Error("Mouse and keyboard control is off.")),
+	});
+	let hideCursor = false;
+	const capture = {
+		// windows.ts registers ipcMain handlers at module scope, so it loads on first use.
+		setOverlay: async (options: import("../windows").HudOverlayOptions) =>
+			(await import("../windows")).setHudOverlayOptions(options),
+		setDoNotDisturb,
+		setHideCursor: (hidden: boolean) => {
+			hideCursor = hidden;
+		},
+		getHideCursor: () => hideCursor,
+		waitUntilQuiet: (options: { quietMs?: number; timeoutMs?: number; signal?: AbortSignal }) =>
+			waitUntilQuiet(
+				screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).bounds,
+				options,
+				{
+					waitForStill: waitForStillWindow,
+					lastInputAt: agent.lastInputAt,
+					now: Date.now,
+					sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
+				},
+			),
+	};
+	app.on("will-quit", () => {
+		restoreDoNotDisturb().catch(() => undefined);
+	});
 	const server = createMcpHttpServer({
 		port,
 		getToken: () => settings.token,
@@ -69,6 +108,10 @@ export function setupMcpServer({ isDev, remote }: { isDev: boolean; remote: Remo
 				platform: process.platform,
 				support: agentPlatform.support(),
 				review,
+				editor,
+				recordings,
+				files,
+				capture,
 			}),
 	});
 
