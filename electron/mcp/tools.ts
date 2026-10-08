@@ -520,6 +520,7 @@ export type CaptureControls = {
 		enabled: boolean,
 	) => Promise<{ ok: boolean; enabled?: boolean; message: string }>;
 	setHideCursor: (hidden: boolean) => void;
+	rememberScenes: (titles: readonly string[] | undefined) => void;
 	getHideCursor: () => boolean;
 };
 
@@ -606,7 +607,11 @@ export function buildRecordlyMcpServer(
 				"Current recorder state (idle, starting, countdown, recording, paused, stopping, " +
 				"finalizing), the " +
 				"selected capture source, the path of the last recording, macOS permission status, and " +
-				"the state/progress of the last export.",
+				"the state/progress of the last export. drivenWindow says which window the mouse and " +
+				"keyboard act on, which is not always what is captured: role 'control' means a screen " +
+				"is recorded and this window was chosen with select_source, role 'recorded' means the " +
+				"captured source is itself that window, and null means a screen is recorded with no " +
+				"window chosen yet.",
 			annotations: { readOnlyHint: true },
 		},
 		async () => textResult({ ...remote.getStatus(), export: remoteExport.getStatus() }),
@@ -618,7 +623,11 @@ export function buildRecordlyMcpServer(
 			description: mac
 				? "List capturable screens and windows, including windows on other desktops. Windows carry " +
 					"appName, windowTitle, pid, onScreen and their x/y/width/height in screen points, so two " +
-					"windows of one app can be told apart. Use an id or name with select_source."
+					"windows of one app can be told apart; each screen carries its bounds, scale and " +
+					"resolution, so you can pick between monitors. Off-screen windows of 500x500 points " +
+					"or smaller are left out, because they are almost always system helper panels — one " +
+					"can still be chosen by id or name if you know it is there. Use an id or name with " +
+					"select_source."
 				: "List capturable screens and windows (id, name, type). Use an id or name with " +
 					"select_source. On Linux the first entry records the screen chosen by the system; " +
 					"needsUser: true means a person must pick it in the share dialog.",
@@ -706,6 +715,7 @@ export function buildRecordlyMcpServer(
 						"then start_recording with one short line per scene.",
 				);
 			}
+			capture.rememberScenes(args.scenes);
 			return textResult(
 				await remote.startRecording({ ...args, hideCursor: capture.getHideCursor() }),
 			);
@@ -960,7 +970,11 @@ export function buildRecordlyMcpServer(
 				"shadowIntensity, backgroundBlur, crop and webcam. op motion takes the movement: zoom " +
 				"durations and easings, cursor style, size, smoothing and click effects, and the " +
 				"camera and cursor springs — pass only the fields you want and the rest are left " +
-				"alone, and an unknown field is refused rather than ignored. **The look is not part of " +
+				"alone, and an unknown field is refused rather than ignored. Whatever " +
+				"get_editor_state reports for the look can be sent straight back: padding takes " +
+				"linked (equal sides up to 100 when linked, top and bottom up to 250 when not), crop " +
+				"is also accepted as cropRegion, and the webcam's sourcePath, visibleRanges and " +
+				"cornerRadius can be echoed but not changed. **The look is not part of " +
 				"the editor's history, so history undo will NOT revert this** — set the old values " +
 				"again to go back.",
 			inputSchema: z.object({
@@ -1051,10 +1065,15 @@ export function buildRecordlyMcpServer(
 				normalize: z.boolean().optional().describe("op source_track"),
 			}),
 		},
-		async ({ op, ...rest }, ctx) =>
-			textResult(
+		async ({ op, ...rest }, ctx) => {
+			if (op === "add" && typeof rest.path === "string") {
+				const { approveUserPath } = await import("../ipc/utils");
+				approveUserPath(rest.path);
+			}
+			return textResult(
 				await editor.requestEditor(`audio.${op}`, rest, { signal: ctx.mcpReq.signal }),
-			),
+			);
+		},
 	);
 
 	server.registerTool(
@@ -1364,6 +1383,7 @@ export function buildRecordlyMcpServer(
 					`${quiet.message ?? "The screen did not settle."} Nothing was recorded.`,
 				);
 			}
+			capture.rememberScenes(start.scenes);
 			return textResult({
 				...(await remote.startRecording({ ...start, hideCursor: capture.getHideCursor() })),
 				waitedMs: quiet.waitedMs,

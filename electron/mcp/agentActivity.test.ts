@@ -414,4 +414,61 @@ describe("camera targets", () => {
 			{ atMs: 900, x: 0, y: 0, width: 1, height: 1 },
 		]);
 	});
+
+	it("round-trips scene titles through the sidecar, including a failed scene", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-activity-"));
+		try {
+			const video = path.join(dir, "titled.mp4");
+			startRecording();
+			at(100);
+			const ok = beginScene("Open payroll");
+			at(500);
+			ok(false);
+			const bad = beginScene("Run it");
+			at(900);
+			bad(true);
+			stopRecording(1_000);
+			await persistAgentActivity(video);
+			expect((await readAgentActivity(video))?.scenes).toEqual([
+				{ startMs: 100, endMs: 500, failed: false, title: "Open payroll" },
+				{ startMs: 500, endMs: 900, failed: true, title: "Run it" },
+			]);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("drops scene titles that are empty, blank, not text or too long", () => {
+		const scene = (title: unknown) => ({ startMs: 0, endMs: 10, failed: false, title });
+		const titles = [
+			normalizeAgentActivityLog({
+				version: 1,
+				scenes: [scene(""), scene("   "), scene(null), scene({}), scene("x".repeat(201))],
+			})?.scenes.map((s) => s.title),
+			normalizeAgentActivityLog({ version: 1, scenes: [scene("x".repeat(200))] })?.scenes.map(
+				(s) => s.title,
+			),
+		];
+		expect(titles[0]).toEqual([undefined, undefined, undefined, undefined, undefined]);
+		expect(titles[1]).toEqual(["x".repeat(200)]);
+		expect(
+			normalizeAgentActivityLog({ version: 1, scenes: [{ startMs: 0, endMs: 5 }] })?.scenes,
+		).toEqual([{ startMs: 0, endMs: 5, failed: false }]);
+		expect(normalizeAgentActivityLog({ version: 1, scenes: [] })?.scenes).toEqual([]);
+	});
+
+	it("rejects a half-written sidecar instead of returning a partial log", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-activity-"));
+		try {
+			const video = path.join(dir, "cut.mp4");
+			await fs.writeFile(
+				`${video}.agent.json`,
+				'{"version":1,"scenes":[{"startMs":0,',
+				"utf-8",
+			);
+			await expect(readAgentActivity(video)).rejects.toThrow();
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
 });

@@ -124,6 +124,7 @@ function setup(
 			message: "Done.",
 		})),
 		setHideCursor: vi.fn(),
+		rememberScenes: vi.fn(),
 		getHideCursor: vi.fn(() => false),
 	} as unknown as CaptureControls & Record<string, ReturnType<typeof vi.fn>>;
 	const handler = createMcpHandler(() =>
@@ -312,6 +313,17 @@ describe("buildRecordlyMcpServer", () => {
 			durationMs: 52_000,
 			sourceDurationMs: 76_000,
 		});
+	});
+
+	it("remembers the rehearsed scene list so the scenes get their names", async () => {
+		const { call, capture, remote } = setup();
+		const scenes = ["Open payroll", "Review and pay"];
+		await call("tools/call", { name: "start_recording", arguments: { scenes } });
+		expect(capture.rememberScenes).toHaveBeenCalledWith(scenes);
+		expect(remote.startRecording).toHaveBeenCalled();
+		const bare = setup();
+		await bare.call("tools/call", { name: "start_recording", arguments: {} });
+		expect(bare.capture.rememberScenes).not.toHaveBeenCalled();
 	});
 
 	it("routes every editing tool to its editor op", async () => {

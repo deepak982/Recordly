@@ -49,6 +49,8 @@ export interface AgentActivityLog {
 	changeTimesMs?: number[];
 }
 
+const MAX_SCENE_TITLE_LENGTH = 200;
+
 const KINDS = new Set<unknown>(["motion", "hold", "wait"]);
 const ACTIONS = new Set<unknown>([
 	"move",
@@ -67,6 +69,7 @@ let cameraTargets: AgentActivityCameraTarget[] = [];
 let frozen = false;
 
 export function resetAgentActivity() {
+	plannedTitles = [];
 	scenes = [];
 	spans = [];
 	cameraTargets = [];
@@ -95,8 +98,21 @@ function close<T extends { endMs: number }>(entry: T | null, fields: Partial<T> 
 	}
 }
 
+let plannedTitles: string[] = [];
+
+export function setPlannedSceneTitles(titles: readonly string[] | undefined) {
+	plannedTitles = (titles ?? []).filter(
+		(title) => typeof title === "string" && title.trim().length > 0,
+	);
+}
+
 export function beginScene(title?: string) {
-	const scene = open<AgentActivityScene>(scenes, { failed: false, ...(title ? { title } : {}) });
+	const planned = plannedTitles[scenes.length];
+	const chosen = title ?? planned;
+	const scene = open<AgentActivityScene>(scenes, {
+		failed: false,
+		...(chosen ? { title: chosen } : {}),
+	});
 	return (failed: boolean) => close(scene, { failed });
 }
 
@@ -278,7 +294,11 @@ export function normalizeAgentActivityLog(raw: unknown): AgentActivityLog | null
 					{
 						...times,
 						failed: failed === true,
-						...(typeof title === "string" && title ? { title } : {}),
+						...(typeof title === "string" &&
+						title.trim() &&
+						title.length <= MAX_SCENE_TITLE_LENGTH
+							? { title }
+							: {}),
 					},
 				];
 			})

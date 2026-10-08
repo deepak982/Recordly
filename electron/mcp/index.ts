@@ -3,6 +3,7 @@ import { chmodSync, readFileSync, renameSync, rmSync, writeFileSync } from "node
 import path from "node:path";
 import { app, clipboard, ipcMain, screen } from "electron";
 import { USER_DATA_PATH } from "../appPaths";
+import { setPlannedSceneTitles } from "./agentActivity";
 import { createAgentControl } from "./agentControl";
 import { agentInput } from "./agentInput";
 import { agentPlatform } from "./agentPlatform";
@@ -79,6 +80,7 @@ export function setupMcpServer({ isDev, remote }: { isDev: boolean; remote: Remo
 		setOverlay: async (options: import("../windows").HudOverlayOptions) =>
 			(await import("../windows")).setHudOverlayOptions(options),
 		setDoNotDisturb,
+		rememberScenes: setPlannedSceneTitles,
 		setHideCursor: (hidden: boolean) => {
 			hideCursor = hidden;
 		},
