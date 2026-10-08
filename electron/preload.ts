@@ -1145,6 +1145,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
 		ipcRenderer.send("remote-export-progress", progress),
 	sendRemoteEditorReady: (state: RemoteEditorReadyState) =>
 		ipcRenderer.send("remote-editor-ready", state),
+	onRemoteEditorRequest: (callback: (request: RemoteEditorRequest) => void) => {
+		const listener = (_event: Electron.IpcRendererEvent, request: RemoteEditorRequest) =>
+			callback(request);
+		ipcRenderer.on("remote-editor-request", listener);
+		return () => ipcRenderer.removeListener("remote-editor-request", listener);
+	},
+	sendRemoteEditorResult: (result: RemoteEditorResult) =>
+		ipcRenderer.send("remote-editor-result", result),
 	onRemoteReviewRequest: (callback: (request: RemoteReviewRequest) => void) => {
 		const listener = (_event: Electron.IpcRendererEvent, request: RemoteReviewRequest) =>
 			callback(request);

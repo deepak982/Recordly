@@ -70,6 +70,19 @@ interface RemoteEditorReadyState {
 	ready: boolean;
 }
 
+interface RemoteEditorRequest {
+	id: string;
+	op: string;
+	payload?: unknown;
+}
+
+interface RemoteEditorResult {
+	id: string;
+	ok: boolean;
+	data?: unknown;
+	error?: string;
+}
+
 interface RemoteReviewRequest {
 	id: string;
 }
@@ -1086,6 +1099,8 @@ interface Window {
 		sendRemoteExportResult: (result: RemoteExportResult) => void;
 		sendRemoteExportProgress: (progress: RemoteExportProgress) => void;
 		sendRemoteEditorReady: (state: RemoteEditorReadyState) => void;
+		onRemoteEditorRequest: (callback: (request: RemoteEditorRequest) => void) => () => void;
+		sendRemoteEditorResult: (result: RemoteEditorResult) => void;
 		onRemoteReviewRequest: (callback: (request: RemoteReviewRequest) => void) => () => void;
 		sendRemoteReviewResult: (result: RemoteReviewResult) => void;
 		setHasUnsavedChanges: (hasChanges: boolean) => void;

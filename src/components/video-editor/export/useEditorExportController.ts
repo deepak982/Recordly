@@ -13,6 +13,7 @@ import { useExportRunner } from "./useExportRunner";
 import type { useExportSession } from "./useExportSession";
 import type { useExportSettings } from "./useExportSettings";
 import { useExportStatusViewModel } from "./useExportStatusViewModel";
+import { useRemoteEditorBridge } from "./useRemoteEditorBridge";
 import { useRemoteExportBridge } from "./useRemoteExportBridge";
 import { useRemoteReviewBridge } from "./useRemoteReviewBridge";
 import { useSmokeExportAutomation } from "./useSmokeExportAutomation";
@@ -91,6 +92,7 @@ export function useEditorExportController(input: Input) {
 	});
 	const remoteReady = useRemoteExportBridge({ ...input, handleExport: runner.handleExport });
 	useRemoteReviewBridge({ ...input, ready: remoteReady });
+	useRemoteEditorBridge({ ...input, ready: remoteReady });
 	const status = useExportStatusViewModel({
 		t: input.t,
 		session: input.session,
