@@ -9,6 +9,8 @@ import { contactSheetArgs, planSheet } from "./reviewRecording";
 
 const EDITOR_READY_TIMEOUT_MS = 45_000;
 const EDITOR_REPLY_TIMEOUT_MS = 20_000;
+const SLOW_OP_TIMEOUT_MS = 10 * 60_000;
+const SLOW_OPS = new Set(["timeline.join", "captions.generate"]);
 const FRAME_TIMEOUT_MS = 30_000;
 const MAX_FRAME_WIDTH = 1920;
 const END_FRAME_BACKOFF_MS = 40;
@@ -228,6 +230,9 @@ export function createRemoteEditor({
 	): Promise<T> {
 		const editor = await waitForEditor(signal);
 		if (signal?.aborted) throw new Error("The request was canceled.");
+		const budget = SLOW_OPS.has(op)
+			? Math.max(replyTimeoutMs, SLOW_OP_TIMEOUT_MS)
+			: replyTimeoutMs;
 		return new Promise<T>((resolve, reject) => {
 			const id = randomUUID();
 			const settle = (result: RemoteEditorResult) => {
@@ -243,9 +248,9 @@ export function createRemoteEditor({
 					settle({
 						id,
 						ok: false,
-						error: `The editor did not answer ${op} within ${replyTimeoutMs / 1000} s.`,
+						error: `The editor did not answer ${op} within ${Math.round(budget / 1000)} s.`,
 					}),
-				replyTimeoutMs,
+				budget,
 			);
 			signal?.addEventListener("abort", onAbort, { once: true });
 			pending.set(id, { editor, settle });

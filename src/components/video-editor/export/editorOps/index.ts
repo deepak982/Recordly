@@ -17,6 +17,8 @@ const ops: EditorOpMap = {
 	...historyOps,
 };
 
+export const READ_ONLY_OPS = new Set(["get_state"]);
+
 export function runEditorOp(op: string, payload: unknown, context: EditorOpContext) {
 	const handler = ops[op];
 	if (!handler) throw new Error(`The editor does not support "${op}".`);

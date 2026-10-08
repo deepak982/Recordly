@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { useAppearanceState } from "../state/useAppearanceState";
 import type { useTimelineState } from "../state/useTimelineState";
-import { runEditorOp } from "./editorOps";
+import { READ_ONLY_OPS, runEditorOp } from "./editorOps";
 import { getEditorState } from "./editorOps/state";
 import type { EditorOpContext } from "./editorOps/types";
 
@@ -54,7 +54,8 @@ export function useRemoteEditorBridge(input: Input) {
 					return;
 				}
 				const running = runningRef.current;
-				if (running) {
+				const readOnly = READ_ONLY_OPS.has(request.op);
+				if (running && !readOnly) {
 					const seconds = Math.round((Date.now() - running.startedAt) / 1000);
 					reply({
 						ok: false,
@@ -62,7 +63,7 @@ export function useRemoteEditorBridge(input: Input) {
 					});
 					return;
 				}
-				runningRef.current = { op: request.op, startedAt: Date.now() };
+				if (!readOnly) runningRef.current = { op: request.op, startedAt: Date.now() };
 				try {
 					reply({
 						ok: true,
@@ -79,7 +80,7 @@ export function useRemoteEditorBridge(input: Input) {
 						error: error instanceof Error ? error.message : String(error),
 					});
 				} finally {
-					runningRef.current = null;
+					if (!readOnly) runningRef.current = null;
 				}
 			}),
 		[],
