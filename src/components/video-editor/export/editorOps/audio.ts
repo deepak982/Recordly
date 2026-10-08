@@ -20,6 +20,13 @@ function requireId(value: unknown, field: string) {
 	return value;
 }
 
+function requireClip(id: string, context: EditorOpContext) {
+	const ids = context.timeline.clipRegions.map((clip) => clip.id);
+	if (!ids.includes(id)) {
+		throw new Error(`There is no clip with id "${id}". Clips: ${ids.join(", ")}.`);
+	}
+}
+
 function requireVolume(value: unknown) {
 	const volume = requireFiniteNumber(value, "volume");
 	if (volume < 0 || volume > 1) throw new Error("volume must be from 0 (silent) to 1 (full).");
@@ -28,7 +35,12 @@ function requireVolume(value: unknown) {
 
 function requireAudioRegion(id: string, context: EditorOpContext) {
 	const region = context.timeline.audioRegions.find((value) => value.id === id);
-	if (!region) throw new Error(`There is no audio region with id "${id}".`);
+	if (!region) {
+		const ids = context.timeline.audioRegions.map((value) => value.id);
+		throw new Error(
+			`There is no audio region with id "${id}". ${ids.length > 0 ? `Audio regions: ${ids.join(", ")}.` : "There are no audio regions; add one with audio.add."}`,
+		);
+	}
 	return region;
 }
 
@@ -107,7 +119,10 @@ export const audioOps: EditorOpMap = {
 			context.timeline.clipRegions,
 			Math.round(context.duration * 1000),
 		);
-		if (totalMs <= 0) throw new Error("There is no recording loaded to add audio to.");
+		if (totalMs <= 0)
+			throw new Error(
+				"There is no recording loaded to add audio to. Call get_editor_state to check that durationMs is above 0.",
+			);
 		const startMs = Math.round(
 			args.startMs === undefined ? 0 : requireFiniteNumber(args.startMs, "startMs"),
 		);
@@ -196,14 +211,14 @@ export const audioOps: EditorOpMap = {
 		const clips = context.timeline.clipRegions;
 		if (clips.length === 0) {
 			throw new Error(
-				"The timeline has no clips yet. Wait for the recording to finish loading, then try again.",
+				"The timeline has no clips yet. Call get_editor_state until its clips list is not empty, then try again.",
 			);
 		}
 		let targets = clips;
 		if (args.clipId !== undefined) {
 			const clipId = requireId(args.clipId, "clipId");
+			requireClip(clipId, context);
 			targets = clips.filter((clip) => clip.id === clipId);
-			if (targets.length === 0) throw new Error(`There is no clip with id "${clipId}".`);
 		}
 		const ids = new Set(targets.map((clip) => clip.id));
 		const muted = args.muted;
@@ -216,10 +231,11 @@ export const audioOps: EditorOpMap = {
 	"audio.source_track": (payload, context) => {
 		const args = requireObject(payload, "audio.source_track");
 		const track = requireId(args.track, "track");
+		if (!context.videoSourcePath) throw new Error("There is no recording loaded.");
 		const known = Object.keys(context.timeline.defaultSourceAudioTrackSettings);
 		if (known.length === 0) {
 			throw new Error(
-				"The recording's sound tracks have not loaded yet. Try again in a moment.",
+				"The recording's sound tracks are not available. Call get_editor_state and read sourceAudio.status: \"loading\" means they are still being read, so retry in a moment; \"none\" means this recording captured no audio and there is nothing to adjust; \"ready\" means they are listed in sourceAudio.default.",
 			);
 		}
 		if (!known.includes(track)) {
@@ -247,9 +263,7 @@ export const audioOps: EditorOpMap = {
 			return { track, scope: "every clip", volume, normalize };
 		}
 		const clipId = requireId(args.clipId, "clipId");
-		if (!context.timeline.clipRegions.some((clip) => clip.id === clipId)) {
-			throw new Error(`There is no clip with id "${clipId}".`);
-		}
+		requireClip(clipId, context);
 		context.timeline.setSourceAudioTrackSettingsByClip((current) => {
 			const base = {
 				...context.timeline.defaultSourceAudioTrackSettings,

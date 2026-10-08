@@ -56,6 +56,12 @@ function pick(source: Record<string, unknown>, keys: readonly string[]): EditorL
 	return out;
 }
 
+function sourceAudioStatus(timeline: EditorOpContext["timeline"]) {
+	const tracks = Object.keys(timeline.defaultSourceAudioTrackSettings ?? {});
+	if (tracks.length > 0) return "ready" as const;
+	return timeline.sourceAudioLoading ? ("loading" as const) : ("none" as const);
+}
+
 export async function getEditorState(context: EditorOpContext) {
 	const { duration, videoSourcePath, timeline, appearance } = context;
 	const sourceDurationMs = Math.round(duration * 1000);
@@ -94,6 +100,7 @@ export async function getEditorState(context: EditorOpContext) {
 		captionSettings: timeline.autoCaptionSettings,
 		speeds: timeline.speedRegions,
 		sourceAudio: {
+			status: sourceAudioStatus(timeline),
 			default: timeline.defaultSourceAudioTrackSettings,
 			byClip: timeline.sourceAudioTrackSettingsByClip,
 		},

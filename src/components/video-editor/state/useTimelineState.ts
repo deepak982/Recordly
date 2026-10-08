@@ -34,6 +34,7 @@ export function useTimelineState() {
 		useState<SourceAudioTrackSettings>({});
 	const [sourceAudioFallbackRefreshKey, setSourceAudioFallbackRefreshKey] = useState(0);
 	const [hasClipSourceAudio, setHasClipSourceAudio] = useState(false);
+	const [sourceAudioLoading, setSourceAudioLoading] = useState(true);
 	const [autoCaptions, setAutoCaptions] = useState<CaptionCue[]>([]);
 	const [autoCaptionSettings, setAutoCaptionSettings] = useState<AutoCaptionSettings>(
 		DEFAULT_AUTO_CAPTION_SETTINGS,
@@ -74,6 +75,8 @@ export function useTimelineState() {
 		setSourceAudioFallbackRefreshKey,
 		hasClipSourceAudio,
 		setHasClipSourceAudio,
+		sourceAudioLoading,
+		setSourceAudioLoading,
 		autoCaptions,
 		setAutoCaptions,
 		autoCaptionSettings,

@@ -432,6 +432,36 @@ describe("audio.source_track", () => {
 				{ track: "mic", volume: 1 },
 				makeContext({ tracks: {} }).context,
 			),
-		).toThrow(/not loaded yet/);
+		).toThrow(/read sourceAudio\.status/);
+	});
+
+	it("says there is no recording when none is loaded", () => {
+		const { context } = makeContext();
+		(context as { videoSourcePath: string | null }).videoSourcePath = null;
+		expect(() => run("audio.source_track", { track: "mic", volume: 1 }, context)).toThrow(
+			/no recording loaded/,
+		);
+	});
+
+	it("lists the clips when the clip id is unknown", () => {
+		const { context } = makeContext({ clips: [{ id: "a", startMs: 0, endMs: 1, speed: 1 }] });
+		expect(() =>
+			run("audio.source_track", { track: "mic", volume: 1, clipId: "zz" }, context),
+		).toThrow(/Clips: a\./);
+		expect(() => run("audio.mute_source", { muted: true, clipId: "zz" }, context)).toThrow(
+			/Clips: a\./,
+		);
+	});
+
+	it("points at get_editor_state when there are no clips", () => {
+		expect(() =>
+			run("audio.mute_source", { muted: true }, makeContext({ clips: [] }).context),
+		).toThrow(/get_editor_state/);
+	});
+
+	it("lists audio regions when the id is unknown", () => {
+		expect(() => run("audio.remove", { id: "x" }, makeContext().context)).toThrow(
+			/no audio regions; add one with audio\.add/,
+		);
 	});
 });
