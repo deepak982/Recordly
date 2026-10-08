@@ -2648,6 +2648,117 @@ describe("input policy", () => {
 			tolerancePx: 40,
 		});
 	});
+
+	describe("requireTargets", () => {
+		const raw = [{ action: "click", x: 50, y: 150 }] as AgentStep[];
+
+		it("refuses raw coordinates while recording, naming the step and the fix, posting nothing", async () => {
+			const { agent, names } = setup();
+			agent.setInputPolicy({ requireTargets: true });
+			await expect(agent.perform([{ action: "wait", ms: 1 }, ...raw])).rejects.toThrow(
+				/Step 2 \(click\): .*Aim with a target.*requireTargets false/,
+			);
+			expect(names()).toEqual([]);
+		});
+
+		it("refuses in a dry run, including a step after a page change", async () => {
+			const { agent, names } = setup();
+			agent.setInputPolicy({ requireTargets: true });
+			await expect(agent.perform(raw, { dryRun: true })).rejects.toThrow(/Step 1 \(click\)/);
+			await expect(
+				agent.perform([{ action: "key", key: "enter" }, ...raw], { dryRun: true }),
+			).rejects.toThrow(/Step 2 \(click\)/);
+			expect(names()).toEqual([]);
+		});
+
+		it("refuses a move and either end of a drag, but lets a drag with two targets through", async () => {
+			const { agent } = setup({}, { find: findOn([element("Save", 10, 10)]) });
+			agent.setInputPolicy({ requireTargets: true });
+			await expect(agent.perform([{ action: "move", x: 1, y: 1 }])).rejects.toThrow(
+				/Step 1 \(move\)/,
+			);
+			await expect(
+				agent.perform([{ action: "drag", from: { text: "Save" }, toX: 5, toY: 5 }]),
+			).rejects.toThrow(/Step 1 \(drag\)/);
+			await expect(
+				agent.perform([{ action: "drag", fromX: 5, fromY: 5, to: { text: "Save" } }]),
+			).rejects.toThrow(/Step 1 \(drag\)/);
+			await expect(
+				agent.perform([{ action: "drag", from: { text: "Save" }, to: { text: "Save" } }]),
+			).resolves.toMatchObject({ performed: 1 });
+		});
+
+		it("passes a step that aims with a target and a scroll at a coordinate", async () => {
+			const { agent } = setup({}, { find: findOn([element("Save", 10, 10)]) });
+			agent.setInputPolicy({ requireTargets: true });
+			await expect(
+				agent.perform([
+					{ action: "click", target: { text: "Save" } },
+					{ action: "scroll", x: 50, y: 150, dy: 3 },
+				]),
+			).resolves.toMatchObject({ performed: 2 });
+		});
+
+		it("allows coordinates again once turned off", async () => {
+			const { agent } = setup();
+			agent.setInputPolicy({ requireTargets: true });
+			agent.setInputPolicy({ requireTargets: false });
+			await expect(agent.perform(raw)).resolves.toMatchObject({ performed: 1 });
+		});
+
+		it("does not apply while no recording is running", async () => {
+			const { agent } = setup();
+			agent.setInputPolicy({ requireTargets: true });
+			snapshotAgentActivity(clock.ms);
+			await expect(agent.perform(raw)).resolves.toMatchObject({ performed: 1 });
+		});
+	});
+
+	describe("sticky safeRegion", () => {
+		const region = { x: 0, y: 100, width: 800, height: 400 };
+		const outside = [{ action: "click", x: 50, y: 10 }] as AgentStep[];
+
+		it("applies to every later perform", async () => {
+			const { agent, names } = setup();
+			agent.setInputPolicy({ safeRegion: region });
+			await expect(agent.perform(outside)).rejects.toThrow(/outside the safe region/);
+			await expect(agent.perform(outside)).rejects.toThrow(/outside the safe region/);
+			expect(names()).toEqual(["preflight", "preflight"]);
+		});
+
+		it("lets the per-call region win", async () => {
+			const { agent } = setup();
+			agent.setInputPolicy({ safeRegion: region });
+			await expect(
+				agent.perform(outside, { safeRegion: { x: 0, y: 0, width: 800, height: 400 } }),
+			).resolves.toMatchObject({ performed: 1 });
+		});
+
+		it("rejects a malformed rectangle when set, and keeps the previous policy", async () => {
+			const { agent } = setup();
+			agent.setInputPolicy({ safeRegion: region });
+			expect(() =>
+				agent.setInputPolicy({ safeRegion: { x: 0, y: 0, width: 0, height: 5 } }),
+			).toThrow(/safeRegion needs numeric/);
+			await expect(agent.perform(outside)).rejects.toThrow(/outside the safe region/);
+		});
+
+		it("is cleared by null", async () => {
+			const { agent } = setup();
+			agent.setInputPolicy({ safeRegion: region });
+			agent.setInputPolicy({ safeRegion: null });
+			await expect(agent.perform(outside)).resolves.toMatchObject({ performed: 1 });
+		});
+
+		it("works together with requireTargets", async () => {
+			const { agent } = setup({}, { find: findOn([element("Save", 10, 10)]) });
+			agent.setInputPolicy({ safeRegion: region, requireTargets: true });
+			await expect(agent.perform(outside)).rejects.toThrow(/requires targets/);
+			await expect(
+				agent.perform([{ action: "click", target: { text: "Save" } }]),
+			).rejects.toThrow(/outside the safe region/);
+		});
+	});
 });
 
 describe("window bounds, hold, expect, safeRegion and undo", () => {

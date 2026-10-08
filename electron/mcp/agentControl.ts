@@ -9,6 +9,7 @@ import {
 	type AgentActivityTarget,
 	beginScene,
 	beginSpan,
+	getAgentActivityMs,
 	markCameraTarget,
 } from "./agentActivity";
 import { type AgentInput, agentInput } from "./agentInput";
@@ -234,6 +235,8 @@ type InputPolicy = {
 	tolerancePx?: number;
 	autoResumeAfterMs: number;
 	onTakeover: "pause" | "abort";
+	requireTargets?: boolean;
+	safeRegion?: AgentFrame | null;
 };
 type Probe = Omit<AgentDryRunStep, "index" | "action">;
 type Resolved = { element: AgentElement; frame: WindowBounds; scrolled: boolean };
@@ -732,6 +735,19 @@ function checkSafeRegionShape(region: AgentFrame | undefined) {
 			"safeRegion needs numeric x, y, width and height, with a width and height above 0.",
 		);
 	}
+}
+
+function checkTargetsRequired(index: number, step: AgentStep) {
+	if (step.action === "scroll") return;
+	if (pointsOf(step).length === 0) return;
+	throw stepError(
+		index,
+		step,
+		"The input policy requires targets while recording, so a raw x/y coordinate is refused: " +
+			"the view can scroll between steps and the point would land on a different control. " +
+			'Aim with a target such as {text: "Save", role: "button"}, or turn the policy off with ' +
+			"set_input_policy requireTargets false.",
+	);
 }
 
 const undoChord = (name: string): { key: string; modifiers: AgentModifier[] } => ({
@@ -1709,20 +1725,19 @@ export function createAgentControl(
 		}
 		checkSafeRegionShape(options.safeRegion);
 		checkLimits(steps, pace);
+		if (policy.requireTargets && getAgentActivityMs() !== null) {
+			steps.forEach((step, index) => checkTargetsRequired(index, step));
+		}
+		const safeRegion = options.safeRegion ?? policy.safeRegion ?? undefined;
 		return exclusive(async () => {
 			const startedAt = deps.now();
 			const result: PerformResult = { performed: 0, durationMs: 0 };
 			if (options.dryRun) {
-				Object.assign(result, await dryRun(steps, options.safeRegion));
+				Object.assign(result, await dryRun(steps, safeRegion));
 			} else {
 				const endScene = beginScene(options.title);
 				try {
-					await runSteps(
-						steps,
-						pace,
-						startedAt + AGENT_LIMITS.totalMs,
-						options.safeRegion,
-					);
+					await runSteps(steps, pace, startedAt + AGENT_LIMITS.totalMs, safeRegion);
 					endScene(false);
 				} catch (error) {
 					endScene(true);
@@ -1921,6 +1936,7 @@ export function createAgentControl(
 	}
 
 	function setInputPolicy(next: Partial<InputPolicy>) {
+		checkSafeRegionShape(next.safeRegion ?? undefined);
 		policy = {
 			...policy,
 			...Object.fromEntries(Object.entries(next).filter(([, v]) => v !== undefined)),
