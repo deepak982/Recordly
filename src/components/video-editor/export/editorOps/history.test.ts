@@ -10,6 +10,7 @@ const context = (over: { canUndo?: boolean; canRedo?: boolean } = {}) => {
 		redo,
 		context: {
 			history: { undo, redo, canUndo: over.canUndo ?? true, canRedo: over.canRedo ?? true },
+			assertSameRecording: () => undefined,
 		} as unknown as EditorOpContext,
 	};
 };

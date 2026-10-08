@@ -1,15 +1,15 @@
 import type { MutableRefObject } from "react";
+import type { AgentActivityLog } from "../../agentEdits/planAgentEdits";
 import type { useAppearanceState } from "../../state/useAppearanceState";
 import type { useTimelineState } from "../../state/useTimelineState";
 
 export type EditorOpContext = {
-	// Seconds of the source recording, not milliseconds and not the edited length.
 	duration: number;
 	videoSourcePath: string | null;
 	timeline: ReturnType<typeof useTimelineState>;
 	appearance: ReturnType<typeof useAppearanceState>;
 	history: { undo: () => void; redo: () => void; canUndo: boolean; canRedo: boolean };
-	// The editor's own counters, so an op's ids are the same as a hand edit's.
+	assertSameRecording: () => void;
 	ids: {
 		zoom: MutableRefObject<number>;
 		clip: MutableRefObject<number>;
@@ -34,6 +34,51 @@ export function requireObject(payload: unknown, op: string): Record<string, unkn
 		throw new Error(`${op} needs an object of arguments.`);
 	}
 	return payload as Record<string, unknown>;
+}
+
+export const ACTIVITY_TIMEOUT_MS = 10_000;
+
+export async function loadAgentActivity(
+	videoSourcePath: string | null,
+	advice: string,
+): Promise<AgentActivityLog> {
+	if (!videoSourcePath) throw new Error(`There is no recording loaded. ${advice}`);
+	const fetch = window.electronAPI?.getAgentActivity;
+	if (!fetch) throw new Error(`The activity log is unavailable here. ${advice}`);
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const result = await Promise.race([
+			fetch(videoSourcePath),
+			new Promise<never>((_, reject) => {
+				timer = setTimeout(
+					() =>
+						reject(
+							new Error(
+								`Timed out after ${ACTIVITY_TIMEOUT_MS / 1000} seconds waiting for the recording's activity log.`,
+							),
+						),
+					ACTIVITY_TIMEOUT_MS,
+				);
+			}),
+		]);
+		if (!result.success || !result.log || result.log.version !== 1) {
+			throw new Error(
+				`${result.message ?? result.error ?? "This recording has no agent activity log."} ${advice}`,
+			);
+		}
+		return result.log;
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+export function rejectUnknown(args: Record<string, unknown>, allowed: string[], op: string) {
+	const unknown = Object.keys(args).filter((key) => !allowed.includes(key));
+	if (unknown.length > 0) {
+		throw new Error(
+			`${op}: unknown field ${unknown.join(", ")}. Accepted: ${allowed.join(", ")}.`,
+		);
+	}
 }
 
 export function requireFiniteNumber(value: unknown, field: string): number {

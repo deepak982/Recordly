@@ -1,8 +1,8 @@
 import { useEffect, useRef } from "react";
 import type { useAppearanceState } from "../state/useAppearanceState";
 import type { useTimelineState } from "../state/useTimelineState";
-import { getTimelineDurationMs } from "../types";
 import { runEditorOp } from "./editorOps";
+import { getEditorState } from "./editorOps/state";
 import type { EditorOpContext } from "./editorOps/types";
 
 type Input = {
@@ -17,36 +17,31 @@ type Input = {
 
 type Editor = Input;
 
-function getState({ duration, videoSourcePath, timeline }: Editor) {
-	const sourceDurationMs = Math.round(duration * 1000);
-	return {
-		videoPath: videoSourcePath,
-		durationMs: getTimelineDurationMs(timeline.clipRegions, sourceDurationMs),
-		sourceDurationMs,
-		clips: timeline.clipRegions,
-		zooms: timeline.zoomRegions,
-		annotations: timeline.annotationRegions,
-		audio: timeline.audioRegions,
-		captions: timeline.autoCaptions,
-	};
-}
-
-function runOp(op: string, payload: unknown, editor: Editor) {
-	if (op === "get_state") return getState(editor);
-	return runEditorOp(op, payload, {
+function runOp(op: string, payload: unknown, editor: Editor, live: () => Editor) {
+	const startedOn = editor.videoSourcePath;
+	const context = {
+		assertSameRecording: () => {
+			if (live().videoSourcePath !== startedOn) {
+				throw new Error(
+					"The editor loaded a different recording while this was running, so nothing was changed.",
+				);
+			}
+		},
 		duration: editor.duration,
 		videoSourcePath: editor.videoSourcePath,
 		timeline: editor.timeline,
 		appearance: editor.appearance,
 		history: editor.history,
 		ids: editor.ids,
-	});
+	};
+	if (op === "get_state") return getEditorState(context);
+	return runEditorOp(op, payload, context);
 }
 
 export function useRemoteEditorBridge(input: Input) {
 	const latestRef = useRef(input);
 	latestRef.current = input;
-	const queueRef = useRef<Promise<unknown>>(Promise.resolve());
+	const runningRef = useRef<{ op: string; startedAt: number } | null>(null);
 
 	useEffect(
 		() =>
@@ -58,17 +53,33 @@ export function useRemoteEditorBridge(input: Input) {
 					reply({ ok: false, error: "The editor is still loading the recording." });
 					return;
 				}
+				const running = runningRef.current;
+				if (running) {
+					const seconds = Math.round((Date.now() - running.startedAt) / 1000);
+					reply({
+						ok: false,
+						error: `The editor is still running ${running.op} (${seconds} s). Wait for it to finish, then try again.`,
+					});
+					return;
+				}
+				runningRef.current = { op: request.op, startedAt: Date.now() };
 				try {
-					const run = queueRef.current.then(() =>
-						runOp(request.op, request.payload, latestRef.current),
-					);
-					queueRef.current = run.catch(() => undefined);
-					reply({ ok: true, data: await run });
+					reply({
+						ok: true,
+						data: await runOp(
+							request.op,
+							request.payload,
+							latestRef.current,
+							() => latestRef.current,
+						),
+					});
 				} catch (error) {
 					reply({
 						ok: false,
 						error: error instanceof Error ? error.message : String(error),
 					});
+				} finally {
+					runningRef.current = null;
 				}
 			}),
 		[],
