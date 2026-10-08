@@ -37,6 +37,7 @@ interface RemoteRecordingCommand {
 	id: string;
 	action: RemoteRecordingAction;
 	countdownSeconds?: number;
+	hideCursor?: boolean;
 	expiresAt: number;
 }
 

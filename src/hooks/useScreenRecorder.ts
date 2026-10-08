@@ -190,9 +190,25 @@ export const START_BLOCK_MESSAGES = {
 	noSource: "No source is selected. Call select_source first.",
 	cancelled: "The recording start was cancelled in Recordly (Cancel or Stop was used).",
 	countdownCancelled: "The countdown was cancelled in Recordly before recording began.",
+	countdownFailed: "The recording countdown failed to run.",
 	accessibilityUnavailable:
 		"Recordly could not read the Accessibility permission status. Check System Settings, then try again.",
 } as const;
+
+// The cursor Recordly composites is the editor overlay, so "hide the cursor" means the
+// recording opens with that overlay off. Browser capture already hides it by policy.
+export function resolveHideOverlayCursor(policyHides: boolean, requested: boolean): boolean {
+	return policyHides || requested;
+}
+
+export function resolveCountdownBlock(result: {
+	success: boolean;
+	cancelled?: boolean;
+}): string | null {
+	if (result.cancelled) return START_BLOCK_MESSAGES.countdownCancelled;
+	if (!result.success) return START_BLOCK_MESSAGES.countdownFailed;
+	return null;
+}
 
 export function resolveStartPreflight({
 	inFlight,
@@ -357,7 +373,11 @@ export type RemoteRecorderState = {
 
 export type RemoteRecorderActions = {
 	reply: (result: RemoteCommandResult) => void;
-	start: (options: { remoteCommandId: string; countdownSeconds?: number }) => void;
+	start: (options: {
+		remoteCommandId: string;
+		countdownSeconds?: number;
+		hideCursor?: boolean;
+	}) => void;
 	stop: (commandId: string) => void;
 	pause: () => Promise<RemoteActionOutcome>;
 	resume: () => Promise<RemoteActionOutcome>;
@@ -365,7 +385,7 @@ export type RemoteRecorderActions = {
 };
 
 export function handleRemoteRecordingCommand(
-	command: RemoteRecordingCommand,
+	command: RemoteRecordingCommand & { hideCursor?: boolean },
 	state: RemoteRecorderState,
 	actions: RemoteRecorderActions,
 	now = Date.now(),
@@ -396,6 +416,7 @@ export function handleRemoteRecordingCommand(
 			actions.start({
 				remoteCommandId: command.id,
 				countdownSeconds: command.countdownSeconds,
+				hideCursor: command.hideCursor,
 			});
 			return;
 		case "stop":
@@ -603,6 +624,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 	);
 	const requestedBrowserMicrophoneProfile = useRef<string | null>(null);
 	const hideEditorOverlayCursorByDefault = useRef(false);
+	const hideCursorRequested = useRef(false);
 
 	const notifyRecordingFinalizationFailure = useCallback(
 		async (message: string) => {
@@ -1292,7 +1314,10 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 	const prepareRecordingStart = useCallback(
 		async (notify: (message: string) => void) => {
 			const platform = await window.electronAPI.getPlatform();
-			hideEditorOverlayCursorByDefault.current = false;
+			hideEditorOverlayCursorByDefault.current = resolveHideOverlayCursor(
+				false,
+				hideCursorRequested.current,
+			);
 			const existingSource = await window.electronAPI.getSelectedSource();
 			const selectedSource =
 				existingSource ?? (platform === "linux" ? LINUX_PORTAL_SOURCE : null);
@@ -1850,7 +1875,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 	}, [cleanupCapturedMedia, discardActiveNativeCapture, recoverNativeRecordingSession]);
 
 	const startRecording = async (
-		options: { remoteCommandId?: string; countdownSeconds?: number } = {},
+		options: { remoteCommandId?: string; countdownSeconds?: number; hideCursor?: boolean } = {},
 	) => {
 		const preflightError = resolveStartPreflight({
 			inFlight: startInFlight.current,
@@ -1866,6 +1891,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 			}
 			return;
 		}
+		hideCursorRequested.current = Boolean(options.hideCursor);
 		const countdownSeconds = options.countdownSeconds ?? countdownDelay;
 		const warnUser = (message: string) =>
 			options.remoteCommandId ? toast.warning(message) : alert(message);
@@ -1913,9 +1939,9 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 				setCountdownActive(true);
 				try {
 					const result = await window.electronAPI.startCountdown(countdownSeconds);
-					if (result.cancelled) remoteError ??= START_BLOCK_MESSAGES.countdownCancelled;
-					if (!result.success) remoteError ??= "The recording countdown failed to run.";
-					if (!result.success || result.cancelled || startWasCancelled()) {
+					const countdownBlock = resolveCountdownBlock(result);
+					if (countdownBlock) remoteError ??= countdownBlock;
+					if (countdownBlock || startWasCancelled()) {
 						cleanupCapturedMedia();
 						await stopWebcamRecorder();
 						return;
@@ -2001,11 +2027,9 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 						try {
 							const countdownResult =
 								await window.electronAPI.startCountdown(countdownSeconds);
-							if (
-								!countdownResult.success ||
-								countdownResult.cancelled ||
-								startWasCancelled()
-							) {
+							const countdownBlock = resolveCountdownBlock(countdownResult);
+							if (countdownBlock) remoteError ??= countdownBlock;
+							if (countdownBlock || startWasCancelled()) {
 								if (!startWasCancelled()) {
 									await discardActiveNativeCapture();
 								}
@@ -2132,7 +2156,9 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 				setCountdownActive(true);
 				try {
 					const result = await window.electronAPI.startCountdown(countdownSeconds);
-					if (!result.success || result.cancelled) {
+					const countdownBlock = resolveCountdownBlock(result);
+					if (countdownBlock) {
+						remoteError ??= countdownBlock;
 						cleanupCapturedMedia();
 						await stopWebcamRecorder();
 						return;
@@ -2147,8 +2173,10 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 			const browserCursorPolicy = resolveBrowserCaptureCursorPolicy({
 				nativeWindowsCaptureStartFailed,
 			});
-			hideEditorOverlayCursorByDefault.current =
-				browserCursorPolicy.hideEditorOverlayCursorByDefault;
+			hideEditorOverlayCursorByDefault.current = resolveHideOverlayCursor(
+				browserCursorPolicy.hideEditorOverlayCursorByDefault,
+				hideCursorRequested.current,
+			);
 
 			const wantsAudioCapture = microphoneEnabled || systemAudioEnabled;
 			const browserCaptureSource = await resolveBrowserCaptureSource(selectedSource);

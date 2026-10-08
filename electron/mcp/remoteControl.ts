@@ -516,8 +516,10 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 		},
 		async startRecording({
 			countdownSeconds,
+			hideCursor,
 		}: {
 			countdownSeconds?: number;
+			hideCursor?: boolean;
 			scenes?: readonly string[];
 		} = {}) {
 			const state = getState();
@@ -549,7 +551,10 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 			}
 			const hud = await ensureHud();
 			const countdownMs = (countdownSeconds ?? MAX_COUNTDOWN_SECONDS) * 1000;
-			const extra = countdownSeconds === undefined ? {} : { countdownSeconds };
+			const extra = {
+				...(countdownSeconds === undefined ? {} : { countdownSeconds }),
+				...(hideCursor === undefined ? {} : { hideCursor }),
+			};
 			if (isWayland()) {
 				await waitForShareDialog(
 					send(hud, "start", deps.timeouts.waylandStartMs + countdownMs, extra, true),

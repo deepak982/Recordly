@@ -10,6 +10,8 @@ import {
 	type RemoteActionOutcome,
 	type RemoteRecorderState,
 	resolveBrowserCaptureCursorPolicy,
+	resolveCountdownBlock,
+	resolveHideOverlayCursor,
 	resolveStartPreflight,
 	START_BLOCK_MESSAGES,
 	shouldUseNativeWindowsCaptureForSource,
@@ -977,6 +979,19 @@ describe("handleRemoteRecordingCommand", () => {
 		expect(actions.reply).not.toHaveBeenCalled();
 	});
 
+	it("passes the hide-cursor request through to the start path", () => {
+		const hidden = run("start", idle, {}, { hideCursor: true } as never);
+		expect(hidden.start).toHaveBeenCalledWith(expect.objectContaining({ hideCursor: true }));
+		const plain = run("start", idle);
+		expect(plain.start.mock.calls[0][0].hideCursor).toBeUndefined();
+	});
+
+	it("hides the composited cursor when either the policy or the agent asks", () => {
+		expect(resolveHideOverlayCursor(false, false)).toBe(false);
+		expect(resolveHideOverlayCursor(false, true)).toBe(true);
+		expect(resolveHideOverlayCursor(true, false)).toBe(true);
+	});
+
 	it.each([
 		"recording",
 		"starting",
@@ -1155,5 +1170,27 @@ describe("resolveStartPreflight", () => {
 
 	it("passes when ready", () => {
 		expect(resolveStartPreflight({ inFlight: false, hasSource: true })).toBeNull();
+	});
+});
+
+describe("resolveCountdownBlock", () => {
+	it("gives a reason for a cancelled countdown, even when it also reports failure", () => {
+		expect(resolveCountdownBlock({ success: true, cancelled: true })).toBe(
+			START_BLOCK_MESSAGES.countdownCancelled,
+		);
+		expect(resolveCountdownBlock({ success: false, cancelled: true })).toBe(
+			START_BLOCK_MESSAGES.countdownCancelled,
+		);
+	});
+
+	it("gives a reason for a countdown that failed to run", () => {
+		expect(resolveCountdownBlock({ success: false })).toBe(
+			START_BLOCK_MESSAGES.countdownFailed,
+		);
+	});
+
+	it("lets a finished countdown through", () => {
+		expect(resolveCountdownBlock({ success: true })).toBeNull();
+		expect(resolveCountdownBlock({ success: true, cancelled: false })).toBeNull();
 	});
 });
