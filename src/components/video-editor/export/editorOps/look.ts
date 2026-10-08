@@ -62,7 +62,7 @@ const MOTION_NUMBERS: Record<string, Range> = {
 };
 
 const MOTION_EASINGS = ["zoomInEasing", "zoomOutEasing", "connectedZoomEasing"];
-const MOTION_BOOLEANS = ["zoomClassicMode", "connectZooms"];
+const MOTION_BOOLEANS = ["zoomClassicMode", "connectZooms", "showCursor", "loopCursor"];
 const BLUR_TUNING: Record<keyof ZoomMotionBlurTuning, Range> = {
 	panVelocityThreshold: [0, 240],
 	zoomVelocityThreshold: [0, 0.4],

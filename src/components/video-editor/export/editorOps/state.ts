@@ -39,6 +39,13 @@ const MOTION_FIELDS = [
 	"cursorClickEffectDurationMs",
 	"cursorClickBounce",
 	"cursorClickBounceDuration",
+	"zoomMotionBlurTuning",
+	"cursorSpringStiffnessMultiplier",
+	"cursorSpringDampingMultiplier",
+	"cursorSpringMassMultiplier",
+	"cameraSpringStiffnessMultiplier",
+	"cameraSpringDampingMultiplier",
+	"cameraSpringMassMultiplier",
 ] as const;
 
 function pick(source: Record<string, unknown>, keys: readonly string[]): EditorLook {
@@ -84,6 +91,12 @@ export async function getEditorState(context: EditorOpContext) {
 		annotations: timeline.annotationRegions,
 		audio: timeline.audioRegions,
 		captions: timeline.autoCaptions,
+		captionSettings: timeline.autoCaptionSettings,
+		speeds: timeline.speedRegions,
+		sourceAudio: {
+			default: timeline.defaultSourceAudioTrackSettings,
+			byClip: timeline.sourceAudioTrackSettingsByClip,
+		},
 		scenes,
 		look: pick(appearanceRecord, LOOK_FIELDS),
 		motion: pick(appearanceRecord, MOTION_FIELDS),

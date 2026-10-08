@@ -12,6 +12,7 @@ import {
 	type EditorOpContext,
 	type EditorOpMap,
 	nextId,
+	rejectUnknown,
 	requireFiniteNumber,
 	requireObject,
 } from "./types";
@@ -89,15 +90,6 @@ function requireKnownZoom(args: Record<string, unknown>, context: EditorOpContex
 		);
 	}
 	return region;
-}
-
-function rejectUnknown(args: Record<string, unknown>, allowed: string[], op: string) {
-	const unknown = Object.keys(args).filter((key) => !allowed.includes(key));
-	if (unknown.length > 0) {
-		throw new Error(
-			`${op}: unknown field ${unknown.join(", ")}. Accepted: ${allowed.join(", ")}.`,
-		);
-	}
 }
 
 function describe(region: ZoomRegion) {

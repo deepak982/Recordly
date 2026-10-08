@@ -1,7 +1,6 @@
 import { annotationsOps } from "./annotations";
 import { audioOps } from "./audio";
 import { captionsOps } from "./captions";
-import { cardsOps } from "./cards";
 import { historyOps } from "./history";
 import { lookOps } from "./look";
 import { timelineOps } from "./timeline";
@@ -16,7 +15,6 @@ const ops: EditorOpMap = {
 	...audioOps,
 	...lookOps,
 	...historyOps,
-	...cardsOps,
 };
 
 export function runEditorOp(op: string, payload: unknown, context: EditorOpContext) {
