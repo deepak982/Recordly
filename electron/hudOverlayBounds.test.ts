@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
 	getHudOverlayWindowBounds,
 	resizeHudOverlayFallbackBounds,
+	resolveHudOverlayIgnoreMouse,
 	shouldExpandHudOverlayFallback,
 } from "./hudOverlayBounds";
 
@@ -182,6 +183,39 @@ describe("shouldExpandHudOverlayFallback", () => {
 				fallbackExpanded: false,
 				recordingActive: false,
 				webcamPreviewVisible: true,
+			}),
+		).toBe(false);
+	});
+});
+
+describe("resolveHudOverlayIgnoreMouse", () => {
+	const idle = { sourceSelectionActive: false, recordingActive: false, agentActive: false };
+
+	it("forces passthrough while an agent is acting, regardless of the pointer latch", () => {
+		expect(resolveHudOverlayIgnoreMouse(false, { ...idle, agentActive: true })).toBe(true);
+		expect(
+			resolveHudOverlayIgnoreMouse(false, {
+				...idle,
+				agentActive: true,
+				recordingActive: true,
+			}),
+		).toBe(true);
+	});
+
+	it("restores the requested latch once the agent is done", () => {
+		expect(resolveHudOverlayIgnoreMouse(false, idle)).toBe(false);
+		expect(resolveHudOverlayIgnoreMouse(true, idle)).toBe(true);
+	});
+
+	it("keeps source selection passthrough unless recording", () => {
+		expect(resolveHudOverlayIgnoreMouse(false, { ...idle, sourceSelectionActive: true })).toBe(
+			true,
+		);
+		expect(
+			resolveHudOverlayIgnoreMouse(false, {
+				...idle,
+				sourceSelectionActive: true,
+				recordingActive: true,
 			}),
 		).toBe(false);
 	});

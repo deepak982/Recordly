@@ -258,6 +258,24 @@ describe("perform", () => {
 		expect(count("disarm")).toBe(1);
 	});
 
+	it("lets the pointer through the control pill while acting, and restores it after", async () => {
+		const hud: boolean[] = [];
+		const { agent } = setup({ setHudPassthrough: (active: boolean) => hud.push(active) });
+		await agent.perform([{ action: "click", x: 10, y: 10 }]);
+		expect(hud).toEqual([true, false]);
+		hud.length = 0;
+		const failing = setup(
+			{ setHudPassthrough: (active: boolean) => hud.push(active) },
+			{
+				click: () => {
+					throw new Error("boom");
+				},
+			},
+		);
+		await expect(failing.agent.perform([{ action: "click", x: 10, y: 10 }])).rejects.toThrow();
+		expect(hud).toEqual([true, false]);
+	});
+
 	it("runs one action at a time", async () => {
 		const { agent, events } = setup({
 			sleep: (ms) => (ms === 5000 ? new Promise(() => undefined) : Promise.resolve()),

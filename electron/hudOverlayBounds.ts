@@ -65,3 +65,11 @@ export function resizeHudOverlayFallbackBounds(
 		y: clamp(currentBounds.y + currentBounds.height - nextBounds.height, workArea.y, maxY),
 	};
 }
+
+export function resolveHudOverlayIgnoreMouse(
+	requested: boolean,
+	state: { sourceSelectionActive: boolean; recordingActive: boolean; agentActive: boolean },
+): boolean {
+	if (state.agentActive) return true;
+	return state.sourceSelectionActive && !state.recordingActive ? true : requested;
+}

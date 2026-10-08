@@ -1,17 +1,18 @@
-import { isHudInEditorMode } from "./hudEditorMode";
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { app, BrowserWindow, ipcMain } from "electron";
 import {
-	supportsHudCaptureProtection,
 	shouldProtectHudCapture,
+	supportsHudCaptureProtection,
 } from "../src/lib/hudCaptureProtection";
 import { USER_DATA_PATH } from "./appPaths";
+import { isHudInEditorMode } from "./hudEditorMode";
 import {
 	getHudOverlayWindowBounds,
 	resizeHudOverlayFallbackBounds,
+	resolveHudOverlayIgnoreMouse,
 	shouldExpandHudOverlayFallback,
 } from "./hudOverlayBounds";
 import { getHudOverlayTaskbarOptions } from "./hudOverlayWindowOptions";
@@ -37,6 +38,8 @@ let hudOverlayCaptureProtectionLoaded = false;
 let hudOverlayFallbackExpanded = false;
 let hudOverlayIgnoringMouse = true;
 let hudOverlaySourceSelectionActive = false;
+let hudOverlayAgentActive = false;
+let hudOverlayRequestedIgnore = true;
 let hudOverlayMouseReassertTimer: NodeJS.Timeout | null = null;
 let hudOverlayRecordingActive = false;
 let hudCaptureStarting = false;
@@ -311,8 +314,13 @@ function setHudOverlayFallbackExpanded(expanded: boolean) {
 }
 
 function setHudOverlayMousePassthrough(ignore: boolean) {
-	hudOverlayIgnoringMouse =
-		hudOverlaySourceSelectionActive && !hudOverlayRecordingActive ? true : ignore;
+	hudOverlayRequestedIgnore = ignore;
+	hudOverlayIgnoringMouse = resolveHudOverlayIgnoreMouse(ignore, {
+		sourceSelectionActive: hudOverlaySourceSelectionActive,
+		recordingActive: hudOverlayRecordingActive,
+		agentActive: hudOverlayAgentActive,
+	});
+	ignore = hudOverlayIgnoringMouse;
 
 	if (hudOverlayMouseReassertTimer) {
 		clearTimeout(hudOverlayMouseReassertTimer);
@@ -358,6 +366,12 @@ ipcMain.on("hud-overlay-set-source-selection-active", (_event, active: boolean) 
 
 	setHudOverlayMousePassthrough(hudOverlayIgnoringMouse);
 });
+
+export function setHudOverlayAgentActive(active: boolean): void {
+	if (hudOverlayAgentActive === active) return;
+	hudOverlayAgentActive = active;
+	setHudOverlayMousePassthrough(hudOverlayRequestedIgnore);
+}
 
 // Keep compatibility with existing drag IPC/state.
 let hudUserPosition: { x: number; y: number } | null = null;

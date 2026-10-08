@@ -209,6 +209,17 @@ export type AgentControlDeps = {
 	sleep: (ms: number) => Promise<void>;
 	waitForStill: typeof waitForStillWindow;
 	now: () => number;
+	setHudPassthrough: (active: boolean) => void;
+};
+
+let hudWindows: Promise<typeof import("../windows")> | null = null;
+let hudQueue: Promise<unknown> = Promise.resolve();
+const setHudPassthrough = (active: boolean) => {
+	hudWindows ??= import("../windows");
+	hudQueue = hudQueue
+		.then(() => hudWindows)
+		.then((windows) => windows?.setHudOverlayAgentActive(active))
+		.catch(() => undefined);
 };
 
 const defaultDeps = (): AgentControlDeps => ({
@@ -226,6 +237,7 @@ const defaultDeps = (): AgentControlDeps => ({
 	sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 	waitForStill: waitForStillWindow,
 	now: Date.now,
+	setHudPassthrough,
 });
 
 const normalizeAppName = (name: string) =>
@@ -1368,6 +1380,7 @@ export function createAgentControl(
 			return request(command);
 		};
 		const run: Run = { start, post, pace, aborted, signal: controller.signal, deadline };
+		deps.setHudPassthrough(true);
 		await request({ cmd: "arm" });
 		input.events.on("user-input", onUserInput);
 		try {
@@ -1387,6 +1400,7 @@ export function createAgentControl(
 			controller.abort();
 			input.events.off("user-input", onUserInput);
 			await request({ cmd: "disarm" }).catch(() => undefined);
+			deps.setHudPassthrough(false);
 		}
 	}
 
