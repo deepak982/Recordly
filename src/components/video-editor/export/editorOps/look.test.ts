@@ -33,6 +33,8 @@ const set = (payload: unknown, context: EditorOpContext) =>
 	lookOps["look.set"](payload, context) as Record<string, unknown>;
 const motion = (payload: unknown, context: EditorOpContext) =>
 	lookOps["look.motion"](payload, context) as Record<string, unknown>;
+const preset = (payload: unknown, context: EditorOpContext) =>
+	lookOps["look.preset"](payload, context) as Record<string, unknown>;
 
 describe("look.set", () => {
 	it("applies only the given fields and says it cannot be undone", () => {
@@ -262,6 +264,88 @@ describe("look.motion", () => {
 	])("refuses %j and changes nothing", (payload, message) => {
 		const { calls, context } = makeContext();
 		expect(() => motion(payload, context)).toThrow(message);
+		expect(calls).toEqual([]);
+	});
+});
+
+describe("look.preset", () => {
+	it("applies clean preset: padding 4, borderRadius 12, shadowIntensity 0.35, backgroundBlur 0", () => {
+		const { state, context } = makeContext();
+		const result = preset({ name: "clean" }, context);
+		expect(state).toMatchObject({
+			padding: { top: 4, bottom: 4, left: 4, right: 4, linked: true },
+			borderRadius: 12,
+			shadowIntensity: 0.35,
+			backgroundBlur: 0,
+		});
+		expect(result).toMatchObject({
+			applied: {
+				padding: { top: 4, bottom: 4, left: 4, right: 4, linked: true },
+				borderRadius: 12,
+				shadowIntensity: 0.35,
+				backgroundBlur: 0,
+			},
+			undoable: false,
+		});
+		expect(result.note).toMatch(/not part of the editor history/);
+	});
+
+	it("applies dark preset: padding 4, borderRadius 12, shadowIntensity 0.5, backgroundBlur 2, wallpaper tahoe-dark", () => {
+		const { state, context } = makeContext();
+		const result = preset({ name: "dark" }, context);
+		expect(state).toMatchObject({
+			padding: { top: 4, bottom: 4, left: 4, right: 4, linked: true },
+			borderRadius: 12,
+			shadowIntensity: 0.5,
+			backgroundBlur: 2,
+			wallpaper: "/wallpapers/tahoe-dark.jpg",
+		});
+		expect(result.applied).toMatchObject({
+			padding: { top: 4, bottom: 4, left: 4, right: 4, linked: true },
+			borderRadius: 12,
+			shadowIntensity: 0.5,
+			backgroundBlur: 2,
+			wallpaper: "/wallpapers/tahoe-dark.jpg",
+		});
+	});
+
+	it("applies none preset: padding 0, borderRadius 0, shadowIntensity 0, backgroundBlur 0", () => {
+		const { state, context } = makeContext();
+		const result = preset({ name: "none" }, context);
+		expect(state).toMatchObject({
+			padding: { top: 0, bottom: 0, left: 0, right: 0, linked: true },
+			borderRadius: 0,
+			shadowIntensity: 0,
+			backgroundBlur: 0,
+		});
+		expect(result.applied).toMatchObject({
+			padding: { top: 0, bottom: 0, left: 0, right: 0, linked: true },
+			borderRadius: 0,
+			shadowIntensity: 0,
+			backgroundBlur: 0,
+		});
+	});
+
+	it("is idempotent when applied twice", () => {
+		const { state, context } = makeContext();
+		preset({ name: "clean" }, context);
+		const firstState = JSON.stringify(state);
+		preset({ name: "clean" }, context);
+		const secondState = JSON.stringify(state);
+		expect(firstState).toBe(secondState);
+	});
+
+	it.each([
+		[{}, /name is required/],
+		[{ name: undefined }, /name is required/],
+		[{ name: "minimal" }, /name must be one of clean, dark, none/],
+		[{ name: "CLEAN" }, /name must be one of clean, dark, none/],
+		[{ name: 123 }, /name must be one of clean, dark, none/],
+		[{ name: "clean", extra: true }, /unknown field extra/],
+		[{ name: "dark", wallpaper: "#000" }, /unknown field wallpaper/],
+	])("refuses %j and changes nothing", (payload, message) => {
+		const { calls, context } = makeContext();
+		expect(() => preset(payload, context)).toThrow(message);
 		expect(calls).toEqual([]);
 	});
 });

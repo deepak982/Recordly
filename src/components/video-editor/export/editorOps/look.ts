@@ -37,6 +37,9 @@ const PRESETS: WebcamPositionPreset[] = [
 	"custom",
 ];
 
+const LOOK_PRESETS = ["clean", "dark", "none"] as const;
+type LookPreset = (typeof LOOK_PRESETS)[number];
+
 const MOTION_NUMBERS: Record<string, Range> = {
 	zoomInDurationMs: [60, 4000],
 	zoomOutDurationMs: [60, 4000],
@@ -112,6 +115,10 @@ function requireOneOf<T extends string>(value: unknown, field: string, allowed: 
 		throw new Error(`${field} must be one of ${allowed.join(", ")}, not ${String(value)}.`);
 	}
 	return value as T;
+}
+
+function requireLookPresetName(value: unknown): LookPreset {
+	return requireOneOf(value, "name", LOOK_PRESETS);
 }
 
 function requireCrop(value: unknown, field: string): CropRegion {
@@ -353,5 +360,72 @@ export const lookOps: EditorOpMap = {
 		}
 		applyAll(appearance, updates, "look.motion");
 		return { applied: updates, undoable: false, note: NOT_UNDOABLE };
+	},
+
+	"look.preset": (payload, { appearance }) => {
+		const args = requireObject(payload, "look.preset");
+		rejectUnknown(args, ["name"], "look.preset");
+
+		if (args.name === undefined) {
+			throw new Error("look.preset: name is required.");
+		}
+
+		const name = requireLookPresetName(args.name);
+
+		const updates: Record<string, unknown> = {};
+
+		if (name === "clean") {
+			updates.padding = 4;
+			updates.borderRadius = 12;
+			updates.shadowIntensity = 0.35;
+			updates.backgroundBlur = 0;
+		} else if (name === "dark") {
+			updates.padding = 4;
+			updates.borderRadius = 12;
+			updates.shadowIntensity = 0.5;
+			updates.backgroundBlur = 2;
+			updates.wallpaper = "/wallpapers/tahoe-dark.jpg";
+		} else if (name === "none") {
+			updates.padding = 0;
+			updates.borderRadius = 0;
+			updates.shadowIntensity = 0;
+			updates.backgroundBlur = 0;
+		}
+
+		const processedUpdates: Record<string, unknown> = {};
+		if (updates.padding !== undefined)
+			processedUpdates.padding = requirePadding(updates.padding);
+		if (updates.borderRadius !== undefined) {
+			processedUpdates.borderRadius = requireInRange(
+				updates.borderRadius,
+				"borderRadius",
+				[0, 50],
+			);
+		}
+		if (updates.shadowIntensity !== undefined) {
+			processedUpdates.shadowIntensity = requireInRange(
+				updates.shadowIntensity,
+				"shadowIntensity",
+				[0, 1],
+			);
+		}
+		if (updates.backgroundBlur !== undefined) {
+			processedUpdates.backgroundBlur = requireInRange(
+				updates.backgroundBlur,
+				"backgroundBlur",
+				[0, 8],
+			);
+		}
+		if (updates.wallpaper !== undefined) {
+			if (typeof updates.wallpaper !== "string" || updates.wallpaper.trim() === "") {
+				throw new Error(
+					"wallpaper must be a non-empty string: a wallpaper path, image URL or colour.",
+				);
+			}
+			processedUpdates.wallpaper = updates.wallpaper;
+		}
+
+		applyAll(appearance, processedUpdates, "look.preset");
+		return { applied: processedUpdates, undoable: false, note: NOT_UNDOABLE };
 	},
 };
