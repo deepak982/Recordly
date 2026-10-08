@@ -13,7 +13,7 @@ import { contactSheetArgs, planSheet } from "./reviewRecording";
 const EDITOR_READY_TIMEOUT_MS = 45_000;
 const EDITOR_REPLY_TIMEOUT_MS = 20_000;
 const SLOW_OP_TIMEOUT_MS = 10 * 60_000;
-const SLOW_OPS = new Set(["timeline.join", "captions.generate"]);
+const SLOW_OPS = new Set(["timeline.join", "captions.generate", "render_preview"]);
 const SLOW_OP_WAIT_MS = 60_000;
 const FRAME_TIMEOUT_MS = 30_000;
 const MAX_FRAME_WIDTH = 1920;
