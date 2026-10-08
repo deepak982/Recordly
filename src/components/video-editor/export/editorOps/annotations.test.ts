@@ -34,6 +34,7 @@ function makeContext(initial: AnnotationRegion[] = [], duration = 10) {
 			annotation: { current: 1 },
 			annotationZIndex: { current: 1 },
 		},
+		assertSameRecording: () => undefined,
 	} as unknown as EditorOpContext;
 	return { state, context };
 }
@@ -60,6 +61,17 @@ describe("annotate.add blur", () => {
 		expect(state.selected).toBe(id);
 	});
 
+	it("squares the box so no corner pixel escapes the blur", () => {
+		const { state, context } = makeContext();
+		add(blur, context);
+		add(
+			{ startMs: 0, endMs: 1000, x: 0, y: 0, width: 20, height: 20, kind: "text", text: "a" },
+			context,
+		);
+		expect(state.regions[0].style.borderRadius).toBe(0);
+		expect(state.regions[1].style.borderRadius).toBe(8);
+	});
+
 	it("accepts a box exactly on the frame edge and a range ending at the timeline end", () => {
 		const { state, context } = makeContext();
 		add({ ...blur, x: 0, y: 0, width: 100, height: 100, startMs: 0, endMs: 10000 }, context);
@@ -72,6 +84,22 @@ describe("annotate.add blur", () => {
 		add(blur, context);
 		expect(state.regions[1].zIndex).toBe(2);
 		expect(new Set(state.regions.map((r) => r.id)).size).toBe(2);
+	});
+
+	it("takes zIndex from the editor's shared counter, so a later hand edit cannot collide", () => {
+		const { state, context } = makeContext();
+		add(blur, context);
+		expect(context.ids.annotationZIndex.current).toBe(2);
+		const handAdded = context.ids.annotationZIndex.current++;
+		expect(handAdded).not.toBe(state.regions[0].zIndex);
+	});
+
+	it("burns no id or zIndex when the add is refused", () => {
+		const { context } = makeContext();
+		expect(() => add({ ...blur, x: 90 }, context)).toThrow();
+		expect(context.ids.annotation.current).toBe(1);
+		expect(context.ids.annotationZIndex.current).toBe(1);
+		expect(add(blur, context).id).toBe("annotation-1");
 	});
 
 	it("takes its ids from the editor's own counter, so they cannot collide", () => {
@@ -97,6 +125,8 @@ describe("annotate.add blur", () => {
 		["a strength above 100", { strength: 101 }],
 		["a text-only field", { text: "hi" }],
 		["a string time", { startMs: "1000" }],
+		["a misspelled strength", { strenght: 80 }],
+		["a range shorter than one exported frame", { startMs: 1001, endMs: 1032 }],
 	])("refuses %s and changes nothing", (_name, override) => {
 		const { state, context } = makeContext();
 		expect(() => add({ ...blur, ...override }, context)).toThrow();
@@ -175,6 +205,36 @@ describe("annotate.update / remove / clear", () => {
 			/inside the frame/,
 		);
 		expect(state.regions[0].position.x).toBe(10);
+	});
+
+	it("refuses a retime shorter than one exported frame and keeps the old range", () => {
+		const { state, context } = makeContext();
+		const { id } = add(blur, context);
+		expect(() =>
+			annotationsOps["annotate.update"]({ id, startMs: 1001, endMs: 1032 }, context),
+		).toThrow(/too short to be rendered/);
+		expect(state.regions[0]).toMatchObject({ startMs: 1000, endMs: 3000 });
+	});
+
+	it("refuses an update whose last field is unknown and applies none of the earlier ones", () => {
+		const { state, context } = makeContext();
+		const { id } = add(blur, context);
+		expect(() =>
+			annotationsOps["annotate.update"]({ id, x: 50, strength: 60, strenght: 80 }, context),
+		).toThrow(/unknown field strenght/);
+		expect(state.regions[0]).toMatchObject({
+			position: { x: 10, y: 20 },
+			blurIntensity: 20,
+		});
+	});
+
+	it("refuses clear with arguments instead of wiping every annotation", () => {
+		const { state, context } = makeContext();
+		const { id } = add(blur, context);
+		expect(() => annotationsOps["annotate.clear"]({ id }, context)).toThrow(
+			/takes no arguments/,
+		);
+		expect(state.regions).toHaveLength(1);
 	});
 
 	it("refuses unknown ids, empty updates and kind changes", () => {

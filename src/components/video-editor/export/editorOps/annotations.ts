@@ -11,6 +11,7 @@ import {
 	type EditorOpContext,
 	type EditorOpMap,
 	nextId,
+	rejectUnknown,
 	requireFiniteNumber,
 	requireObject,
 } from "./types";
@@ -34,6 +35,8 @@ const KIND_FIELDS: Record<AnnotationType, string[]> = {
 };
 const ALL_KIND_FIELDS = [...new Set(Object.values(KIND_FIELDS).flat())];
 const GEOMETRY = ["startMs", "endMs", "x", "y", "width", "height", "trackIndex"];
+const ADD_FIELDS = ["kind", ...GEOMETRY, ...ALL_KIND_FIELDS];
+const MIN_RENDERED_MS = 67;
 
 function optionalNumber(value: unknown, field: string) {
 	return value === undefined ? undefined : requireFiniteNumber(value, field);
@@ -90,6 +93,18 @@ function checkFrame(
 			`${op}: x, y, width and height are percent (0-100) of the video frame with the origin at its top-left, and the box must stay inside the frame.`,
 		);
 	}
+}
+
+function checkRenderedLength(
+	args: Record<string, unknown>,
+	region: Pick<AnnotationRegion, "startMs" | "endMs">,
+	op: string,
+) {
+	if (args.startMs === undefined && args.endMs === undefined) return;
+	if (region.endMs - region.startMs >= MIN_RENDERED_MS) return;
+	throw new Error(
+		`${op}: ${region.endMs - region.startMs} ms is too short to be rendered — a range under ${MIN_RENDERED_MS} ms can fall between two exported frames and show up in none of them. Use at least ${MIN_RENDERED_MS} ms.`,
+	);
 }
 
 function checkKindFields(region: AnnotationRegion, op: string) {
@@ -192,6 +207,7 @@ function requireKnownId(args: Record<string, unknown>, context: EditorOpContext,
 export const annotationsOps: EditorOpMap = {
 	"annotate.add": (payload, context) => {
 		const args = requireObject(payload, "annotate.add");
+		rejectUnknown(args, ADD_FIELDS, "annotate.add");
 		const kind = args.kind as AnnotationType;
 		if (!KINDS.includes(kind)) {
 			throw new Error(`annotate.add: kind must be one of ${KINDS.join(", ")}.`);
@@ -200,24 +216,32 @@ export const annotationsOps: EditorOpMap = {
 		for (const field of ["startMs", "endMs", "x", "y", "width", "height"]) {
 			requireFiniteNumber(args[field], field);
 		}
-		const regions = context.timeline.annotationRegions;
 		const base: AnnotationRegion = {
-			id: nextId(context.ids.annotation, "annotation"),
+			id: "",
 			startMs: 0,
 			endMs: 0,
 			type: kind,
 			content: "",
 			position: { x: 0, y: 0 },
 			size: { width: 0, height: 0 },
-			style: { ...DEFAULT_ANNOTATION_STYLE },
-			zIndex: regions.reduce((max, region) => Math.max(max, region.zIndex), 0) + 1,
+			style:
+				kind === "blur"
+					? { ...DEFAULT_ANNOTATION_STYLE, borderRadius: 0 }
+					: { ...DEFAULT_ANNOTATION_STYLE },
+			zIndex: 0,
 			trackIndex: 0,
 		};
 		if (kind === "figure") base.figureData = { ...DEFAULT_FIGURE_DATA };
 		if (kind === "blur") base.blurIntensity = BLUR_ANNOTATION_STRENGTH;
-		const region = applyKindFields(applyGeometry(base, args), args);
-		checkFrame(region, context, "annotate.add");
-		checkKindFields(region, "annotate.add");
+		const draft = applyKindFields(applyGeometry(base, args), args);
+		checkFrame(draft, context, "annotate.add");
+		checkRenderedLength(args, draft, "annotate.add");
+		checkKindFields(draft, "annotate.add");
+		const region: AnnotationRegion = {
+			...draft,
+			id: nextId(context.ids.annotation, "annotation"),
+			zIndex: context.ids.annotationZIndex.current++,
+		};
 		context.timeline.setAnnotationRegions((current) => [...current, region]);
 		context.timeline.setSelectedAnnotationId(region.id);
 		return { id: region.id, kind, startMs: region.startMs, endMs: region.endMs };
@@ -232,6 +256,7 @@ export const annotationsOps: EditorOpMap = {
 			);
 		}
 		const fields = [...GEOMETRY, ...ALL_KIND_FIELDS];
+		rejectUnknown(args, ["id", "kind", ...fields], "annotate.update");
 		if (!fields.some((field) => args[field] !== undefined)) {
 			throw new Error(
 				`annotate.update needs at least one field to change: ${fields.join(", ")}.`,
@@ -240,6 +265,7 @@ export const annotationsOps: EditorOpMap = {
 		rejectInapplicable(args, existing.type, "annotate.update");
 		const region = applyKindFields(applyGeometry(existing, args), args);
 		checkFrame(region, context, "annotate.update");
+		checkRenderedLength(args, region, "annotate.update");
 		checkKindFields(region, "annotate.update");
 		context.timeline.setAnnotationRegions((current) =>
 			current.map((candidate) => (candidate.id === region.id ? region : candidate)),
@@ -249,6 +275,7 @@ export const annotationsOps: EditorOpMap = {
 
 	"annotate.remove": (payload, context) => {
 		const args = requireObject(payload, "annotate.remove");
+		rejectUnknown(args, ["id"], "annotate.remove");
 		const existing = requireKnownId(args, context, "annotate.remove");
 		context.timeline.setAnnotationRegions((current) =>
 			current.filter((candidate) => candidate.id !== existing.id),
@@ -259,7 +286,15 @@ export const annotationsOps: EditorOpMap = {
 		return { removed: existing.id };
 	},
 
-	"annotate.clear": (_payload, context) => {
+	"annotate.clear": (payload, context) => {
+		if (payload !== undefined && payload !== null) {
+			const args = requireObject(payload, "annotate.clear");
+			if (Object.keys(args).length > 0) {
+				throw new Error(
+					"annotate.clear takes no arguments and removes every annotation. To remove a single one, use annotate.remove with its id.",
+				);
+			}
+		}
 		const count = context.timeline.annotationRegions.length;
 		if (count === 0) throw new Error("annotate.clear: there are no annotations to clear.");
 		context.timeline.setAnnotationRegions([]);
