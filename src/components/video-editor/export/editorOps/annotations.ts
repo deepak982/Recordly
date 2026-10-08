@@ -1,3 +1,269 @@
-import type { EditorOpMap } from "./types";
+import {
+	type AnnotationRegion,
+	type AnnotationType,
+	type ArrowDirection,
+	BLUR_ANNOTATION_STRENGTH,
+	DEFAULT_ANNOTATION_STYLE,
+	DEFAULT_FIGURE_DATA,
+	getTimelineDurationMs,
+} from "../../types";
+import {
+	type EditorOpContext,
+	type EditorOpMap,
+	nextId,
+	requireFiniteNumber,
+	requireObject,
+} from "./types";
 
-export const annotationsOps: EditorOpMap = {};
+const KINDS: AnnotationType[] = ["text", "image", "figure", "blur"];
+const ARROWS: ArrowDirection[] = [
+	"up",
+	"down",
+	"left",
+	"right",
+	"up-right",
+	"up-left",
+	"down-right",
+	"down-left",
+];
+const KIND_FIELDS: Record<AnnotationType, string[]> = {
+	text: ["text", "fontSize", "color"],
+	image: ["image"],
+	figure: ["arrowDirection", "color", "strokeWidth"],
+	blur: ["strength", "blurColor"],
+};
+const ALL_KIND_FIELDS = [...new Set(Object.values(KIND_FIELDS).flat())];
+const GEOMETRY = ["startMs", "endMs", "x", "y", "width", "height", "trackIndex"];
+
+function optionalNumber(value: unknown, field: string) {
+	return value === undefined ? undefined : requireFiniteNumber(value, field);
+}
+
+function requireString(value: unknown, field: string) {
+	if (typeof value !== "string" || value.trim() === "") {
+		throw new Error(`${field} must be a non-empty string.`);
+	}
+	return value;
+}
+
+function rejectInapplicable(args: Record<string, unknown>, kind: AnnotationType, op: string) {
+	for (const field of ALL_KIND_FIELDS) {
+		if (args[field] !== undefined && !KIND_FIELDS[kind].includes(field)) {
+			throw new Error(`${op}: "${field}" does not apply to a ${kind} annotation.`);
+		}
+	}
+}
+
+function checkFrame(
+	region: Pick<AnnotationRegion, "startMs" | "endMs" | "position" | "size">,
+	context: EditorOpContext,
+	op: string,
+) {
+	const timelineMs = getTimelineDurationMs(
+		context.timeline.clipRegions,
+		Math.round(context.duration * 1000),
+	);
+	if (timelineMs <= 0) throw new Error(`${op}: there is no recording loaded to annotate.`);
+	const { startMs, endMs, position, size } = region;
+	if (startMs < 0 || endMs <= startMs) {
+		throw new Error(
+			`${op}: startMs and endMs are timeline milliseconds (after cuts, not source time) and need 0 <= startMs < endMs.`,
+		);
+	}
+	if (endMs > timelineMs) {
+		throw new Error(
+			`${op}: endMs ${endMs} is past the end of the timeline (${timelineMs} ms). Times are timeline milliseconds.`,
+		);
+	}
+	if (size.width <= 0 || size.height <= 0) {
+		throw new Error(
+			`${op}: width and height are percent of the video frame and must be above 0.`,
+		);
+	}
+	if (
+		position.x < 0 ||
+		position.y < 0 ||
+		position.x + size.width > 100 ||
+		position.y + size.height > 100
+	) {
+		throw new Error(
+			`${op}: x, y, width and height are percent (0-100) of the video frame with the origin at its top-left, and the box must stay inside the frame.`,
+		);
+	}
+}
+
+function checkKindFields(region: AnnotationRegion, op: string) {
+	if (region.type === "text" && !(region.textContent ?? "").trim()) {
+		throw new Error(`${op}: a text annotation needs non-empty text.`);
+	}
+	if (region.type === "image" && !(region.imageContent ?? "").startsWith("data:image/")) {
+		throw new Error(`${op}: image must be a data:image/... URL.`);
+	}
+	const intensity = region.blurIntensity;
+	if (region.type === "blur" && intensity !== undefined && (intensity < 1 || intensity > 100)) {
+		throw new Error(`${op}: strength must be between 1 and 100.`);
+	}
+	if (region.type === "figure" && region.figureData) {
+		if (!ARROWS.includes(region.figureData.arrowDirection)) {
+			throw new Error(`${op}: arrowDirection must be one of ${ARROWS.join(", ")}.`);
+		}
+		if (!(region.figureData.strokeWidth > 0)) {
+			throw new Error(`${op}: strokeWidth must be above 0.`);
+		}
+	}
+	if (region.type === "text" && !(region.style.fontSize > 0)) {
+		throw new Error(`${op}: fontSize must be above 0.`);
+	}
+}
+
+function applyKindFields(region: AnnotationRegion, args: Record<string, unknown>) {
+	const next = { ...region };
+	if (args.text !== undefined) {
+		const text = requireString(args.text, "text");
+		next.textContent = text;
+		next.content = text;
+	}
+	if (args.image !== undefined) {
+		const image = requireString(args.image, "image");
+		next.imageContent = image;
+		next.content = image;
+	}
+	if (args.fontSize !== undefined || (args.color !== undefined && region.type === "text")) {
+		next.style = { ...next.style };
+		if (args.fontSize !== undefined)
+			next.style.fontSize = requireFiniteNumber(args.fontSize, "fontSize");
+		if (args.color !== undefined) next.style.color = requireString(args.color, "color");
+	}
+	if (region.type === "figure") {
+		const base = region.figureData ?? DEFAULT_FIGURE_DATA;
+		next.figureData = {
+			arrowDirection:
+				args.arrowDirection === undefined
+					? base.arrowDirection
+					: (args.arrowDirection as ArrowDirection),
+			color: args.color === undefined ? base.color : requireString(args.color, "color"),
+			strokeWidth:
+				args.strokeWidth === undefined
+					? base.strokeWidth
+					: requireFiniteNumber(args.strokeWidth, "strokeWidth"),
+		};
+	}
+	if (region.type === "blur") {
+		if (args.strength !== undefined)
+			next.blurIntensity = requireFiniteNumber(args.strength, "strength");
+		if (args.blurColor !== undefined)
+			next.blurColor = requireString(args.blurColor, "blurColor");
+	}
+	return next;
+}
+
+function applyGeometry(region: AnnotationRegion, args: Record<string, unknown>) {
+	const startMs = optionalNumber(args.startMs, "startMs");
+	const endMs = optionalNumber(args.endMs, "endMs");
+	const x = optionalNumber(args.x, "x");
+	const y = optionalNumber(args.y, "y");
+	const width = optionalNumber(args.width, "width");
+	const height = optionalNumber(args.height, "height");
+	const trackIndex = optionalNumber(args.trackIndex, "trackIndex");
+	if (trackIndex !== undefined && (!Number.isInteger(trackIndex) || trackIndex < 0)) {
+		throw new Error("trackIndex must be a whole number, 0 or more.");
+	}
+	return {
+		...region,
+		startMs: startMs === undefined ? region.startMs : Math.round(startMs),
+		endMs: endMs === undefined ? region.endMs : Math.round(endMs),
+		position: { x: x ?? region.position.x, y: y ?? region.position.y },
+		size: { width: width ?? region.size.width, height: height ?? region.size.height },
+		trackIndex: trackIndex ?? region.trackIndex,
+	};
+}
+
+function requireKnownId(args: Record<string, unknown>, context: EditorOpContext, op: string) {
+	const id = requireString(args.id, "id");
+	const region = context.timeline.annotationRegions.find((candidate) => candidate.id === id);
+	if (!region) {
+		throw new Error(
+			`${op}: there is no annotation with id "${id}". Use the id returned by annotate.add.`,
+		);
+	}
+	return region;
+}
+
+export const annotationsOps: EditorOpMap = {
+	"annotate.add": (payload, context) => {
+		const args = requireObject(payload, "annotate.add");
+		const kind = args.kind as AnnotationType;
+		if (!KINDS.includes(kind)) {
+			throw new Error(`annotate.add: kind must be one of ${KINDS.join(", ")}.`);
+		}
+		rejectInapplicable(args, kind, "annotate.add");
+		for (const field of ["startMs", "endMs", "x", "y", "width", "height"]) {
+			requireFiniteNumber(args[field], field);
+		}
+		const regions = context.timeline.annotationRegions;
+		const base: AnnotationRegion = {
+			id: nextId(context.ids.annotation, "annotation"),
+			startMs: 0,
+			endMs: 0,
+			type: kind,
+			content: "",
+			position: { x: 0, y: 0 },
+			size: { width: 0, height: 0 },
+			style: { ...DEFAULT_ANNOTATION_STYLE },
+			zIndex: regions.reduce((max, region) => Math.max(max, region.zIndex), 0) + 1,
+			trackIndex: 0,
+		};
+		if (kind === "figure") base.figureData = { ...DEFAULT_FIGURE_DATA };
+		if (kind === "blur") base.blurIntensity = BLUR_ANNOTATION_STRENGTH;
+		const region = applyKindFields(applyGeometry(base, args), args);
+		checkFrame(region, context, "annotate.add");
+		checkKindFields(region, "annotate.add");
+		context.timeline.setAnnotationRegions((current) => [...current, region]);
+		context.timeline.setSelectedAnnotationId(region.id);
+		return { id: region.id, kind, startMs: region.startMs, endMs: region.endMs };
+	},
+
+	"annotate.update": (payload, context) => {
+		const args = requireObject(payload, "annotate.update");
+		const existing = requireKnownId(args, context, "annotate.update");
+		if (args.kind !== undefined) {
+			throw new Error(
+				"annotate.update cannot change an annotation's kind. Remove it and add a new one.",
+			);
+		}
+		const fields = [...GEOMETRY, ...ALL_KIND_FIELDS];
+		if (!fields.some((field) => args[field] !== undefined)) {
+			throw new Error(
+				`annotate.update needs at least one field to change: ${fields.join(", ")}.`,
+			);
+		}
+		rejectInapplicable(args, existing.type, "annotate.update");
+		const region = applyKindFields(applyGeometry(existing, args), args);
+		checkFrame(region, context, "annotate.update");
+		checkKindFields(region, "annotate.update");
+		context.timeline.setAnnotationRegions((current) =>
+			current.map((candidate) => (candidate.id === region.id ? region : candidate)),
+		);
+		return { id: region.id, kind: region.type, startMs: region.startMs, endMs: region.endMs };
+	},
+
+	"annotate.remove": (payload, context) => {
+		const args = requireObject(payload, "annotate.remove");
+		const existing = requireKnownId(args, context, "annotate.remove");
+		context.timeline.setAnnotationRegions((current) =>
+			current.filter((candidate) => candidate.id !== existing.id),
+		);
+		if (context.timeline.selectedAnnotationId === existing.id) {
+			context.timeline.setSelectedAnnotationId(null);
+		}
+		return { removed: existing.id };
+	},
+
+	"annotate.clear": (_payload, context) => {
+		const count = context.timeline.annotationRegions.length;
+		if (count === 0) throw new Error("annotate.clear: there are no annotations to clear.");
+		context.timeline.setAnnotationRegions([]);
+		context.timeline.setSelectedAnnotationId(null);
+		return { removed: count };
+	},
+};
