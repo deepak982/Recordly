@@ -47,7 +47,13 @@ vi.mock("../../projectPersistence", () => ({
 	toFileUrl: (path: string) => `file://${path}`,
 }));
 
-import { MAX_PREVIEW_FRAMES, MIN_EVERY_MS, planPreview, renderPreview } from "./preview";
+import {
+	MAX_PREVIEW_FRAMES,
+	MIN_EVERY_MS,
+	planPreview,
+	previewSheetGeometry,
+	renderPreview,
+} from "./preview";
 
 type Listener = () => void;
 
@@ -386,5 +392,24 @@ describe("render_preview", () => {
 			),
 		).rejects.toThrow(/different recording/);
 		expect(video.cleared).toBe(true);
+	});
+});
+
+describe("previewSheetGeometry", () => {
+	it("keeps the planned grid when every frame was drawn", () => {
+		expect(previewSheetGeometry(6, 3)).toEqual({ cols: 3, rows: 2 });
+		expect(previewSheetGeometry(4, 2)).toEqual({ cols: 2, rows: 2 });
+	});
+
+	it("shrinks to one row when the budget cut the sheet short", () => {
+		expect(previewSheetGeometry(2, 3)).toEqual({ cols: 2, rows: 1 });
+	});
+
+	it("drops the rows nothing was drawn into", () => {
+		expect(previewSheetGeometry(4, 3)).toEqual({ cols: 3, rows: 2 });
+	});
+
+	it("never returns a zero-sized sheet", () => {
+		expect(previewSheetGeometry(0, 3)).toEqual({ cols: 1, rows: 1 });
 	});
 });

@@ -27,7 +27,7 @@ const LOAD_TIMEOUT_MS = 20_000;
 const SEEK_TIMEOUT_MS = 10_000;
 const INIT_TIMEOUT_MS = 20_000;
 const RENDER_TIMEOUT_MS = 20_000;
-const TOTAL_BUDGET_MS = 25_000;
+const TOTAL_BUDGET_MS = 120_000;
 const END_FRAME_BACKOFF_MS = 40;
 const FALLBACK_PREVIEW_WIDTH = 1920;
 const FALLBACK_PREVIEW_HEIGHT = 1080;
@@ -184,6 +184,21 @@ function previewPixelSize() {
 
 let rendering = false;
 
+export function previewSheetGeometry(drawnCount: number, planCols: number) {
+	const cols = Math.max(1, drawnCount < planCols ? drawnCount : planCols);
+	return { cols, rows: Math.max(1, Math.ceil(Math.max(1, drawnCount) / cols)) };
+}
+
+function cropSheet(sheet: HTMLCanvasElement, size: { width: number; height: number }) {
+	const cropped = document.createElement("canvas");
+	cropped.width = size.width;
+	cropped.height = size.height;
+	const ctx = cropped.getContext("2d");
+	if (!ctx) return sheet;
+	ctx.drawImage(sheet, 0, 0, size.width, size.height, 0, 0, size.width, size.height);
+	return cropped;
+}
+
 export async function renderPreview(payload: unknown, context: EditorOpContext) {
 	const { timeline, appearance, videoSourcePath, duration } = context;
 	if (!videoSourcePath) {
@@ -270,18 +285,26 @@ export async function renderPreview(payload: unknown, context: EditorOpContext) 
 			);
 			drawn.push(frame);
 		}
-		const dataUrl = sheet.toDataURL("image/jpeg", JPEG_QUALITY);
+		const { cols, rows } = previewSheetGeometry(drawn.length, plan.cols);
+		const used =
+			cols === plan.cols && rows === plan.rows
+				? sheet
+				: cropSheet(sheet, {
+						width: cols * tileWidth + (cols - 1) * TILE_GAP,
+						height: rows * tileHeight + (rows - 1) * TILE_GAP,
+					});
+		const dataUrl = used.toDataURL("image/jpeg", JPEG_QUALITY);
 		const comma = dataUrl.indexOf(",");
 		if (comma < 0) throw new Error("The preview canvas returned no image.");
 		return {
 			image: {
 				data: dataUrl.slice(comma + 1),
 				mimeType: "image/jpeg" as const,
-				width: sheet.width,
-				height: sheet.height,
+				width: used.width,
+				height: used.height,
 			},
-			cols: plan.cols,
-			rows: plan.rows,
+			cols,
+			rows,
 			frames: drawn,
 			...(plan.skippedAtMs.length > 0 && { skippedAtMs: plan.skippedAtMs }),
 			rendered: renderer.rendered,
