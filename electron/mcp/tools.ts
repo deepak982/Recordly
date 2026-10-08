@@ -637,12 +637,18 @@ export function buildRecordlyMcpServer(
 				name: z.string().min(1).optional().describe("Name substring of the window or app"),
 			}),
 		},
-		async (args) =>
-			textResult(
-				linuxControl && args.id && /^(window:)?\d+/.test(args.id)
-					? await agent.chooseWindow(args.id)
+		async (args) => {
+			const recordsScreen =
+				linuxControl ||
+				remote.getStatus().selectedSource?.id?.startsWith("screen:") === true;
+			const picksWindow =
+				control && recordsScreen && !!args.id && /^(window:)?\d+/.test(args.id);
+			return textResult(
+				picksWindow
+					? await agent.chooseWindow(args.id as string)
 					: await remote.selectSource(args),
-			),
+			);
+		},
 	);
 
 	server.registerTool(
@@ -1233,7 +1239,9 @@ export function buildRecordlyMcpServer(
 				"icon, list row, toggle) that find_elements does not list, screenshot a region around it " +
 				"(e.g. 300 × 200 points): the image then shows only that rectangle, clamped to the window, " +
 				"at up to the display's full resolution, and returns originX/originY — use point = origin + " +
-				"pixel × scale.",
+				'pixel × scale. While a whole screen is recorded, of: "display" shows that screen ' +
+				"instead, with the driven window's rectangle in its points, so you can see an app before " +
+				"switching to it with select_source; steps still aim in window points.",
 			inputSchema: z.object({
 				region: z
 					.object({
@@ -1248,11 +1256,18 @@ export function buildRecordlyMcpServer(
 					})
 					.optional()
 					.describe("Zoom into this rectangle of the window; omit for the whole window"),
+				of: z
+					.enum(["window", "display"])
+					.optional()
+					.describe(
+						'Defaults to the window being driven. "display" shows the whole screen being ' +
+							"recorded, to find another app to switch to — aim in window points, not these",
+					),
 			}),
 		},
-		async ({ region }) => {
-			const { data, mimeType, width, height, scale, originX, originY } =
-				await agent.screenshot(region);
+		async ({ region, of }) => {
+			const shot = await agent.screenshot(region, of);
+			const { data, mimeType, width, height, scale, originX, originY } = shot;
 			const offset = region !== undefined || originX !== 0 || originY !== 0;
 			const info = offset
 				? {
@@ -1272,7 +1287,15 @@ export function buildRecordlyMcpServer(
 			return {
 				content: [
 					{ type: "image" as const, data, mimeType },
-					{ type: "text" as const, text: JSON.stringify(info) },
+					{
+						type: "text" as const,
+						text: JSON.stringify({
+							...info,
+							scope: shot.scope,
+							...(shot.window ? { window: shot.window } : {}),
+							...(shot.note ? { note: shot.note } : {}),
+						}),
+					},
 				],
 			};
 		},

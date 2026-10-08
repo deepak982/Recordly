@@ -18,13 +18,19 @@ function setup(
 		controlEnabled = true,
 		platform = "darwin",
 		wayland = false,
-	}: { controlEnabled?: boolean; platform?: NodeJS.Platform; wayland?: boolean } = {},
+		sourceId = "window:421:0",
+	}: {
+		controlEnabled?: boolean;
+		platform?: NodeJS.Platform;
+		wayland?: boolean;
+		sourceId?: string;
+	} = {},
 ) {
 	const remote = {
 		getStatus: () => ({
 			state,
 			lastRecordingPath: "/rec/recording-1.mp4",
-			selectedSource: { id: "window:421:0", name: "Numbers" },
+			selectedSource: { id: sourceId, name: "Numbers" },
 		}),
 		selectSource: vi.fn(async ({ id }: { id?: string }) => ({ id, type: "screen" })),
 		startRecording: vi.fn(async () => {
@@ -323,6 +329,32 @@ describe("buildRecordlyMcpServer", () => {
 		expect(idle.agent.setWindowBounds).toHaveBeenCalled();
 	});
 
+	it("picks the window to drive, not the source, while a whole screen is recorded", async () => {
+		const screen = setup("idle", { sourceId: "screen:1:0" });
+		const drive = await screen.call("tools/call", {
+			name: "select_source",
+			arguments: { id: "window:77:0" },
+		});
+		expect(drive.result.isError).toBeFalsy();
+		expect(screen.agent.chooseWindow).toHaveBeenCalledWith("window:77:0");
+		expect(screen.remote.selectSource).not.toHaveBeenCalled();
+
+		const otherScreen = await screen.call("tools/call", {
+			name: "select_source",
+			arguments: { id: "screen:2:0" },
+		});
+		expect(otherScreen.result.isError).toBeFalsy();
+		expect(screen.remote.selectSource).toHaveBeenCalledWith({ id: "screen:2:0" });
+
+		const window = setup("idle", { sourceId: "window:421:0" });
+		await window.call("tools/call", {
+			name: "select_source",
+			arguments: { id: "window:77:0" },
+		});
+		expect(window.agent.chooseWindow).not.toHaveBeenCalled();
+		expect(window.remote.selectSource).toHaveBeenCalledWith({ id: "window:77:0" });
+	});
+
 	it("refuses open_file while recording, as its description promises", async () => {
 		const recording = setup("recording");
 		const blocked = await recording.call("tools/call", {
@@ -472,7 +504,7 @@ describe("buildRecordlyMcpServer", () => {
 	it("keeps the whole-window screenshot output unchanged", async () => {
 		const { call, agent } = setup();
 		const { result } = await call("tools/call", { name: "screenshot", arguments: {} });
-		expect(agent.screenshot).toHaveBeenCalledWith(undefined);
+		expect(agent.screenshot).toHaveBeenCalledWith(undefined, undefined);
 		expect(JSON.parse(result.content[1].text)).toEqual({
 			width: 1568,
 			height: 980,
@@ -494,7 +526,7 @@ describe("buildRecordlyMcpServer", () => {
 		});
 		const region = { x: 200, y: 100, width: 300, height: 200 };
 		const { result } = await call("tools/call", { name: "screenshot", arguments: { region } });
-		expect(agent.screenshot).toHaveBeenCalledWith(region);
+		expect(agent.screenshot).toHaveBeenCalledWith(region, undefined);
 		expect(JSON.parse(result.content[1].text)).toEqual({
 			width: 600,
 			height: 400,
