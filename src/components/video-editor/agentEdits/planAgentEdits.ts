@@ -275,7 +275,10 @@ function rampShortCuts(
 	});
 }
 
-function holdKeepMs(span: AgentActivitySpan, previous: AgentActivitySpan | undefined): number {
+export function holdKeepMs(
+	span: AgentActivitySpan,
+	previous: AgentActivitySpan | undefined,
+): number {
 	if (span.kind === "wait") return WAIT_KEEP_HEAD_MS + WAIT_KEEP_TAIL_MS;
 	if (previous?.kind !== "wait") return HOLD_KEEP_MS;
 	return Math.min(HOLD_READ_KEEP_MAX_MS, Math.max(HOLD_READ_KEEP_MS, span.endMs - span.startMs));
