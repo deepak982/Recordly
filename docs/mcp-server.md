@@ -82,6 +82,24 @@ Two limits are worth knowing. The window being driven must be on the display bei
 
 `screenshot` still shows the window being driven, and its coordinates still mean window points, so existing flows are unchanged. Pass `of: "display"` to see the whole recorded screen instead — useful for finding an app before switching to it. That view reports `scope`, the driven window's rectangle within the display, and a note on converting between the two; steps always aim in window points.
 
+### Editing the video
+
+These change the edit the editor holds, so the editor window must be open. Every one of them is
+reversible with `history`, **except `set_look`** — the look is not part of the editor's history, and
+each look change says so rather than implying otherwise. Times are milliseconds in the *edited*
+timeline, after cuts, not positions in the original recording.
+
+| Tool | What it does | Arguments |
+| --- | --- | --- |
+| `annotate` | Puts something over the video for a stretch of time: a **blur** to hide anything private, text, an image, or an arrow. Blur is the one to reach for first — a demo of a real application shows real names, addresses and figures, and nothing else here hides them. Geometry is percent of the frame, origin top-left. | `op` (`add`, `update`, `remove`, `clear`), `kind` (`blur`, `text`, `image`, `figure`), `startMs`, `endMs`, `x`, `y`, `width`, `height`, plus the fields of that kind |
+| `history` | Undoes or redoes the last edit, over the editor's own 100-step history. Covers clips, zooms, annotations, audio and captions. Refuses when there is nothing to undo rather than reporting a success that did nothing. | `op` (`undo`, `redo`) |
+| `edit_timeline` | Trims, splits, removes a span, re-speeds a clip, reorders clips — and aims at a length. `set_scene_duration` gives one rehearsed scene a target length and `fit` brings the whole video to one, both by speeding up and trimming the idle stretches the automatic edit already finds, never cutting into action. If the target is out of reach nothing changes and the error says by how much it fell short. | `op`, `startMs`, `endMs`, `timeMs`, `clipIndex`, `speed`, `fromIndex`, `toIndex`, `index`, `ms`, `targetMs` |
+| `edit_zoom` | Overrides the automatic zoom where it guessed wrong. Depth 1–6 is 1.25× to 5×; focus is a fraction of the frame. A new zoom is `manual`, so it keeps the focus given; `auto` follows the cursor instead. Zooms may touch but not overlap. | `op`, `id`, `startMs`, `endMs`, `depth`, `focus`, `mode` |
+| `set_look` | The frame (wallpaper, padding, corner radius, shadow, background blur, crop, webcam) and the motion (zoom durations and easings, cursor style, size, smoothing, click effects, camera and cursor springs). Only the fields passed change; an unknown field is refused rather than ignored. **Not undoable.** | `op` (`set`, `motion`), `fields` |
+| `edit_captions` | `generate` with `from: "scenes"` turns the rehearsed scene list into captions at their scene boundaries — a narrated feel with no audio and no voice recording. `from: "audio"` transcribes speech instead, which is slow and needs the Whisper model. Also set, update, remove, style and animation. Captions show one at a time, so cues may not overlap, and a cue inside a cut is refused. | `op`, `from`, `cues`, `id`, `text`, `startMs`, `endMs`, `all`, `style`, `fields` |
+| `edit_audio` | Adds music or a narration file from an absolute path, sets volumes, silences what the recording captured, or picks which captured track to use. There is no text-to-speech: record or generate the audio elsewhere and pass the file. | `op`, `path`, `startMs`, `durationMs`, `volume`, `trackIndex`, `id`, `muted`, `clipId`, `track`, `normalize` |
+| `sample_frames` | Sweeps the whole video as a contact sheet of evenly spaced frames. `review_recording` shows only the frames before each cut and `get_frame` only one moment, so this is the only way to check a long take for a leaked address or a stray window. 2 to 12 frames; tiles are small, so use it to spot a suspect moment and `get_frame` to read it. | `everyMs` or `count` (exactly one), `source` |
+
 ### Driving the window
 
 These tools are offered on macOS, Windows and Linux with X11. On Wayland they aren't offered, so the agent never sees them; [Mouse and keyboard control](#mouse-and-keyboard-control) describes each platform. Every tool in this section refuses while **Let agents use the mouse and keyboard** is off.

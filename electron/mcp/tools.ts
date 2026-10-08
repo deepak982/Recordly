@@ -749,8 +749,9 @@ export function buildRecordlyMcpServer(
 			description:
 				"Export the last recording to a video file with no dialog, using the editor's current look " +
 				"(automatic zooms, cursor, background). Waits for the editor to finish loading, then returns " +
-				'the saved path. A very long export returns { status: "still-exporting" } — then poll ' +
-				"get_status until export.state is done or failed.",
+				"the saved path, with the file's width, height, duration and frame rate so you can " +
+				"check it without another tool. A very long export returns { status: " +
+				'"still-exporting" } — then poll get_status until export.state is done or failed.',
 			inputSchema: z.object({
 				outputPath: z
 					.string()
@@ -784,6 +785,18 @@ export function buildRecordlyMcpServer(
 					.string()
 					.optional()
 					.describe('Letterbox to exactly this size, e.g. "2880x1600"; mp4 only'),
+				scale: z
+					.number()
+					.optional()
+					.describe("Shrink the output, 0.05–1; mp4 only, and not with padTo"),
+				fps: z.number().optional().describe("Frame rate, 1–120; mp4 only"),
+				posterAtMs: z
+					.number()
+					.optional()
+					.describe(
+						"Use the frame at this edited time as the file's cover, instead of the first " +
+							"frame, which is often a dull starting screen; mp4 only",
+					),
 			}),
 		},
 		async (args, ctx) => {
@@ -834,6 +847,276 @@ export function buildRecordlyMcpServer(
 				],
 			};
 		},
+	);
+
+	server.registerTool(
+		"edit_timeline",
+		{
+			description:
+				"Change the cut: trim, split, remove a span, re-speed a clip, reorder clips, or hit a " +
+				"length. op trim keeps only startMs–endMs (of one clip with clipIndex, which can only " +
+				"shorten it); split cuts at timeMs; remove drops a span and closes the gap; speed sets " +
+				"one clip's rate (0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2 — anything else is refused); " +
+				"reorder moves a clip. set_scene_duration makes one rehearsed scene last ms, and fit " +
+				"brings the whole video to targetMs — both only shorten, by speeding up and trimming " +
+				"the idle stretches the automatic edit already finds, never cutting into action, and " +
+				"both need the scene list from a recording an agent drove. If a target is out of reach " +
+				"nothing changes and the error says by how much it fell short. Times are milliseconds " +
+				"in the edited timeline. Reversible with history undo.",
+			inputSchema: z.object({
+				op: z.enum([
+					"trim",
+					"split",
+					"remove",
+					"speed",
+					"reorder",
+					"set_scene_duration",
+					"fit",
+				]),
+				startMs: z.number().min(0).optional(),
+				endMs: z.number().min(0).optional(),
+				timeMs: z.number().min(0).optional().describe("op split"),
+				clipIndex: z
+					.number()
+					.int()
+					.min(0)
+					.optional()
+					.describe("0-based, in timeline order"),
+				speed: z.number().positive().optional().describe("op speed"),
+				fromIndex: z.number().int().min(0).optional().describe("op reorder"),
+				toIndex: z.number().int().min(0).optional().describe("op reorder"),
+				index: z
+					.number()
+					.int()
+					.min(0)
+					.optional()
+					.describe("op set_scene_duration: the scene"),
+				ms: z.number().min(0).optional().describe("op set_scene_duration"),
+				targetMs: z.number().min(0).optional().describe("op fit"),
+			}),
+		},
+		async ({ op, ...rest }, ctx) =>
+			textResult(
+				await editor.requestEditor(`timeline.${op}`, rest, { signal: ctx.mcpReq.signal }),
+			),
+	);
+
+	server.registerTool(
+		"edit_zoom",
+		{
+			description:
+				"Override the automatic zoom when it guesses wrong. depth 1–6 is 1.25×, 1.5×, 1.8×, " +
+				"2.2×, 3.5× and 5×; focus is {cx, cy} as a fraction of the frame. A new zoom is " +
+				'"manual" so it keeps your focus — mode "auto" follows the cursor instead, and can be ' +
+				"dropped when a fresh recording's own suggestions are applied. Zooms may not overlap, " +
+				"though they may touch. op clear removes the automatic ones too. Times are " +
+				"milliseconds in the edited timeline. Reversible with history undo.",
+			inputSchema: z.object({
+				op: z.enum(["add", "update", "remove", "clear"]),
+				id: z.string().min(1).optional().describe("Required for update and remove"),
+				startMs: z.number().min(0).optional(),
+				endMs: z.number().min(0).optional(),
+				depth: z.number().int().min(1).max(6).optional().describe("Defaults to 3 (1.8x)"),
+				focus: z
+					.object({ cx: z.number().min(0).max(1), cy: z.number().min(0).max(1) })
+					.optional()
+					.describe("Fraction of the frame; defaults to the centre"),
+				mode: z.enum(["auto", "manual"]).optional(),
+			}),
+		},
+		async ({ op, ...rest }, ctx) =>
+			textResult(
+				await editor.requestEditor(`zoom.${op}`, rest, { signal: ctx.mcpReq.signal }),
+			),
+	);
+
+	server.registerTool(
+		"set_look",
+		{
+			description:
+				"Set how the video looks. op set takes the frame: wallpaper, padding, borderRadius, " +
+				"shadowIntensity, backgroundBlur, crop and webcam. op motion takes the movement: zoom " +
+				"durations and easings, cursor style, size, smoothing and click effects, and the " +
+				"camera and cursor springs — pass only the fields you want and the rest are left " +
+				"alone, and an unknown field is refused rather than ignored. **The look is not part of " +
+				"the editor's history, so history undo will NOT revert this** — set the old values " +
+				"again to go back.",
+			inputSchema: z.object({
+				op: z.enum(["set", "motion"]),
+				fields: z
+					.record(z.string(), z.unknown())
+					.describe("The settings to change, e.g. {wallpaper, padding} or {cursorSize}"),
+			}),
+		},
+		async ({ op, fields }, ctx) =>
+			textResult(
+				await editor.requestEditor(`look.${op}`, fields, { signal: ctx.mcpReq.signal }),
+			),
+	);
+
+	server.registerTool(
+		"edit_captions",
+		{
+			description:
+				'Put words on screen. op generate with from: "scenes" turns the scene list you ' +
+				"rehearsed into captions at their scene boundaries — a narrated feel with no audio and " +
+				'no recording of a voice; from: "audio" transcribes the recording\'s speech instead, ' +
+				"which is slow and needs the Whisper model. op set replaces every caption, update " +
+				"changes one, remove drops one or all, style sets size, colours and position, and " +
+				"animation picks none, fade, rise or pop. Captions show one at a time, so cues may not " +
+				"overlap, and a cue inside a cut is refused. Reversible with history undo.",
+			inputSchema: z.object({
+				op: z.enum(["generate", "set", "update", "remove", "style", "animation"]),
+				from: z.enum(["audio", "scenes"]).optional().describe("op generate"),
+				timeoutMs: z.number().int().optional().describe("op generate from audio"),
+				cues: z
+					.array(
+						z.object({
+							startMs: z.number().min(0),
+							endMs: z.number().min(0),
+							text: z.string().min(1),
+						}),
+					)
+					.optional()
+					.describe("op set"),
+				id: z.string().min(1).optional(),
+				text: z.string().min(1).optional(),
+				startMs: z.number().min(0).optional(),
+				endMs: z.number().min(0).optional(),
+				all: z.boolean().optional().describe("op remove: every caption"),
+				style: z.enum(["none", "fade", "rise", "pop"]).optional().describe("op animation"),
+				fields: z
+					.record(z.string(), z.unknown())
+					.optional()
+					.describe("op style: fontSize, textColor, bottomOffset, maxRows, enabled, …"),
+			}),
+		},
+		async ({ op, fields, ...rest }, ctx) =>
+			textResult(
+				await editor.requestEditor(
+					`captions.${op}`,
+					op === "style" ? (fields ?? {}) : rest,
+					{ signal: ctx.mcpReq.signal },
+				),
+			),
+	);
+
+	server.registerTool(
+		"edit_audio",
+		{
+			description:
+				"Add music or a narration file, set its volume, or silence the recording's own sound. " +
+				"op add places an audio file (mp3, wav, m4a, aac, ogg, opus, flac) from an absolute " +
+				"path and trims it to the room available; volume is 0–1. op mute_source silences what " +
+				"the recording captured, for one clip or all of them, and source_track picks which " +
+				"captured track (mixed, system, mic) to use. There is no text-to-speech: record or " +
+				"generate the audio elsewhere and pass the file. Reversible with history undo.",
+			inputSchema: z.object({
+				op: z.enum(["add", "remove", "volume", "mute_source", "source_track"]),
+				path: z
+					.string()
+					.min(1)
+					.optional()
+					.describe("op add: absolute path to an audio file"),
+				startMs: z.number().min(0).optional().describe("op add; defaults to 0"),
+				durationMs: z.number().positive().optional().describe("op add"),
+				volume: z.number().min(0).max(1).optional(),
+				trackIndex: z.number().int().min(0).optional().describe("op add"),
+				id: z.string().min(1).optional().describe("op remove and volume"),
+				muted: z.boolean().optional().describe("op mute_source"),
+				clipId: z.string().min(1).optional().describe("One clip; omit for all"),
+				track: z.string().min(1).optional().describe("op source_track"),
+				normalize: z.boolean().optional().describe("op source_track"),
+			}),
+		},
+		async ({ op, ...rest }, ctx) =>
+			textResult(
+				await editor.requestEditor(`audio.${op}`, rest, { signal: ctx.mcpReq.signal }),
+			),
+	);
+
+	server.registerTool(
+		"annotate",
+		{
+			description:
+				"Put something on top of the video for a stretch of time: blur over anything private, " +
+				"text, an image, or an arrow. **Use blur before anyone sees the video** — a demo of a " +
+				"real app shows real names, email addresses and figures, and nothing else here hides " +
+				"them. Geometry is percent of the frame (0–100, origin top-left) and times are " +
+				"milliseconds in the EDITED timeline, after cuts. Needs the editor open. Reversible " +
+				"with history undo. get_frame or sample_frames shows whether it covers what you meant.",
+			inputSchema: z.object({
+				op: z.enum(["add", "update", "remove", "clear"]),
+				id: z.string().min(1).optional().describe("Required for update and remove"),
+				kind: z
+					.enum(["text", "image", "figure", "blur"])
+					.optional()
+					.describe("Required for add; figure is an arrow. Cannot be changed later"),
+				startMs: z.number().min(0).optional(),
+				endMs: z.number().min(0).optional(),
+				x: z
+					.number()
+					.min(0)
+					.max(100)
+					.optional()
+					.describe("Percent of the frame, from the left"),
+				y: z
+					.number()
+					.min(0)
+					.max(100)
+					.optional()
+					.describe("Percent of the frame, from the top"),
+				width: z.number().min(0).max(100).optional().describe("Percent of the frame"),
+				height: z.number().min(0).max(100).optional().describe("Percent of the frame"),
+				text: z.string().min(1).optional().describe("kind text"),
+				fontSize: z.number().positive().optional().describe("kind text"),
+				color: z.string().min(1).optional().describe("kind text or figure"),
+				image: z.string().min(1).optional().describe('kind image: a "data:image/..." URL'),
+				arrowDirection: z
+					.enum([
+						"up",
+						"down",
+						"left",
+						"right",
+						"up-right",
+						"up-left",
+						"down-right",
+						"down-left",
+					])
+					.optional()
+					.describe("kind figure; defaults to right"),
+				strokeWidth: z.number().positive().optional().describe("kind figure"),
+				strength: z
+					.number()
+					.min(1)
+					.max(100)
+					.optional()
+					.describe("kind blur; defaults to 20"),
+				blurColor: z.string().min(1).optional().describe("kind blur"),
+				trackIndex: z.number().int().min(0).optional(),
+			}),
+		},
+		async ({ op, ...rest }, ctx) =>
+			textResult(
+				await editor.requestEditor(`annotate.${op}`, rest, { signal: ctx.mcpReq.signal }),
+			),
+	);
+
+	server.registerTool(
+		"history",
+		{
+			description:
+				"Undo or redo the last edit in the editor, over its own 100-step history. This covers " +
+				"clips, zooms, annotations, audio and captions — so any edit made with annotate, " +
+				"edit_timeline or edit_zoom can be taken back. It does NOT cover the look (wallpaper, " +
+				"padding, cursor settings), which the editor does not track. Refuses when there is " +
+				"nothing to undo rather than reporting a success that did nothing.",
+			inputSchema: z.object({ op: z.enum(["undo", "redo"]) }),
+		},
+		async ({ op }, ctx) =>
+			textResult(
+				await editor.requestEditor(`history.${op}`, {}, { signal: ctx.mcpReq.signal }),
+			),
 	);
 
 	server.registerTool(
@@ -1103,6 +1386,35 @@ export function buildRecordlyMcpServer(
 							2,
 						),
 					},
+				],
+			};
+		},
+	);
+
+	server.registerTool(
+		"sample_frames",
+		{
+			description:
+				"Sweep the whole video: a contact sheet of evenly spaced frames, so you can check a " +
+				"three-minute take for a leaked email address, a stray window or a wrong screen. " +
+				"review_recording only shows the frames before each cut and get_frame only one " +
+				"moment, so this is the only way to see the rest. Pass exactly one of everyMs or " +
+				"count; 2 to 12 frames. Tiles are small (about 400x230 for 1080p), so use it to spot " +
+				"a suspect moment and then get_frame at that time to read it. Moments that fall in a " +
+				"cut gap are skipped and listed.",
+			inputSchema: z.object({
+				everyMs: z.number().optional().describe("One frame every this long"),
+				count: z.number().int().optional().describe("This many, evenly spaced"),
+				source: z.enum(["edited", "raw"]).optional().describe("Defaults to edited"),
+			}),
+		},
+		async (args, ctx) => {
+			const sheet = await editor.sampleFrames(args, { signal: ctx.mcpReq.signal });
+			const { image, ...rest } = sheet;
+			return {
+				content: [
+					{ type: "image" as const, data: image.data, mimeType: image.mimeType },
+					{ type: "text" as const, text: JSON.stringify(rest, null, 2) },
 				],
 			};
 		},
@@ -1461,11 +1773,32 @@ export function buildRecordlyMcpServer(
 				"Because the whole step re-runs, a type interrupted halfway types the text again on top " +
 				"of what landed, so prefer 'abort' for scenes that type into fields. " +
 				"tolerancePx is how far the pointer may drift in one second before it counts as a " +
-				"takeover (default 8; macOS only). Esc always aborts. Settings last until changed.",
+				"takeover (default 8; macOS only). requireTargets refuses raw coordinates while " +
+				"recording — a stale coordinate once created a sheet in a real workbook because the " +
+				"tab strip had scrolled since the screenshot. safeRegion here applies to every later " +
+				"perform, and perform's own safeRegion wins. Esc always aborts. Settings last until " +
+				"changed.",
 			inputSchema: z.object({
 				tolerancePx: z.number().min(1).max(500).optional(),
 				autoResumeAfterMs: z.number().int().min(200).max(30000).optional(),
-				onTakeover: z.enum(["pause", "abort"]),
+				onTakeover: z.enum(["pause", "abort"]).optional(),
+				requireTargets: z
+					.boolean()
+					.optional()
+					.describe(
+						"true refuses a raw x/y click, drag or move while recording, so every step " +
+							"re-finds its target as it runs; scrolling is unaffected",
+					),
+				safeRegion: z
+					.object({
+						x: z.number(),
+						y: z.number(),
+						width: z.number().positive(),
+						height: z.number().positive(),
+					})
+					.nullable()
+					.optional()
+					.describe("Window-relative rectangle for every later perform; null clears it"),
 			}),
 		},
 		async (args) => textResult({ policy: agent.setInputPolicy(args) }),

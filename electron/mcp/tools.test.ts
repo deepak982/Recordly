@@ -77,7 +77,14 @@ function setup(
 		})),
 	} as unknown as RemoteReview & Record<string, ReturnType<typeof vi.fn>>;
 	const editor = {
-		requestEditor: vi.fn(async () => ({})),
+		requestEditor: vi.fn(async (op: string) => ({ op })),
+		sampleFrames: vi.fn(async () => ({
+			image: { data: "aGk=", mimeType: "image/jpeg" as const, width: 900, height: 600 },
+			cols: 3,
+			rows: 2,
+			source: "edited" as const,
+			frames: [{ atMs: 0, sourceMs: 0 }],
+		})),
 		getState: vi.fn(async () => ({
 			videoPath: "/rec/recording-1.mp4",
 			durationMs: 52_000,
@@ -212,16 +219,22 @@ describe("buildRecordlyMcpServer", () => {
 		const { call } = setup();
 		const { result } = await call("tools/list");
 		expect(result.tools.map((tool: { name: string }) => tool.name).sort()).toEqual([
+			"annotate",
 			"arm_recording",
 			"cancel_recording",
 			"click",
 			"delete_recording",
 			"drag",
+			"edit_audio",
+			"edit_captions",
+			"edit_timeline",
+			"edit_zoom",
 			"export_video",
 			"find_elements",
 			"get_editor_state",
 			"get_frame",
 			"get_status",
+			"history",
 			"list_recordings",
 			"list_sources",
 			"move_pointer",
@@ -234,12 +247,14 @@ describe("buildRecordlyMcpServer", () => {
 			"restore_recording",
 			"resume_recording",
 			"review_recording",
+			"sample_frames",
 			"screenshot",
 			"scroll",
 			"select_source",
 			"set_cursor",
 			"set_do_not_disturb",
 			"set_input_policy",
+			"set_look",
 			"set_overlay",
 			"set_window_bounds",
 			"start_recording",
@@ -296,6 +311,42 @@ describe("buildRecordlyMcpServer", () => {
 			durationMs: 52_000,
 			sourceDurationMs: 76_000,
 		});
+	});
+
+	it("routes every editing tool to its editor op", async () => {
+		const { call, editor } = setup();
+		const cases: [string, Record<string, unknown>, string][] = [
+			["annotate", { op: "add", kind: "blur", startMs: 0, endMs: 1 }, "annotate.add"],
+			["history", { op: "undo" }, "history.undo"],
+			["edit_timeline", { op: "split", timeMs: 500 }, "timeline.split"],
+			["edit_zoom", { op: "clear" }, "zoom.clear"],
+			["set_look", { op: "set", fields: { padding: 10 } }, "look.set"],
+			["edit_captions", { op: "generate", from: "scenes" }, "captions.generate"],
+			["edit_audio", { op: "mute_source", muted: true }, "audio.mute_source"],
+		];
+		for (const [name, args, op] of cases) {
+			const { result } = await call("tools/call", { name, arguments: args });
+			expect(result.isError, `${name} errored`).toBeFalsy();
+			expect(editor.requestEditor).toHaveBeenCalledWith(op, expect.anything(), {
+				signal: expect.anything(),
+			});
+		}
+		expect(editor.requestEditor).toHaveBeenCalledTimes(cases.length);
+	});
+
+	it("sweeps the whole video as a contact sheet", async () => {
+		const { call, editor } = setup();
+		const { result } = await call("tools/call", {
+			name: "sample_frames",
+			arguments: { count: 6 },
+		});
+		expect(result.isError).toBeFalsy();
+		expect(result.content[0]).toMatchObject({ type: "image", mimeType: "image/jpeg" });
+		expect(JSON.parse(result.content[1].text)).toMatchObject({ cols: 3, rows: 2 });
+		expect(editor.sampleFrames).toHaveBeenCalledWith(
+			{ count: 6 },
+			{ signal: expect.anything() },
+		);
 	});
 
 	it("refuses to move the window being recorded, but moves another one", async () => {
@@ -835,13 +886,19 @@ describe("buildRecordlyMcpServer", () => {
 		const { call } = setup("idle", { platform: "linux", wayland: true });
 		const { result } = await call("tools/list");
 		expect(result.tools.map((tool: { name: string }) => tool.name).sort()).toEqual([
+			"annotate",
 			"arm_recording",
 			"cancel_recording",
 			"delete_recording",
+			"edit_audio",
+			"edit_captions",
+			"edit_timeline",
+			"edit_zoom",
 			"export_video",
 			"get_editor_state",
 			"get_frame",
 			"get_status",
+			"history",
 			"list_recordings",
 			"list_sources",
 			"pause_recording",
@@ -849,9 +906,11 @@ describe("buildRecordlyMcpServer", () => {
 			"restore_recording",
 			"resume_recording",
 			"review_recording",
+			"sample_frames",
 			"select_source",
 			"set_cursor",
 			"set_do_not_disturb",
+			"set_look",
 			"set_overlay",
 			"start_recording",
 			"stop_recording",
