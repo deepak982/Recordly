@@ -3,14 +3,18 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { promisify } from "node:util";
 import { type IpcMain, ipcMain, type WebContents } from "electron";
+import type { AnnotationRegion } from "../../src/components/video-editor/types";
 import { getFfmpegBinaryPath } from "../ipc/ffmpeg/binary";
 import { probeNativeVideoMetadata } from "../ipc/ffmpeg/metadata";
+import { describeFfmpegError } from "./ffmpegError";
+import { type RenderedAnnotation, renderFrameAnnotations } from "./renderedFrame";
 import { contactSheetArgs, planSheet } from "./reviewRecording";
 
 const EDITOR_READY_TIMEOUT_MS = 45_000;
 const EDITOR_REPLY_TIMEOUT_MS = 20_000;
 const SLOW_OP_TIMEOUT_MS = 10 * 60_000;
 const SLOW_OPS = new Set(["timeline.join", "captions.generate"]);
+const SLOW_OP_WAIT_MS = 60_000;
 const FRAME_TIMEOUT_MS = 30_000;
 const MAX_FRAME_WIDTH = 1920;
 const END_FRAME_BACKOFF_MS = 40;
@@ -115,18 +119,6 @@ export type SampledFrames = {
 	skippedAtMs?: number[];
 };
 
-function describeFfmpegError(error: unknown, timeoutMs: number) {
-	const failure = error as NodeJS.ErrnoException & { killed?: boolean; stderr?: Buffer | string };
-	if (failure.name === "AbortError" || failure.code === "ABORT_ERR") {
-		return "The request was canceled.";
-	}
-	if (failure.code === "ENOENT") return "FFmpeg was not found.";
-	if (failure.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") return "The frame was too large.";
-	if (failure.killed) return `FFmpeg took longer than ${timeoutMs / 1000} s.`;
-	const stderr = failure.stderr?.toString().trim().slice(0, 300);
-	return stderr || failure.message;
-}
-
 export function createRemoteEditor({
 	ipc = ipcMain,
 	ffmpegPath = getFfmpegBinaryPath,
@@ -150,6 +142,7 @@ export function createRemoteEditor({
 	const watchedEditors = new WeakSet<WebContents>();
 	const readyCheckers = new Set<() => void>();
 	const pending = new Map<string, Pending>();
+	const outstanding = new Map<string, { op: string; startedAt: number }>();
 
 	function forgetEditor(editor: WebContents) {
 		readyEditors.delete(editor);
@@ -236,6 +229,7 @@ export function createRemoteEditor({
 		return new Promise<T>((resolve, reject) => {
 			const id = randomUUID();
 			const settle = (result: RemoteEditorResult) => {
+				outstanding.delete(id);
 				if (!pending.delete(id)) return;
 				clearTimeout(timer);
 				signal?.removeEventListener("abort", onAbort);
@@ -254,6 +248,7 @@ export function createRemoteEditor({
 			);
 			signal?.addEventListener("abort", onAbort, { once: true });
 			pending.set(id, { editor, settle });
+			outstanding.set(id, { op, startedAt: Date.now() });
 			try {
 				editor.send("remote-editor-request", {
 					id,
@@ -298,9 +293,20 @@ export function createRemoteEditor({
 	}
 
 	async function getFrame(
-		{ atMs, source = "edited" }: { atMs: number; source?: EditorFrameSource },
+		{
+			atMs,
+			source = "edited",
+			rendered = false,
+		}: { atMs: number; source?: EditorFrameSource; rendered?: boolean },
 		opts: { signal?: AbortSignal } = {},
-	): Promise<{ dataUrl: string; atMs: number; source: EditorFrameSource; sourceMs: number }> {
+	): Promise<{
+		dataUrl: string;
+		atMs: number;
+		source: EditorFrameSource;
+		sourceMs: number;
+		annotations?: RenderedAnnotation[];
+		note?: string;
+	}> {
 		if (!Number.isFinite(atMs) || atMs < 0) throw new Error("atMs must be 0 or more.");
 		if (source !== "edited" && source !== "raw") {
 			throw new Error(`source must be "edited" or "raw", not "${source}".`);
@@ -335,11 +341,19 @@ export function createRemoteEditor({
 		if (!png.subarray(0, 4).equals(PNG_SIGNATURE)) {
 			throw new Error("Recordly could not read that frame: FFmpeg did not return an image.");
 		}
+		const shown = rendered
+			? await renderFrameAnnotations(
+					{ png, atMs, annotations: (state.annotations ?? []) as AnnotationRegion[] },
+					{ binary, runFfmpeg, signal: opts.signal },
+				)
+			: null;
 		return {
-			dataUrl: `data:image/png;base64,${png.toString("base64")}`,
+			dataUrl: `data:image/png;base64,${(shown?.png ?? png).toString("base64")}`,
 			atMs,
 			source,
 			sourceMs: Math.round(seekMs),
+			...(shown ? { annotations: shown.annotations } : {}),
+			...(shown?.note ? { note: shown.note } : {}),
 		};
 	}
 
@@ -451,7 +465,38 @@ export function createRemoteEditor({
 		};
 	}
 
-	return { requestEditor, getState, getFrame, sampleFrames };
+	function runningOp() {
+		let oldest: { op: string; startedAt: number } | null = null;
+		for (const entry of outstanding.values()) {
+			if (!oldest || entry.startedAt < oldest.startedAt) oldest = entry;
+		}
+		return oldest ? { op: oldest.op, forMs: Date.now() - oldest.startedAt } : null;
+	}
+
+	async function requestLong<T = unknown>(
+		op: string,
+		payload?: unknown,
+		{ signal, waitMs = SLOW_OP_WAIT_MS }: { signal?: AbortSignal; waitMs?: number } = {},
+	): Promise<
+		{ status: "done"; data: T } | { status: "still-running"; op: string; waitedMs: number }
+	> {
+		const work = requestEditor<T>(op, payload, { signal });
+		work.catch(() => undefined);
+		const started = Date.now();
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const detached = new Promise<null>((resolve) => {
+			timer = setTimeout(() => resolve(null), waitMs);
+		});
+		try {
+			const done = await Promise.race([work.then((data) => ({ data })), detached]);
+			if (!done) return { status: "still-running", op, waitedMs: Date.now() - started };
+			return { status: "done", data: done.data };
+		} finally {
+			clearTimeout(timer);
+		}
+	}
+
+	return { requestEditor, requestLong, runningOp, getState, getFrame, sampleFrames };
 }
 
 export type RemoteEditor = ReturnType<typeof createRemoteEditor>;
