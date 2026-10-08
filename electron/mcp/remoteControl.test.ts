@@ -874,3 +874,100 @@ describe("display geometry", () => {
 		expect(deps.selectSource).not.toHaveBeenCalled();
 	});
 });
+
+describe("helper-window filtering and driven window", () => {
+	const ghost = (id: string, width: number, height: number, name = "CursorUIViewService") => ({
+		id,
+		name,
+		appName: name,
+		sourceType: "window" as const,
+		onScreen: false,
+		width,
+		height,
+	});
+	const real = {
+		id: "window:100:0",
+		name: "Docs",
+		sourceType: "window" as const,
+		onScreen: true,
+		width: 800,
+		height: 600,
+	};
+	const ids = async (remote: ReturnType<typeof setup>["remote"]) =>
+		(await remote.listSources()).map((source) => source.id);
+
+	it("hides small off-screen helper windows and keeps everything else", async () => {
+		const minimizedBig = { ...ghost("window:4:0", 800, 600, "Minimized"), name: "Minimized" };
+		const { remote } = setup({
+			listSources: async () => [
+				SOURCES[0],
+				ghost("window:1:0", 64, 64),
+				ghost("window:2:0", 312, 237, "AutoFill (Notes)"),
+				ghost("window:3:0", 500, 500, "Open and Save Panel Service (Preview)"),
+				minimizedBig,
+				real,
+			],
+		});
+		expect(await ids(remote)).toEqual(["screen:1", "window:4:0", "window:100:0"]);
+	});
+
+	it("keeps a tiny window that is on screen or whose size is unknown", async () => {
+		const tiny = { ...real, id: "window:5:0", width: 64, height: 64 };
+		const unknown = { ...ghost("window:6:0", 1, 1), width: undefined, height: undefined };
+		const { remote } = setup({ listSources: async () => [tiny, unknown] });
+		expect(await ids(remote)).toEqual(["window:5:0", "window:6:0"]);
+	});
+
+	it("lists only the screen when there are no windows", async () => {
+		const { remote } = setup({ listSources: async () => [SOURCES[0]] });
+		expect(await ids(remote)).toEqual(["screen:1"]);
+	});
+
+	it("still selects a hidden helper window by id", async () => {
+		const { remote, deps } = setup({ listSources: async () => [ghost("window:1:0", 64, 64)] });
+		await expect(remote.selectSource({ id: "window:1:0" })).resolves.toMatchObject({
+			id: "window:1:0",
+		});
+		expect(deps.selectSource).toHaveBeenCalled();
+	});
+
+	it("still selects a hidden helper window by name", async () => {
+		const { remote, deps } = setup({
+			listSources: async () => [ghost("window:1:0", 64, 64, "AutoFill (Notes)")],
+		});
+		await expect(remote.selectSource({ name: "autofill" })).resolves.toMatchObject({
+			id: "window:1:0",
+		});
+		expect(deps.selectSource).toHaveBeenCalled();
+	});
+
+	it("does not filter the Wayland portal entry", async () => {
+		const { remote } = setup({
+			platform: "linux",
+			isWayland: () => true,
+			listSources: async () => [ghost("window:1:0", 64, 64)],
+		});
+		expect(await ids(remote)).toEqual(["screen:linux-portal"]);
+	});
+
+	it("reports no driven window when a screen is recorded and none is chosen", () => {
+		const { remote } = setup();
+		expect(remote.getStatus().drivenWindow).toBeNull();
+	});
+
+	it("reports the chosen control window while a screen is recorded", () => {
+		const { remote } = setup();
+		remote.setControlWindowProvider(() => 330);
+		expect(remote.getStatus()).toMatchObject({
+			selectedSource: { id: "screen:1" },
+			drivenWindow: { id: "window:330:0", role: "control" },
+		});
+	});
+
+	it("reports the recorded window as the driven one, ignoring a stale control window", () => {
+		const { remote, state } = setup();
+		remote.setControlWindowProvider(() => 330);
+		state.source = { id: "window:9:0", name: "Docs" } as SelectedSource;
+		expect(remote.getStatus().drivenWindow).toEqual({ id: "window:9:0", role: "recorded" });
+	});
+});

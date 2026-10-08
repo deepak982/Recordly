@@ -756,7 +756,8 @@ const undoChord = (name: string): { key: string; modifiers: AgentModifier[] } =>
 });
 
 export function createAgentControl(
-	remote: Pick<RemoteControl, "getStatus" | "listSources" | "selectSource">,
+	remote: Pick<RemoteControl, "getStatus" | "listSources" | "selectSource"> &
+		Partial<Pick<RemoteControl, "setControlWindowProvider">>,
 	overrides: Partial<AgentControlDeps> = {},
 ) {
 	const deps = { ...defaultDeps(), ...overrides };
@@ -764,6 +765,7 @@ export function createAgentControl(
 	const webWindows = new Map<number, boolean>();
 	let busy = false;
 	let controlWindowId: number | null = null;
+	remote.setControlWindowProvider?.(() => controlWindowId);
 	let lastInput = 0;
 	let policy: InputPolicy = { autoResumeAfterMs: 2000, onTakeover: "abort" };
 

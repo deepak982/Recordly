@@ -190,6 +190,19 @@ const WINDOW_FIELDS = [
 	"height",
 ] as const;
 
+const GHOST_MAX_SIDE = 500;
+
+function isHelperGhost(source: RawSource) {
+	return (
+		source.id.startsWith("window:") &&
+		source.onScreen === false &&
+		typeof source.width === "number" &&
+		typeof source.height === "number" &&
+		source.width <= GHOST_MAX_SIDE &&
+		source.height <= GHOST_MAX_SIDE
+	);
+}
+
 function displayOf(source: RawSource, displays: DisplayInfo[]) {
 	if (source.display_id === undefined) return undefined;
 	const screen =
@@ -264,6 +277,7 @@ type Pending = {
 export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) {
 	const deps = { ...defaultDeps(), ...overrides };
 	let recording = false;
+	let controlWindowId: () => number | null = () => null;
 	let recordingHud: Hud | null = null;
 	let closingHud: Hud | null = null;
 	let closingSince = 0;
@@ -487,17 +501,30 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 		return true;
 	}
 
+	function drivenWindow() {
+		const sourceId = deps.getSelectedSource()?.id;
+		if (sourceId?.startsWith("window:")) return { id: sourceId, role: "recorded" as const };
+		const controlId = controlWindowId();
+		return controlId === null
+			? null
+			: { id: `window:${controlId}:0`, role: "control" as const };
+	}
+
 	function getStatus() {
 		const source = deps.getSelectedSource();
 		return {
 			state: getState(),
 			selectedSource: source ? { id: source.id ?? null, name: source.name } : null,
+			drivenWindow: drivenWindow(),
 			lastRecordingPath: deps.getLastVideoPath(),
 			permissions: deps.getPermissions(),
 		};
 	}
 
 	return {
+		setControlWindowProvider(provider: () => number | null) {
+			controlWindowId = provider;
+		},
 		onRecordingStateChange(next: boolean) {
 			if (next) {
 				const hud = deps.getHud();
@@ -518,7 +545,9 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 		getStatus,
 		async listSources() {
 			const displays = deps.getDisplays();
-			return (await rawSources()).map((source) => summarize(source, displays));
+			return (await rawSources())
+				.filter((source) => !isHelperGhost(source))
+				.map((source) => summarize(source, displays));
 		},
 		async selectSource({ id, name }: { id?: string; name?: string }) {
 			const needle = name?.trim().toLowerCase();

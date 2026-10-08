@@ -3206,4 +3206,14 @@ describe("recording a whole display", () => {
 		expect(shot).toMatchObject({ scope: "display", note: /is closed, minimized or not on/ });
 		expect(shot.window).toBeUndefined();
 	});
+	it("hands the remote a provider that tracks the chosen window", async () => {
+		const setControlWindowProvider = vi.fn();
+		const fixture = setup({ platform: on("darwin"), getSelectedSource: displaySource("1") });
+		const remote = { ...fixture.remote, setControlWindowProvider };
+		const agent = createAgentControl(remote as never, fixture.deps);
+		const provider = setControlWindowProvider.mock.calls[0][0] as () => number | null;
+		expect(provider()).toBeNull();
+		await agent.chooseWindow("window:7:0");
+		expect(provider()).toBe(7);
+	});
 });
