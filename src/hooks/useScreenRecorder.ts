@@ -135,7 +135,10 @@ type UseScreenRecorderReturn = {
 	pauseRecording: () => void;
 	resumeRecording: () => void;
 	cancelRecording: () => void;
-	preparePermissions: (options?: { startup?: boolean }) => Promise<boolean>;
+	preparePermissions: (options?: {
+		startup?: boolean;
+		notify?: (message: string) => void;
+	}) => Promise<boolean>;
 	isMacOS: boolean;
 	microphoneEnabled: boolean;
 	setMicrophoneEnabled: (enabled: boolean) => void;
@@ -179,6 +182,28 @@ function getErrorMessage(error: unknown) {
 	}
 
 	return "An unexpected error occurred";
+}
+
+export const START_BLOCK_MESSAGES = {
+	alreadyStarting:
+		"Recordly is already starting a recording. Wait for it to finish, or call cancel_recording.",
+	noSource: "No source is selected. Call select_source first.",
+	cancelled: "The recording start was cancelled in Recordly (Cancel or Stop was used).",
+	countdownCancelled: "The countdown was cancelled in Recordly before recording began.",
+	accessibilityUnavailable:
+		"Recordly could not read the Accessibility permission status. Check System Settings, then try again.",
+} as const;
+
+export function resolveStartPreflight({
+	inFlight,
+	hasSource,
+}: {
+	inFlight: boolean;
+	hasSource: boolean;
+}): string | null {
+	if (inFlight) return START_BLOCK_MESSAGES.alreadyStarting;
+	if (!hasSource) return START_BLOCK_MESSAGES.noSource;
+	return null;
 }
 
 export function normalizeBrowserMicrophoneProfile(value?: string | null): BrowserMicrophoneProfile {
@@ -695,46 +720,53 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 		micFallbackPauseIntervals.current = [];
 	}, []);
 
-	const preparePermissions = useCallback(async (options: { startup?: boolean } = {}) => {
-		const platform = await window.electronAPI.getPlatform();
-		if (platform !== "darwin") {
-			return true;
-		}
+	const preparePermissions = useCallback(
+		async (options: { startup?: boolean; notify?: (message: string) => void } = {}) => {
+			const notify = options.notify ?? alert;
+			const platform = await window.electronAPI.getPlatform();
+			if (platform !== "darwin") {
+				return true;
+			}
 
-		const screenPermission = await window.electronAPI.getScreenRecordingPermissionStatus();
-		if (!screenPermission.success || screenPermission.status !== "granted") {
-			await window.electronAPI.openScreenRecordingPreferences();
-			alert(
+			const screenPermission = await window.electronAPI.getScreenRecordingPermissionStatus();
+			if (!screenPermission.success || screenPermission.status !== "granted") {
+				await window.electronAPI.openScreenRecordingPreferences();
+				notify(
+					options.startup
+						? "Recordly needs Screen Recording permission before you start. System Settings has been opened. After enabling it, quit and reopen Recordly."
+						: "Screen Recording permission is still missing. System Settings has been opened again. Enable it, then quit and reopen Recordly before recording.",
+				);
+				return false;
+			}
+
+			const accessibilityPermission =
+				await window.electronAPI.getAccessibilityPermissionStatus();
+			if (!accessibilityPermission.success) {
+				if (options.notify) notify(START_BLOCK_MESSAGES.accessibilityUnavailable);
+				return false;
+			}
+
+			if (accessibilityPermission.trusted) {
+				return true;
+			}
+
+			const requestedAccessibility =
+				await window.electronAPI.requestAccessibilityPermission();
+			if (requestedAccessibility.success && requestedAccessibility.trusted) {
+				return true;
+			}
+
+			await window.electronAPI.openAccessibilityPreferences();
+			notify(
 				options.startup
-					? "Recordly needs Screen Recording permission before you start. System Settings has been opened. After enabling it, quit and reopen Recordly."
-					: "Screen Recording permission is still missing. System Settings has been opened again. Enable it, then quit and reopen Recordly before recording.",
+					? "Recordly also needs Accessibility permission for cursor tracking. System Settings has been opened. After enabling it, quit and reopen Recordly."
+					: "Accessibility permission is still missing. System Settings has been opened again. Enable it, then quit and reopen Recordly before recording.",
 			);
+
 			return false;
-		}
-
-		const accessibilityPermission = await window.electronAPI.getAccessibilityPermissionStatus();
-		if (!accessibilityPermission.success) {
-			return false;
-		}
-
-		if (accessibilityPermission.trusted) {
-			return true;
-		}
-
-		const requestedAccessibility = await window.electronAPI.requestAccessibilityPermission();
-		if (requestedAccessibility.success && requestedAccessibility.trusted) {
-			return true;
-		}
-
-		await window.electronAPI.openAccessibilityPreferences();
-		alert(
-			options.startup
-				? "Recordly also needs Accessibility permission for cursor tracking. System Settings has been opened. After enabling it, quit and reopen Recordly."
-				: "Accessibility permission is still missing. System Settings has been opened again. Enable it, then quit and reopen Recordly before recording.",
-		);
-
-		return false;
-	}, []);
+		},
+		[],
+	);
 
 	const selectMimeType = useCallback(() => {
 		return selectRecordingMimeType();
@@ -1257,96 +1289,103 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 		}
 	}, []);
 
-	const prepareRecordingStart = useCallback(async () => {
-		const platform = await window.electronAPI.getPlatform();
-		hideEditorOverlayCursorByDefault.current = false;
-		const existingSource = await window.electronAPI.getSelectedSource();
-		const selectedSource =
-			existingSource ?? (platform === "linux" ? LINUX_PORTAL_SOURCE : null);
-		if (!selectedSource) {
-			alert("Please select a source to record");
-			return null;
-		}
-
-		if (!existingSource && selectedSource.id === "screen:linux-portal") {
-			try {
-				await window.electronAPI.selectSource(selectedSource);
-			} catch (err) {
-				console.warn("Failed to persist Linux portal sentinel source:", err);
+	const prepareRecordingStart = useCallback(
+		async (notify: (message: string) => void) => {
+			const platform = await window.electronAPI.getPlatform();
+			hideEditorOverlayCursorByDefault.current = false;
+			const existingSource = await window.electronAPI.getSelectedSource();
+			const selectedSource =
+				existingSource ?? (platform === "linux" ? LINUX_PORTAL_SOURCE : null);
+			const preflightError = resolveStartPreflight({
+				inFlight: false,
+				hasSource: Boolean(selectedSource),
+			});
+			if (!selectedSource || preflightError) {
+				notify(preflightError ?? START_BLOCK_MESSAGES.noSource);
+				return null;
 			}
-		}
 
-		const permissionsReady = await preparePermissions();
-		if (!permissionsReady) {
-			return null;
-		}
-
-		recordingSessionTimestamp.current = Date.now();
-		resetRecordingClock(recordingSessionTimestamp.current);
-		await prepareWebcamRecorder();
-
-		const useNativeMacScreenCapture =
-			platform === "darwin" &&
-			(selectedSource.id?.startsWith("screen:") ||
-				selectedSource.id?.startsWith("window:")) &&
-			typeof window.electronAPI.startNativeScreenRecording === "function";
-
-		let useNativeWindowsCapture = false;
-		if (
-			platform === "win32" &&
-			shouldUseNativeWindowsCaptureForSource(selectedSource) &&
-			typeof window.electronAPI.isNativeWindowsCaptureAvailable === "function"
-		) {
-			try {
-				const nativeWindowsResult =
-					await window.electronAPI.isNativeWindowsCaptureAvailable();
-				useNativeWindowsCapture = nativeWindowsResult.available;
-				if (!useNativeWindowsCapture && !hasShownNativeWindowsFallbackToast.current) {
-					void logNativeCaptureDiagnostics("is-native-windows-capture-available");
-					hasShownNativeWindowsFallbackToast.current = true;
-					toast.info(
-						"Native Windows capture is unavailable. Falling back to browser capture.",
-					);
-				}
-			} catch {
-				useNativeWindowsCapture = false;
-				if (!hasShownNativeWindowsFallbackToast.current) {
-					hasShownNativeWindowsFallbackToast.current = true;
-					toast.info(
-						"Unable to check native Windows capture. Falling back to browser capture.",
-					);
+			if (!existingSource && selectedSource.id === "screen:linux-portal") {
+				try {
+					await window.electronAPI.selectSource(selectedSource);
+				} catch (err) {
+					console.warn("Failed to persist Linux portal sentinel source:", err);
 				}
 			}
-		}
 
-		let micLabel: string | undefined;
-		if ((useNativeMacScreenCapture || useNativeWindowsCapture) && microphoneEnabled) {
-			try {
-				const devices = await navigator.mediaDevices.enumerateDevices();
-				const mic = devices.find(
-					(d) => d.deviceId === microphoneDeviceId && d.kind === "audioinput",
-				);
-				micLabel = mic?.label || undefined;
-			} catch {
-				// Fall through - native process will use the default mic.
+			const permissionsReady = await preparePermissions({ notify });
+			if (!permissionsReady) {
+				return null;
 			}
-		}
 
-		return {
-			platform,
-			selectedSource,
-			useNativeMacScreenCapture,
-			useNativeWindowsCapture,
-			micLabel,
-		};
-	}, [
-		logNativeCaptureDiagnostics,
-		microphoneDeviceId,
-		microphoneEnabled,
-		preparePermissions,
-		prepareWebcamRecorder,
-		resetRecordingClock,
-	]);
+			recordingSessionTimestamp.current = Date.now();
+			resetRecordingClock(recordingSessionTimestamp.current);
+			await prepareWebcamRecorder();
+
+			const useNativeMacScreenCapture =
+				platform === "darwin" &&
+				(selectedSource.id?.startsWith("screen:") ||
+					selectedSource.id?.startsWith("window:")) &&
+				typeof window.electronAPI.startNativeScreenRecording === "function";
+
+			let useNativeWindowsCapture = false;
+			if (
+				platform === "win32" &&
+				shouldUseNativeWindowsCaptureForSource(selectedSource) &&
+				typeof window.electronAPI.isNativeWindowsCaptureAvailable === "function"
+			) {
+				try {
+					const nativeWindowsResult =
+						await window.electronAPI.isNativeWindowsCaptureAvailable();
+					useNativeWindowsCapture = nativeWindowsResult.available;
+					if (!useNativeWindowsCapture && !hasShownNativeWindowsFallbackToast.current) {
+						void logNativeCaptureDiagnostics("is-native-windows-capture-available");
+						hasShownNativeWindowsFallbackToast.current = true;
+						toast.info(
+							"Native Windows capture is unavailable. Falling back to browser capture.",
+						);
+					}
+				} catch {
+					useNativeWindowsCapture = false;
+					if (!hasShownNativeWindowsFallbackToast.current) {
+						hasShownNativeWindowsFallbackToast.current = true;
+						toast.info(
+							"Unable to check native Windows capture. Falling back to browser capture.",
+						);
+					}
+				}
+			}
+
+			let micLabel: string | undefined;
+			if ((useNativeMacScreenCapture || useNativeWindowsCapture) && microphoneEnabled) {
+				try {
+					const devices = await navigator.mediaDevices.enumerateDevices();
+					const mic = devices.find(
+						(d) => d.deviceId === microphoneDeviceId && d.kind === "audioinput",
+					);
+					micLabel = mic?.label || undefined;
+				} catch {
+					// Fall through - native process will use the default mic.
+				}
+			}
+
+			return {
+				platform,
+				selectedSource,
+				useNativeMacScreenCapture,
+				useNativeWindowsCapture,
+				micLabel,
+			};
+		},
+		[
+			logNativeCaptureDiagnostics,
+			microphoneDeviceId,
+			microphoneEnabled,
+			preparePermissions,
+			prepareWebcamRecorder,
+			resetRecordingClock,
+		],
+	);
 
 	const discardActiveNativeCapture = useCallback(async () => {
 		const pendingPath = pendingNativeCleanupPath.current;
@@ -1813,7 +1852,18 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 	const startRecording = async (
 		options: { remoteCommandId?: string; countdownSeconds?: number } = {},
 	) => {
-		if (startInFlight.current) {
+		const preflightError = resolveStartPreflight({
+			inFlight: startInFlight.current,
+			hasSource: true,
+		});
+		if (preflightError) {
+			if (options.remoteCommandId) {
+				window.electronAPI.sendRemoteRecordingResult({
+					id: options.remoteCommandId,
+					ok: false,
+					error: preflightError,
+				});
+			}
 			return;
 		}
 		const countdownSeconds = options.countdownSeconds ?? countdownDelay;
@@ -1823,7 +1873,15 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 		remoteStartedRun.current = Boolean(options.remoteCommandId);
 		const startGeneration = recordingStartGeneration.current + 1;
 		recordingStartGeneration.current = startGeneration;
-		const startWasCancelled = () => recordingStartGeneration.current !== startGeneration;
+		const startWasCancelled = () => {
+			const cancelled = recordingStartGeneration.current !== startGeneration;
+			if (cancelled) remoteError ??= START_BLOCK_MESSAGES.cancelled;
+			return cancelled;
+		};
+		const failStart = (message: string) => {
+			remoteError ??= message;
+			warnUser(message);
+		};
 
 		let hudSourceSelectionActive = false;
 		const setHudSourceSelectionActive = (active: boolean) => {
@@ -1840,7 +1898,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 		setStarting(true);
 
 		try {
-			const preparedStart = await prepareRecordingStart();
+			const preparedStart = await prepareRecordingStart(failStart);
 			if (!preparedStart || startWasCancelled()) {
 				cleanupCapturedMedia();
 				await stopWebcamRecorder();
@@ -1855,6 +1913,8 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 				setCountdownActive(true);
 				try {
 					const result = await window.electronAPI.startCountdown(countdownSeconds);
+					if (result.cancelled) remoteError ??= START_BLOCK_MESSAGES.countdownCancelled;
+					if (!result.success) remoteError ??= "The recording countdown failed to run.";
 					if (!result.success || result.cancelled || startWasCancelled()) {
 						cleanupCapturedMedia();
 						await stopWebcamRecorder();

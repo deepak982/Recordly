@@ -10,6 +10,8 @@ import {
 	type RemoteActionOutcome,
 	type RemoteRecorderState,
 	resolveBrowserCaptureCursorPolicy,
+	resolveStartPreflight,
+	START_BLOCK_MESSAGES,
 	shouldUseNativeWindowsCaptureForSource,
 	stopAndDiscardNativeCapture,
 } from "./useScreenRecorder";
@@ -1135,5 +1137,23 @@ describe("remote stop failure acks", () => {
 		).resolves.toBeNull();
 		await expect(persistFinalizedRecording(api, session)).resolves.toBeNull();
 		expect(api.setCurrentVideoPath).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe("resolveStartPreflight", () => {
+	it("explains a missing source", () => {
+		expect(resolveStartPreflight({ inFlight: false, hasSource: false })).toBe(
+			START_BLOCK_MESSAGES.noSource,
+		);
+	});
+
+	it("explains a start that is already in flight before anything else", () => {
+		expect(resolveStartPreflight({ inFlight: true, hasSource: false })).toBe(
+			START_BLOCK_MESSAGES.alreadyStarting,
+		);
+	});
+
+	it("passes when ready", () => {
+		expect(resolveStartPreflight({ inFlight: false, hasSource: true })).toBeNull();
 	});
 });
