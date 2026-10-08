@@ -73,33 +73,30 @@ const INPUT_HELP =
 
 const MAC_INSTRUCTIONS =
 	"Recordly records the screen and turns recordings into polished demo videos: it zooms on clicks " +
-	"and smooths the cursor. On macOS it drives the recorded window with the real mouse and keyboard, " +
-	"so a demo of any website or desktop app needs no other browser or input tool.\n\n" +
+	"and smooths the cursor. On macOS it drives the recorded window with the real mouse and keyboard.\n\n" +
 	"Never record a flow you have not already run. Plan, rehearse, take:\n" +
 	"1. Target: open_url for a web page, or list_sources → select_source for an app. Keep the window " +
-	"landscape (at least 1.2 × as wide as tall) so zooms work, and uncovered.\n" +
+	"landscape (at least 1.2 × as wide as tall) so zooms work, and uncovered. Two apps in one take: " +
+	"select a screen, then select_source with a window id picks the window you drive, switchable " +
+	"mid-take.\n" +
 	"2. Plan. Write the scene list and every step first. Aim with targets {text, role?, index?}, not " +
-	"coordinates: give role (a link is not a button) and the label's whole visible text, counts " +
-	'included ("Pending 93").\n' +
-	"3. Rehearse unrecorded, one page at a time: perform dryRun: true (it checks only the page you " +
-	"are on), fix every missing or ambiguous target, then perform that page's steps with then: " +
+	"coordinates: give role (a link is not a button) and the label's whole visible text.\n" +
+	"3. Rehearse unrecorded, one page at a time: perform dryRun: true (one page only), fix every " +
+	"missing or ambiguous target, then perform that page's steps with then: " +
 	'"elements" and confirm the page. Note durationMs. Do side effects here, not in the take.\n' +
 	"4. Reset to the start state, move_pointer to scene 1's start, then start_recording.\n" +
 	"5. Replay the rehearsed steps in as few perform calls as you can; gaps between calls are cut, so " +
-	"one per scene reads best. Leave timing to Recordly; title only for captions.\n" +
-	"6. stop_recording, review_recording, then export_video.\n\n" +
+	"one per scene reads best. Leave timing to Recordly.\n" +
+	"6. stop_recording, then review_recording. Cover anything private with annotate blur before " +
+	"anyone sees the video; sample_frames checks the whole take. Then export_video.\n\n" +
 	"Coordinates are window-relative points; (0,0) is the window's top-left.\n\n" +
 	"Errors: 'the user took over' cuts only that scene: wait, re-aim, carry on; ask " +
 	"only if they want the machine back. 'Mouse and keyboard control is off' → ask " +
 	`the user to turn on ${CONTROL_SWITCH}. Missing permission → ask the user to grant it in System ` +
-	"Settings and reopen Recordly. Window closed, covered or on another desktop → list_sources, " +
-	"select_source, screenshot. A failed step ('Step n') means the page diverged: cancel_recording, " +
-	"re-plan, rehearse, re-take. Never retry blindly or patch a ruined take. Act only inside the " +
-	"selected window.";
-
-const LINUX_ACCESSIBILITY =
-	"Browsers and Electron apps list their controls only when started with ACCESSIBILITY_ENABLED=1; " +
-	"otherwise aim with region screenshots.";
+	"Settings and reopen Recordly. Window closed or covered → list_sources, select_source, " +
+	"screenshot. A failed step ('Step n') means the page diverged: cancel_recording, " +
+	"re-plan, rehearse, re-take. Never retry blindly or patch a ruined take. Act only in the window " +
+	"you drive.";
 
 function controlInstructions(platform: NodeJS.Platform) {
 	if (platform === "darwin") return MAC_INSTRUCTIONS;
@@ -119,13 +116,15 @@ function controlInstructions(platform: NodeJS.Platform) {
 			`Coordinates are window-relative points; (0,0) is the window's top-left. Shortcuts use ctrl (cmd is the ${linux ? "Super" : "Windows"} key).`,
 		);
 	return linux
-		? text
-				.replace(
-					"or list_sources → select_source for an app. Keep the window " +
-						"landscape (at least 1.2 × as wide as tall) so zooms work, and uncovered.",
-					"or list_sources → select_source with an app window's id. Keep it uncovered.",
-				)
-				.replace("\n\nErrors:", ` ${LINUX_ACCESSIBILITY}\n\nErrors:`)
+		? text.replace(
+				"or list_sources → select_source for an app. Keep the window landscape (at least " +
+					"1.2 × as wide as tall) so zooms work, and uncovered. Two apps in one take: " +
+					"select a screen, then select_source with a window id picks the window you drive, " +
+					"switchable mid-take.",
+				"or list_sources → select_source with an app window's id. Keep it uncovered. Recordly " +
+					"always records the whole screen here, so select_source with another window id " +
+					"switches which window you drive, even mid-take.",
+			)
 		: text;
 }
 
@@ -134,7 +133,10 @@ const INSTRUCTIONS =
 	"clicks, smooth cursor). It cannot move the mouse or type on this platform, so the user (or another " +
 	"tool) performs the demo. Flow for any demo: list_sources → select_source → agree the steps with the " +
 	"user → start_recording → the user performs the demo → stop_recording (returns the saved video path " +
-	"and opens the editor) → review_recording → export_video. On Linux with Wayland, the user must pick the screen in the " +
+	"and opens the editor) → review_recording → export_video. Before anyone sees the video, cover " +
+	"anything private with annotate blur; sample_frames checks the whole take, and edit_timeline, " +
+	"edit_zoom, edit_captions and edit_audio change the cut, with history to undo. On Linux with " +
+	"Wayland, the user must pick the screen in the " +
 	"system share dialog after start_recording. Call get_status at any time. Tools refuse with a clear " +
 	"message instead of showing dialogs; relay permission errors to the user.";
 
@@ -343,7 +345,11 @@ function demoPrompt(
 	control: boolean,
 	{ goal, url, app, output_path }: DemoArgs,
 ) {
-	const exportStep = `Call stop_recording, then review_recording to check the contact sheet, then export_video${output_path ? ` with outputPath "${output_path}"` : ""}.`;
+	const exportStep =
+		"Call stop_recording, then review_recording to check the contact sheet. Sweep the whole take " +
+		"with sample_frames and cover anything private — account names, email addresses, figures — " +
+		"with annotate blur: nothing else hides it, and a blur is reversible with history. Then " +
+		`export_video${output_path ? ` with outputPath "${output_path}"` : ""}.`;
 	const linux = platform === "linux";
 	if (control) {
 		const target = url
@@ -472,7 +478,12 @@ function demoPrompt(
 			"- Reset to the start state?",
 			"Any no means do not record.",
 			...(platform === "darwin" ? [] : ["Use ctrl, not cmd, for shortcuts."]),
-			...(linux ? [LINUX_ACCESSIBILITY] : []),
+			...(linux
+				? [
+						"Browsers and Electron apps list their controls only when started with " +
+							"ACCESSIBILITY_ENABLED=1; otherwise aim from a region screenshot.",
+					]
+				: []),
 		].join("\n");
 	}
 	const target = [
@@ -856,7 +867,7 @@ export function buildRecordlyMcpServer(
 				"Change the cut: trim, split, remove a span, re-speed a clip, reorder clips, or hit a " +
 				"length. op trim keeps only startMs–endMs (of one clip with clipIndex, which can only " +
 				"shorten it); split cuts at timeMs; remove drops a span and closes the gap; speed sets " +
-				"one clip's rate (0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2 — anything else is refused); " +
+				"one clip's rate to anything this machine can play back, 1 being normal; " +
 				"reorder moves a clip. set_scene_duration makes one rehearsed scene last ms, and fit " +
 				"brings the whole video to targetMs — both only shorten, by speeding up and trimming " +
 				"the idle stretches the automatic edit already finds, never cutting into action, and " +
@@ -1655,7 +1666,9 @@ export function buildRecordlyMcpServer(
 				"{ elements: [{role, label, x, y, width, height}], truncated } in window-relative points; " +
 				"click the centre (x + width/2, y + height/2). More precise than reading a screenshot, but " +
 				"some apps (canvas-based, games, custom-drawn UIs) expose few or no elements — then pick " +
-				"points from screenshot. A label is the whole visible text, counts and badges included: a " +
+				"points from screenshot. On Linux, browsers and Electron apps list controls only when " +
+				"started with ACCESSIBILITY_ENABLED=1; otherwise aim from a region screenshot. " +
+				"A label is the whole visible text, counts and badges included: a " +
 				'chip reading "Pending" with 93 items has the label "Pending 93". ' +
 				"Read-only; works while the mouse and keyboard switch is off.",
 			annotations: { readOnlyHint: true },

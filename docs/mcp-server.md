@@ -187,13 +187,16 @@ To enter words, use `type_text` rather than one `press_key` per character.
 
 With both switches on, an agent can produce a finished demo of any website or desktop app with no browser automation tool of its own. Ask for it in plain words, for example *"Record a demo of signing up at https://example.com and changing the profile photo, and save it to ~/Movies"*. The agent then works through these steps:
 
-1. **`open_url`** with the page — or, for a desktop app, **`list_sources`** and **`select_source`**. A page opens in your default browser, already signed in, and its window becomes the selected source.
+1. **`open_url`** with the page — or, for a desktop app, **`list_sources`** and **`select_source`**. A page opens in your default browser, already signed in, and its window becomes the selected source. For a demo that crosses two apps, it selects a **screen** instead: the whole display records while `select_source` with a window id chooses which window the mouse and keyboard act on, and that can change mid-take.
 2. **`screenshot`** and **`find_elements`** to learn the screen and write out the scenes and the exact target for every step. Nothing is being recorded yet, so this can take as long as it needs.
 3. **Rehearse the whole flow unrecorded**, one page at a time: `perform` with `dryRun` for that page's targets, then the page's steps for real with `then: "elements"` to confirm the page went where the plan said. Anything with a side effect — submitting, deleting — happens here.
 4. **Reset to the starting state**, **`move_pointer`** to where the first scene begins, then **`start_recording`** with the rehearsed scene list.
 5. **`perform`** once per scene, replaying only steps the rehearsal proved, aimed at targets. Recordly paces the motion and holds each result for reading.
 6. **`stop_recording`**. The editor opens with the agent's thinking time already cut and zooms on its clicks (see [Automatic edits](#automatic-edits-for-agent-recordings)).
-7. **`review_recording`** to check the contact sheet and summary, then **`export_video`** with the destination and format you asked for.
+7. **`review_recording`** to check the contact sheet and summary, and **`sample_frames`** to sweep the parts between the cuts. Anything private still on screen is covered with **`annotate`** blur — nothing else hides it, and `history` undoes a blur that landed wrong.
+8. **`export_video`** with the destination and format you asked for. It reports the file's size, duration and frame rate, so the agent can confirm the result without another tool.
+
+The cut is not fixed at this point. `edit_timeline` trims, splits, re-speeds and can bring the whole video to a target length; `edit_zoom` overrides a zoom that guessed wrong; `edit_captions` can caption from the scene list without any audio; `edit_audio` adds music or narration; `set_look` sets the frame and the motion. Every one of those is reversible with `history`, except `set_look`, which the editor does not track.
 
 Keep your hands off the mouse and keyboard while it runs: touching either stops the agent (see [Mouse and keyboard control](#mouse-and-keyboard-control)). If you do take over, only that scene ends: Recordly cuts it from the video and the agent waits until you are done, re-aims from a fresh screenshot and continues with the next `perform`. It asks you only if you clearly want the machine back.
 
@@ -223,8 +226,15 @@ Show: <the one thing a viewer should come away understanding>
 Path: <the steps, in order, in plain words>
 For: <who watches it>
 Don't: <anything that would change data>
+Hide: <anything on screen that must not be published>
 Save to: <absolute path>.mp4
 ```
+
+Two lines are worth adding when they apply. **Hide** matters whenever the demo runs against real data: the
+agent can blur names, addresses and figures, but only if it knows they are sensitive — it cannot tell a
+real customer from test data by looking. And if the flow **crosses two apps** (download a file, then open
+it), say so: the agent records the whole screen for that instead of one window, and the result is a single
+continuous take rather than two clips joined.
 
 A filled-in example:
 
@@ -268,7 +278,8 @@ brisk" or "take it slowly" to change how long results are held.
 These habits make a clean video of any app or site, whether you ask in plain words or use `record_demo`:
 
 - **Tell one story.** One goal per video, split into a few scenes that each show one thing. Say in the request what the viewer should come away knowing.
-- **Prepare the window.** Make it landscape — at least 1.2 times as wide as tall — so automatic zooms work, and keep it uncovered. Sign in, load any sample data, and close what you don't want seen before the agent starts.
+- **Prepare the window.** Make it landscape — at least 1.2 times as wide as tall — so automatic zooms work, and keep it uncovered. `set_window_bounds` can do this for the agent. Sign in, load any sample data, and close what you don't want seen before the agent starts.
+- **Say what must not be published.** A demo against real data shows real names, addresses and figures. The agent can blur them, but it cannot tell real data from test data by looking, so name what is sensitive in the request. `sample_frames` is what catches the rest: `review_recording` only shows the frames around each cut, so a leak in the middle of a long take will not appear there.
 - **Rehearse before recording.** The agent never records a flow it has not already run, on any platform where it can drive the window. It works in three phases. It *plans* with `screenshot` and `find_elements` while nothing is recorded, writing out the scenes and the exact target for every step. It *rehearses* the flow for real but unrecorded, one page at a time: `perform` with `dryRun: true` to check that page's targets — a dry run only probes the page the agent is on — then the page's steps with `then: "elements"` to confirm the page went where the plan said. Side effects — submitting, deleting — happen in the rehearsal, not in the take. Then it resets to the starting state and *takes* the video, replaying only steps it has already watched work.
 - **Aim by text.** Targets name the element to click, so the click lands on its centre wherever the page puts it. For a control with no label, the agent screenshots a small region around it (about 300 × 200 points), which comes back at the display's full resolution, instead of guessing from the whole-window image.
 - **Start with the cursor in place.** The agent moves the pointer to where the first scene begins before `start_recording`, so the video does not open with the cursor somewhere else.

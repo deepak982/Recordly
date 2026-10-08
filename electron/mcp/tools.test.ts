@@ -168,7 +168,7 @@ function setup(
 const PROTOCOL_INSTRUCTIONS = [
 	"Never record a flow you have not already run",
 	"Plan, rehearse, take:",
-	"it checks only the page you are on",
+	"dryRun: true (one page only)",
 	"cancel_recording, re-plan, rehearse, re-take",
 	"Never retry blindly or patch a ruined take",
 ];
@@ -204,7 +204,8 @@ const REPLACE_ANCHORS = [
 	"Missing permission → ask the user to grant it in System Settings and reopen Recordly. ",
 	"Coordinates are window-relative points; (0,0) is the window's top-left.",
 	"or list_sources → select_source for an app. Keep the window landscape (at least 1.2 × as wide " +
-		"as tall) so zooms work, and uncovered.",
+		"as tall) so zooms work, and uncovered. Two apps in one take: select a screen, then " +
+		"select_source with a window id picks the window you drive, switchable mid-take.",
 	"\n\nErrors:",
 ];
 
@@ -952,7 +953,11 @@ describe("buildRecordlyMcpServer", () => {
 		expect(instructions).not.toContain("macOS");
 		if (platform === "linux") {
 			expect(instructions).toContain("whole screen");
-			expect(instructions).toContain("ACCESSIBILITY_ENABLED=1");
+			expect(instructions).toContain("even mid-take");
+			const findElements = result.tools.find(
+				(tool: { name: string }) => tool.name === "find_elements",
+			);
+			expect(findElements.description).toContain("ACCESSIBILITY_ENABLED=1");
 		}
 		const tooLong = [
 			instructions,
