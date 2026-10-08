@@ -871,8 +871,12 @@ describe("preflight and target checks", () => {
 	});
 
 	it("needs a selected window that is on this desktop", async () => {
+		const none = setup({ getSelectedSource: () => null });
+		await expect(none.agent.findElements({})).rejects.toThrow(/Select a window first/);
 		const screen = setup({ getSelectedSource: () => ({ id: "screen:1", name: "Screen" }) });
-		await expect(screen.agent.findElements({})).rejects.toThrow(/Select a window first/);
+		await expect(screen.agent.findElements({})).rejects.toThrow(
+			/Choose the window for the mouse and keyboard first/,
+		);
 		const gone = setup({ findWindow: async () => null });
 		await expect(gone.agent.screenshot()).rejects.toThrow(/another desktop/);
 	});
@@ -2438,7 +2442,7 @@ describe("Windows and Linux", () => {
 			{ find: save, click: tick },
 		);
 		await expect(agent.perform([{ action: "wait", ms: 1 }])).rejects.toThrow(
-			'Choose the window for the mouse and keyboard first: open_url, or select_source with a window id from list_sources. On Linux Recordly records the whole screen. The window in front is "Docs" (id window:7:0).',
+			'Choose the window for the mouse and keyboard first: open_url, or select_source with a window id from list_sources. Recordly keeps recording the whole screen. The window in front is "Docs" (id window:7:0).',
 		);
 		await expect(agent.chooseWindow("window:7:0")).resolves.toMatchObject({
 			id: "window:7:0",
@@ -2725,7 +2729,7 @@ describe("window bounds, hold, expect, safeRegion and undo", () => {
 			{ platform: on(name) },
 			{ set_bounds: () => ({ frame: { x: 40, y: 60, width: 1000, height: 800 } }) },
 		);
-		await agent.chooseWindow("window:7:0");
+		if (name === "linux") await agent.chooseWindow("window:7:0");
 		const result = await agent.setWindowBounds(BOUNDS);
 		expect(commands[0]).toMatchObject({
 			cmd: "set_bounds",
@@ -2903,5 +2907,192 @@ describe("window bounds, hold, expect, safeRegion and undo", () => {
 		await expect(
 			agent.perform([{ action: "expect", target: { text: "Save" } }]),
 		).rejects.toThrow(/"Save" is in the window but off screen/);
+	});
+});
+
+describe("recording a whole display", () => {
+	const DISPLAYS = [
+		{ id: 1, bounds: { x: 0, y: 0, width: 2000, height: 1200 }, scaleFactor: 1 },
+		{ id: 2, bounds: { x: 2000, y: 0, width: 1600, height: 1000 }, scaleFactor: 1 },
+	];
+	const identity = <T>(_: null, rect: T) => rect;
+	const on = (platform: NodeJS.Platform) =>
+		createAgentPlatform({
+			platform,
+			env: { DISPLAY: ":0", XDG_SESSION_TYPE: "x11" },
+			ozonePlatform: () => "",
+			ownPid: 1,
+			ownWindowIds: () => [],
+			screen: () =>
+				({
+					getAllDisplays: () => DISPLAYS,
+					getPrimaryDisplay: () => DISPLAYS[0],
+					getDisplayNearestPoint: () => DISPLAYS[0],
+					dipToScreenPoint: (point: unknown) => point,
+					screenToDipPoint: (point: unknown) => point,
+					dipToScreenRect: identity,
+					screenToDipRect: identity,
+				}) as never,
+		});
+	const displaySource = (display_id: string) => () => ({
+		id: `screen:${display_id}:0`,
+		name: "Entire screen",
+		sourceType: "screen" as const,
+		display_id,
+	});
+
+	beforeEach(() => {
+		clock.ms = 1_000;
+		resetAgentActivity();
+	});
+
+	it.each([
+		"darwin",
+		"win32",
+	] as const)("drives a chosen window while %s records a display, and logs targets against it", async (name) => {
+		const { agent, commands, remote } = setup(
+			{ platform: on(name), getSelectedSource: displaySource("1") },
+			{ click: tick },
+		);
+		await expect(agent.perform([{ action: "click", x: 10, y: 20 }])).rejects.toThrow(
+			/Choose the window for the mouse and keyboard first/,
+		);
+		await expect(agent.chooseWindow("window:7:0")).resolves.toMatchObject({
+			id: "window:7:0",
+			control: true,
+		});
+		await agent.perform([{ action: "click", x: 10, y: 20 }]);
+		expect(commands.find((command) => command.cmd === "click")).toMatchObject({
+			x: 110,
+			y: 70,
+		});
+		const click = snapshotAgentActivity(clock.ms).spans.find((span) => span.action === "click");
+		expect(click?.target).toEqual({ cx: 110 / 2000, cy: 70 / 1200 });
+		expect(remote.selectSource).not.toHaveBeenCalled();
+	});
+
+	it("marks a camera target so the video glides to each window it switches to", async () => {
+		const { agent } = setup({
+			platform: on("darwin"),
+			getSelectedSource: displaySource("1"),
+		});
+		const chosen = await agent.chooseWindow("window:7:0");
+		expect(chosen).toMatchObject({
+			note: expect.stringContaining("glides to frame this window"),
+		});
+		expect(snapshotAgentActivity(clock.ms + 1).cameraTargets).toEqual([
+			{
+				atMs: clock.ms,
+				x: FRAME.x / 2000,
+				y: FRAME.y / 1200,
+				width: FRAME.width / 2000,
+				height: FRAME.height / 1200,
+			},
+		]);
+	});
+
+	it("refuses a control window that is not on the recorded display", async () => {
+		const { agent } = setup({
+			platform: on("darwin"),
+			getSelectedSource: displaySource("2"),
+		});
+		await agent.chooseWindow("window:7:0");
+		await expect(agent.findElements({})).rejects.toThrow(/on a different display/);
+	});
+
+	it("reports a control window that closes mid-run", async () => {
+		const findWindow = vi
+			.fn<AgentControlDeps["findWindow"]>()
+			.mockResolvedValueOnce({ pid: 42, frame: FRAME })
+			.mockResolvedValue(null);
+		const { agent } = setup({
+			platform: on("darwin"),
+			getSelectedSource: displaySource("1"),
+			findWindow,
+		});
+		await agent.chooseWindow("window:7:0");
+		await expect(agent.findElements({})).rejects.toThrow(/another desktop/);
+	});
+
+	it("switches the control window while recording", async () => {
+		const { agent, commands, remote } = setup(
+			{ platform: on("darwin"), getSelectedSource: displaySource("1") },
+			{ find: () => ({ elements: [], truncated: false }) },
+		);
+		remote.getStatus.mockReturnValue({ state: "recording" } as never);
+		await agent.chooseWindow("window:7:0");
+		await agent.chooseWindow("window:8:0");
+		await agent.findElements({});
+		expect(commands.at(-1)).toMatchObject({ cmd: "find", windowId: 8 });
+	});
+
+	it.each([
+		["a window id that does not exist", "window:404:0", /another desktop/],
+		["an id that is not a window", "all of them", /Select a window first/],
+	])("refuses %s", async (_, id, message) => {
+		const { agent } = setup({
+			platform: on("darwin"),
+			getSelectedSource: displaySource("1"),
+			findWindow: async (sourceId) =>
+				sourceId === "window:7:0" ? { pid: 42, frame: FRAME } : null,
+		});
+		await expect(agent.chooseWindow(id)).rejects.toThrow(message);
+	});
+
+	it("refuses a control window while a window is the recorded source", async () => {
+		const { agent } = setup({ platform: on("darwin") });
+		await expect(agent.chooseWindow("window:9:0")).rejects.toThrow(
+			/A window is being recorded, not a whole screen/,
+		);
+	});
+
+	it("shows the control window by default and the whole display on request", async () => {
+		const { agent, deps } = setup({
+			platform: on("darwin"),
+			getSelectedSource: displaySource("1"),
+		});
+		await agent.chooseWindow("window:7:0");
+		await expect(agent.screenshot()).resolves.toMatchObject({ scope: "window" });
+		expect(deps.capture).toHaveBeenLastCalledWith(FRAME, undefined);
+		const region = { x: 0, y: 0, width: 100, height: 100 };
+		await expect(agent.screenshot(region, "display")).resolves.toMatchObject({
+			scope: "display",
+			window: { x: 100, y: 50, width: 800, height: 600 },
+			note: /whole recorded display/,
+		});
+		expect(deps.capture).toHaveBeenLastCalledWith(DISPLAYS[0].bounds, region);
+	});
+
+	it("says a display shot has no control window, and refuses one for a recorded window", async () => {
+		const { agent } = setup({
+			platform: on("darwin"),
+			getSelectedSource: displaySource("1"),
+		});
+		const shot = await agent.screenshot(undefined, "display");
+		expect(shot).toMatchObject({ scope: "display", note: /No window is chosen/ });
+		expect(shot.window).toBeUndefined();
+		const window = setup({ platform: on("darwin") });
+		await expect(window.agent.screenshot(undefined, "display")).rejects.toThrow(
+			/no recorded display to show/,
+		);
+		await expect(window.agent.screenshot(undefined, "screen" as never)).rejects.toThrow(
+			/must be "window" or "display"/,
+		);
+	});
+
+	it("says a display shot's control window is gone", async () => {
+		const findWindow = vi
+			.fn<AgentControlDeps["findWindow"]>()
+			.mockResolvedValueOnce({ pid: 42, frame: FRAME })
+			.mockResolvedValue(null);
+		const { agent } = setup({
+			platform: on("darwin"),
+			getSelectedSource: displaySource("1"),
+			findWindow,
+		});
+		await agent.chooseWindow("window:7:0");
+		const shot = await agent.screenshot(undefined, "display");
+		expect(shot).toMatchObject({ scope: "display", note: /is closed, minimized or not on/ });
+		expect(shot.window).toBeUndefined();
 	});
 });

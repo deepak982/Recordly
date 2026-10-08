@@ -16,6 +16,7 @@ import {
 	beginScene,
 	beginSpan,
 	getAgentActivityMs,
+	markCameraTarget,
 	normalizeAgentActivityLog,
 	persistAgentActivity,
 	readAgentActivity,
@@ -349,5 +350,68 @@ describe("persistence", () => {
 				},
 			],
 		});
+	});
+});
+
+describe("camera targets", () => {
+	const rect = { x: 0.1, y: 0.2, width: 0.5, height: 0.4 };
+
+	it("records a marker with its time and label, and leaves logs without markers unchanged", () => {
+		startRecording();
+		at(300);
+		expect(markCameraTarget(rect, "Notes")).toBe(true);
+		at(900);
+		expect(markCameraTarget(rect)).toBe(true);
+		const log = stopRecording(2_000);
+		expect(log.cameraTargets).toEqual([
+			{ atMs: 300, ...rect, label: "Notes" },
+			{ atMs: 900, ...rect },
+		]);
+		startRecording();
+		expect("cameraTargets" in snapshotAgentActivity(500)).toBe(false);
+	});
+
+	it("refuses unusable rectangles and a stopped clock, and drops markers at or after the stop", () => {
+		expect(markCameraTarget(rect)).toBe(false);
+		startRecording();
+		at(100);
+		expect(markCameraTarget({ ...rect, width: 0 })).toBe(false);
+		expect(markCameraTarget({ ...rect, height: Number.NaN })).toBe(false);
+		expect(markCameraTarget({ ...rect, x: Number.POSITIVE_INFINITY })).toBe(false);
+		expect(markCameraTarget({ x: -1, y: 2, width: 3, height: 3 })).toBe(true);
+		at(800);
+		markCameraTarget(rect);
+		const log = snapshotAgentActivity(800);
+		expect(log.cameraTargets).toEqual([{ atMs: 100, x: 0, y: 1, width: 1, height: 1 }]);
+	});
+
+	it("persists a marker-only log and reads it back normalized", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-activity-"));
+		try {
+			const video = path.join(dir, "cam.mp4");
+			startRecording();
+			at(200);
+			markCameraTarget(rect, "Browser");
+			const log = stopRecording(1_000);
+			await persistAgentActivity(video);
+			expect(await readAgentActivity(video)).toEqual(log);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+		expect(
+			normalizeAgentActivityLog({
+				version: 1,
+				cameraTargets: [
+					{ atMs: 900, x: 0, y: 0, width: 1, height: 1 },
+					{ atMs: -5, x: 2, y: 0, width: 0.5, height: 0.5, label: 4 },
+					{ atMs: 1, x: 0, y: 0, width: 0, height: 0.5 },
+					{ atMs: "1", x: 0, y: 0, width: 0.5, height: 0.5 },
+					null,
+				],
+			})?.cameraTargets,
+		).toEqual([
+			{ atMs: 0, x: 1, y: 0, width: 0.5, height: 0.5 },
+			{ atMs: 900, x: 0, y: 0, width: 1, height: 1 },
+		]);
 	});
 });

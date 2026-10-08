@@ -180,6 +180,12 @@ export function createAgentPlatform(overrides: Partial<AgentPlatformDeps> = {}) 
 		};
 	}
 
+	// Linux captures through the desktop portal, which hands out a whole screen whatever is selected.
+	function recordsScreen(source: SelectedSource | null) {
+		if (deps.platform === "linux") return true;
+		return source?.sourceType === "screen" || Boolean(source?.id?.startsWith("screen:"));
+	}
+
 	function recordedFrame(source: SelectedSource | null): WindowBounds {
 		const displays = deps.screen().getAllDisplays();
 		const chosen = displays.filter((display) => String(display.id) === source?.display_id);
@@ -215,7 +221,7 @@ export function createAgentPlatform(overrides: Partial<AgentPlatformDeps> = {}) 
 
 	return {
 		name: deps.platform,
-		recordsScreen: deps.platform === "linux",
+		recordsScreen,
 		support,
 		findWindow,
 		isOwnWindow,

@@ -9,6 +9,7 @@ import {
 	type AgentActivityTarget,
 	beginScene,
 	beginSpan,
+	markCameraTarget,
 } from "./agentActivity";
 import { type AgentInput, agentInput } from "./agentInput";
 import { type AgentPlatform, agentPlatform, isActionableRole } from "./agentPlatform";
@@ -97,6 +98,13 @@ export type PerformResult = {
 	page?: string;
 };
 
+export type AgentShotScope = "window" | "display";
+export type AgentShot = WindowShot & {
+	scope: AgentShotScope;
+	window?: WindowBounds;
+	note?: string;
+};
+
 export const AGENT_LIMITS = { steps: 200, waitMs: 30_000, totalMs: 600_000 };
 const SCROLL_MS = 600;
 const KEY_REPEAT_MS = 35;
@@ -164,6 +172,28 @@ const OWN_WINDOW = "Recordly cannot control its own windows. Select another wind
 const NO_WINDOW =
 	"Select a window first (open_url, or list_sources then select_source). Mouse and keyboard " +
 	"control works on windows, not whole screens.";
+const OFF_RECORDED_DISPLAY =
+	"The window chosen for the mouse and keyboard is on a different display from the one being " +
+	"recorded, so nothing it does would appear in the video. Move it onto the recorded display, or " +
+	"select that display with select_source.";
+const CONTROL_NEEDS_SCREEN =
+	"A window is being recorded, not a whole screen, so the mouse and keyboard already act on it. " +
+	"To drive one window while a whole display records, select a screen with select_source first.";
+const DISPLAY_SHOT_NEEDS_SCREEN =
+	"A window is being recorded, not a whole screen, so there is no recorded display to show. " +
+	"screenshot without of already shows the recorded window.";
+const DISPLAY_SHOT_NOTE =
+	"This image shows the whole recorded display, in display points. Clicks, drags, moves, scrolls " +
+	"and perform steps still take points inside the control window, whose rectangle in this image's " +
+	"points is window: subtract window.x and window.y to turn a display point into a window point, " +
+	"or take a plain screenshot to aim.";
+const DISPLAY_SHOT_NO_CONTROL =
+	"This image shows the whole recorded display, in display points. No window is chosen for the " +
+	"mouse and keyboard yet, so nothing can be clicked: pick one from this image with select_source.";
+const DISPLAY_SHOT_WINDOW_LOST =
+	"This image shows the whole recorded display, in display points. The window chosen for the " +
+	"mouse and keyboard is closed, minimized or not on this display, so its rectangle is not shown: " +
+	"choose another one with select_source.";
 const KNOWN_BROWSERS = [
 	"com.google.Chrome",
 	"com.apple.Safari",
@@ -824,27 +854,29 @@ export function createAgentControl(
 				: "";
 		throw new Error(
 			"Choose the window for the mouse and keyboard first: open_url, or select_source with a " +
-				`window id from list_sources. On Linux Recordly records the whole screen.${front}`,
+				`window id from list_sources. Recordly keeps recording the whole screen.${front}`,
 		);
 	}
 
 	async function requireTarget(): Promise<TargetWindow> {
 		const source = deps.getSelectedSource();
-		const sourceId = platform.recordsScreen ? await controlSourceId() : source?.id;
+		const wholeScreen = platform.recordsScreen(source);
+		const sourceId = wholeScreen ? await controlSourceId() : source?.id;
 		const windowId = parseWindowId(sourceId);
 		if (!sourceId || !windowId) throw new Error(NO_WINDOW);
 		const found = await deps.findWindow(sourceId);
 		if (!found?.frame) throw new Error(WINDOW_OFF_SCREEN_MESSAGE);
-		const pid = found.pid ?? (platform.recordsScreen ? undefined : source?.pid);
+		const pid = found.pid ?? (wholeScreen ? undefined : source?.pid);
 		if (!pid) {
 			throw new Error(
 				"Recordly could not tell which app owns the selected window. Call select_source again.",
 			);
 		}
 		if (platform.isOwnWindow({ pid, windowId })) throw new Error(OWN_WINDOW);
-		return platform.recordsScreen
-			? { pid, windowId, frame: found.frame, recorded: platform.recordedFrame(source) }
-			: { pid, windowId, frame: found.frame };
+		if (!wholeScreen) return { pid, windowId, frame: found.frame };
+		const recorded = platform.recordedFrame(source);
+		if (!intersect(recorded, found.frame)) throw new Error(OFF_RECORDED_DISPLAY);
+		return { pid, windowId, frame: found.frame, recorded };
 	}
 
 	function targetOf(window: TargetWindow, at: Point, size?: { width: number; height: number }) {
@@ -1736,11 +1768,44 @@ export function createAgentControl(
 		return listControls({ text, role }, limit);
 	}
 
-	async function screenshot(region?: WindowBounds) {
+	async function screenshot(
+		region?: WindowBounds,
+		of: AgentShotScope = "window",
+	): Promise<AgentShot> {
+		if (of !== "window" && of !== "display") {
+			throw new Error('screenshot of must be "window" or "display".');
+		}
 		requireSupported();
-		const target = await requireTarget();
-		await raise(target).catch(() => undefined);
-		return deps.capture(target.frame, region);
+		if (of === "window") {
+			const target = await requireTarget();
+			await raise(target).catch(() => undefined);
+			return { ...(await deps.capture(target.frame, region)), scope: of };
+		}
+		const source = deps.getSelectedSource();
+		if (!platform.recordsScreen(source)) throw new Error(DISPLAY_SHOT_NEEDS_SCREEN);
+		const display = platform.recordedFrame(source);
+		const found =
+			controlWindowId === null ? null : await deps.findWindow(`window:${controlWindowId}:0`);
+		const frame = found?.frame && intersect(display, found.frame) ? found.frame : null;
+		const shot = await deps.capture(display, region);
+		if (!frame) {
+			return {
+				...shot,
+				scope: of,
+				note: controlWindowId === null ? DISPLAY_SHOT_NO_CONTROL : DISPLAY_SHOT_WINDOW_LOST,
+			};
+		}
+		return {
+			...shot,
+			scope: of,
+			window: {
+				x: frame.x - display.x,
+				y: frame.y - display.y,
+				width: frame.width,
+				height: frame.height,
+			},
+			note: DISPLAY_SHOT_NOTE,
+		};
 	}
 
 	async function selectControlWindow(id: string) {
@@ -1750,16 +1815,31 @@ export function createAgentControl(
 		if (!found?.frame) throw new Error(WINDOW_OFF_SCREEN_MESSAGE);
 		if (platform.isOwnWindow({ pid: found.pid, windowId })) throw new Error(OWN_WINDOW);
 		controlWindowId = windowId;
+		const recorded = platform.recordedFrame(deps.getSelectedSource());
+		const framed =
+			recorded.width > 0 && recorded.height > 0
+				? markCameraTarget({
+						x: (found.frame.x - recorded.x) / recorded.width,
+						y: (found.frame.y - recorded.y) / recorded.height,
+						width: found.frame.width / recorded.width,
+						height: found.frame.height / recorded.height,
+					})
+				: false;
 		return {
 			id: `window:${windowId}:0`,
 			type: "window",
 			control: true,
-			note: "The mouse and keyboard act on this window; Recordly records the whole screen.",
+			note: framed
+				? "The mouse and keyboard act on this window, Recordly keeps recording the whole " +
+					"screen, and the video glides to frame this window from here on."
+				: "The mouse and keyboard act on this window; Recordly records the whole screen.",
 		};
 	}
 
 	async function selectWindow(windowId: number) {
-		if (platform.recordsScreen) return selectControlWindow(String(windowId));
+		if (platform.recordsScreen(deps.getSelectedSource())) {
+			return selectControlWindow(String(windowId));
+		}
 		const listed = await remote.listSources();
 		const match = listed.find((source) => parseWindowId(source.id) === windowId);
 		if (!match) throw new Error(BROWSER_NOT_FOUND);
@@ -1834,6 +1914,9 @@ export function createAgentControl(
 
 	async function chooseWindow(id: string) {
 		requireSupported();
+		if (!platform.recordsScreen(deps.getSelectedSource())) {
+			throw new Error(CONTROL_NEEDS_SCREEN);
+		}
 		return selectControlWindow(id);
 	}
 

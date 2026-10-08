@@ -138,6 +138,25 @@ describe("agent platform windows", () => {
 	});
 });
 
+describe("records a screen", () => {
+	const window = { id: "window:7:0", name: "Docs", sourceType: "window" as const };
+	const screen = { id: "screen:1:0", name: "Entire screen", sourceType: "screen" as const };
+
+	it.each([window, screen, null])("is always true on Linux for %j", (source) => {
+		expect(make().recordsScreen(source)).toBe(true);
+	});
+
+	it.each(["darwin", "win32"] as const)("follows the selected source on %s", (platform) => {
+		const platformApi = make({ platform });
+		expect(platformApi.recordsScreen(screen)).toBe(true);
+		expect(platformApi.recordsScreen({ name: "Entire screen", id: "screen:1:0" })).toBe(true);
+		expect(platformApi.recordsScreen({ name: "Screen", sourceType: "screen" })).toBe(true);
+		expect(platformApi.recordsScreen(window)).toBe(false);
+		expect(platformApi.recordsScreen({ id: "window:7:0", name: "Docs" })).toBe(false);
+		expect(platformApi.recordsScreen(null)).toBe(false);
+	});
+});
+
 describe("agent platform conversions", () => {
 	it("is the identity on macOS", () => {
 		const platform = make({ platform: "darwin" });

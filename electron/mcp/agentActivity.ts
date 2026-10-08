@@ -33,10 +33,19 @@ export interface AgentActivityScene {
 	failed: boolean;
 	title?: string;
 }
+export interface AgentActivityCameraTarget {
+	atMs: number;
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+	label?: string;
+}
 export interface AgentActivityLog {
 	version: 1;
 	scenes: AgentActivityScene[];
 	spans: AgentActivitySpan[];
+	cameraTargets?: AgentActivityCameraTarget[];
 	changeTimesMs?: number[];
 }
 
@@ -54,11 +63,13 @@ const ACTIONS = new Set<unknown>([
 
 let scenes: AgentActivityScene[] = [];
 let spans: AgentActivitySpan[] = [];
+let cameraTargets: AgentActivityCameraTarget[] = [];
 let frozen = false;
 
 export function resetAgentActivity() {
 	scenes = [];
 	spans = [];
+	cameraTargets = [];
 	frozen = false;
 }
 
@@ -98,6 +109,37 @@ export function beginSpan(
 	return () => close(span);
 }
 
+const isFiniteNumber = (value: unknown): value is number =>
+	typeof value === "number" && Number.isFinite(value);
+
+function isValidRect(rect: { x: number; y: number; width: number; height: number }) {
+	return (
+		isFiniteNumber(rect.x) &&
+		isFiniteNumber(rect.y) &&
+		isFiniteNumber(rect.width) &&
+		isFiniteNumber(rect.height) &&
+		rect.width > 0 &&
+		rect.height > 0
+	);
+}
+
+export function markCameraTarget(
+	rect: { x: number; y: number; width: number; height: number },
+	label?: string,
+): boolean {
+	const atMs = getAgentActivityMs();
+	if (atMs === null || !isValidRect(rect)) return false;
+	cameraTargets.push({
+		atMs,
+		x: clamp(rect.x, 0, 1),
+		y: clamp(rect.y, 0, 1),
+		width: clamp(rect.width, 0, 1),
+		height: clamp(rect.height, 0, 1),
+		...(label ? { label } : {}),
+	});
+	return true;
+}
+
 function clampTimes<T extends { startMs: number; endMs: number }>(entries: T[], stopMs: number) {
 	return entries
 		.map((entry) => ({
@@ -112,19 +154,31 @@ export function snapshotAgentActivity(stopMs: number): AgentActivityLog {
 	if (!frozen) {
 		scenes = clampTimes(scenes, Math.max(0, stopMs));
 		spans = clampTimes(spans, Math.max(0, stopMs));
+		cameraTargets = cameraTargets.filter((target) => target.atMs < stopMs);
 		frozen = true;
 	}
-	return { version: 1, scenes, spans };
+	return {
+		version: 1,
+		scenes,
+		spans,
+		...(cameraTargets.length > 0 ? { cameraTargets } : {}),
+	};
 }
 
 export async function persistAgentActivity(
 	videoPath: string,
 	readChangeTimesMs?: () => Promise<number[] | null>,
 ) {
-	const log: AgentActivityLog = { version: 1, scenes, spans };
+	const log: AgentActivityLog = {
+		version: 1,
+		scenes,
+		spans,
+		...(cameraTargets.length > 0 ? { cameraTargets } : {}),
+	};
 	scenes = [];
 	spans = [];
-	if (log.scenes.length === 0 && log.spans.length === 0) return;
+	cameraTargets = [];
+	if (log.scenes.length === 0 && log.spans.length === 0 && !log.cameraTargets) return;
 	if (readChangeTimesMs) {
 		try {
 			const changeTimesMs = await readChangeTimesMs();
@@ -139,9 +193,6 @@ export async function persistAgentActivity(
 		"utf-8",
 	);
 }
-
-const isFiniteNumber = (value: unknown): value is number =>
-	typeof value === "number" && Number.isFinite(value);
 
 function normalizeTimes(raw: unknown) {
 	const entry = raw as { startMs?: unknown; endMs?: unknown } | null;
@@ -161,6 +212,30 @@ function normalizeTarget(raw: unknown): AgentActivityTarget | undefined {
 		...(isFiniteNumber(target.width) ? { width: clamp(target.width, 0, 1) } : {}),
 		...(isFiniteNumber(target.height) ? { height: clamp(target.height, 0, 1) } : {}),
 	};
+}
+
+function normalizeCameraTargets(raw: unknown): AgentActivityCameraTarget[] | undefined {
+	if (!Array.isArray(raw)) return undefined;
+	const targets = raw
+		.flatMap((entry: Partial<Record<keyof AgentActivityCameraTarget, unknown>> | null) => {
+			if (!entry || typeof entry !== "object") return [];
+			const { atMs, x, y, width, height, label } = entry;
+			if (!isFiniteNumber(atMs) || !isFiniteNumber(x) || !isFiniteNumber(y)) return [];
+			if (!isFiniteNumber(width) || !isFiniteNumber(height)) return [];
+			if (width <= 0 || height <= 0) return [];
+			return [
+				{
+					atMs: Math.max(0, atMs),
+					x: clamp(x, 0, 1),
+					y: clamp(y, 0, 1),
+					width: clamp(width, 0, 1),
+					height: clamp(height, 0, 1),
+					...(typeof label === "string" && label ? { label } : {}),
+				},
+			];
+		})
+		.sort((a, b) => a.atMs - b.atMs);
+	return targets.length > 0 ? targets : undefined;
 }
 
 const byStart = (a: { startMs: number }, b: { startMs: number }) => a.startMs - b.startMs;
@@ -183,14 +258,17 @@ export function normalizeAgentActivityLog(raw: unknown): AgentActivityLog | null
 		scenes?: unknown;
 		spans?: unknown;
 		changeTimesMs?: unknown;
+		cameraTargets?: unknown;
 	} | null;
 	if (!log || log.version !== 1) return null;
 	const rawScenes: unknown[] = Array.isArray(log.scenes) ? log.scenes : [];
 	const rawSpans: unknown[] = Array.isArray(log.spans) ? log.spans : [];
 	const changeTimesMs = normalizeChangeTimes(log.changeTimesMs);
+	const cameraTargets = normalizeCameraTargets(log.cameraTargets);
 	return {
 		version: 1,
 		...(changeTimesMs ? { changeTimesMs } : {}),
+		...(cameraTargets ? { cameraTargets } : {}),
 		scenes: rawScenes
 			.flatMap((raw) => {
 				const times = normalizeTimes(raw);
