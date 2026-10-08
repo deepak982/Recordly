@@ -5,6 +5,7 @@ import type { HudOverlayOptions, HudOverlayState } from "../windows";
 import type { AgentControl, AgentStep, PerformOptions } from "./agentControl";
 import type { AgentSupport } from "./agentPlatform";
 import { AGENT_KEY_ALIASES, AGENT_KEY_NAMES, AGENT_MODIFIER_ALIASES } from "./agentProtocol";
+import { CLIP_DETAILS, projectEditorState, STATE_SECTIONS } from "./editorStateView";
 import type { OpenFileTools } from "./openFile";
 import { MAX_COUNTDOWN_SECONDS, type RemoteControl } from "./remoteControl";
 import type { RemoteEditor } from "./remoteEditor";
@@ -990,18 +991,25 @@ export function buildRecordlyMcpServer(
 				"shadowIntensity, backgroundBlur, crop and webcam. op motion takes the movement: zoom " +
 				"durations and easings, cursor style, size, smoothing and click effects, and the " +
 				"camera and cursor springs — pass only the fields you want and the rest are left " +
-				"alone, and an unknown field is refused rather than ignored. Whatever " +
+				"alone, and an unknown field is refused rather than ignored. **padding and borderRadius " +
+				"are PERCENTAGES, not pixels**: padding is a percent of the frame, so 4 is a normal inset " +
+				"while 28 shrinks the picture to a sliver of wallpaper — start at 0-6 and look at " +
+				"render_preview before going higher. borderRadius is a percent of the shorter side (max " +
+				"50), shadowIntensity is a 0-1 multiplier, and backgroundBlur is a blur radius in pixels " +
+				"at a 640px-wide reference, scaled to the export size. Whatever " +
 				"get_editor_state reports for the look can be sent straight back: padding takes " +
 				"linked (equal sides up to 100 when linked, top and bottom up to 250 when not), crop " +
 				"is also accepted as cropRegion, and the webcam's sourcePath, visibleRanges and " +
 				"cornerRadius can be echoed but not changed. **The look is not part of " +
 				"the editor's history, so history undo will NOT revert this** — set the old values " +
-				"again to go back.",
+				"again to go back. op preset takes a whole frame in one call: clean, dark or none.",
 			inputSchema: z.object({
-				op: z.enum(["set", "motion"]),
+				op: z.enum(["set", "motion", "preset"]),
 				fields: z
 					.record(z.string(), z.unknown())
-					.describe("The settings to change, e.g. {wallpaper, padding} or {cursorSize}"),
+					.describe(
+						'The settings to change, e.g. {wallpaper, padding}, {cursorSize}, or {name: "clean"} for op preset',
+					),
 			}),
 		},
 		async ({ op, fields }, ctx) =>
@@ -1019,10 +1027,22 @@ export function buildRecordlyMcpServer(
 				'no recording of a voice; from: "audio" transcribes the recording\'s speech instead, ' +
 				"which is slow and needs the Whisper model. op set replaces every caption, update " +
 				"changes one, remove drops one or all, style sets size, colours and position, and " +
-				"animation picks none, fade, rise or pop. Captions show one at a time, so cues may not " +
+				"animation picks none, fade, rise or pop. op fit_to_scenes takes one line of text per " +
+				"scene and places each one wholly inside a single shot, which is the easy way to " +
+				"caption a rehearsed demo: it never crosses a cut, skips scenes with no room and " +
+				"names them, and refuses the call if the number of lines does not match the number of " +
+				"scenes. Captions show one at a time, so cues may not " +
 				"overlap, and a cue inside a cut is refused. Reversible with history undo.",
 			inputSchema: z.object({
-				op: z.enum(["generate", "set", "update", "remove", "style", "animation"]),
+				op: z.enum([
+					"generate",
+					"set",
+					"update",
+					"remove",
+					"style",
+					"animation",
+					"fit_to_scenes",
+				]),
 				from: z.enum(["audio", "scenes"]).optional().describe("op generate"),
 				timeoutMs: z.number().int().optional().describe("op generate from audio"),
 				cues: z
@@ -1040,6 +1060,18 @@ export function buildRecordlyMcpServer(
 				startMs: z.number().min(0).optional(),
 				endMs: z.number().min(0).optional(),
 				all: z.boolean().optional().describe("op remove: every caption"),
+				texts: z
+					.array(z.string().min(1).max(80))
+					.min(1)
+					.max(500)
+					.optional()
+					.describe("op fit_to_scenes: one line per scene, 80 characters each"),
+				padMs: z
+					.number()
+					.min(0)
+					.max(2000)
+					.optional()
+					.describe("op fit_to_scenes: inset at each end, default 200"),
 				style: z.enum(["none", "fade", "rise", "pop"]).optional().describe("op animation"),
 				fields: z
 					.record(z.string(), z.unknown())
@@ -1110,7 +1142,11 @@ export function buildRecordlyMcpServer(
 				"real app shows real names, email addresses and figures, and nothing else here hides " +
 				"them. Geometry is percent of the frame (0–100, origin top-left) and times are " +
 				"milliseconds in the EDITED timeline, after cuts. Needs the editor open. Reversible " +
-				"with history undo. get_frame or sample_frames shows whether it covers what you meant.",
+				"with history undo. space decides what the geometry is measured against: frame (the " +
+				"default) sits on the recorded picture and moves with the zoom, which is what a blur " +
+				"must do to keep covering what it hides; screen pins it to the output frame so a title " +
+				"or a logo stays put and an active zoom cannot crop it. A blur cannot use screen. " +
+				"render_preview shows whether it covers what you meant.",
 			inputSchema: z.object({
 				op: z.enum(["add", "update", "remove", "clear"]),
 				id: z.string().min(1).optional().describe("Required for update and remove"),
@@ -1134,6 +1170,12 @@ export function buildRecordlyMcpServer(
 					.describe("Percent of the frame, from the top"),
 				width: z.number().min(0).max(100).optional().describe("Percent of the frame"),
 				height: z.number().min(0).max(100).optional().describe("Percent of the frame"),
+				space: z
+					.enum(["frame", "screen"])
+					.optional()
+					.describe(
+						"frame (default) follows the zoom; screen pins to the output frame. Not for blur",
+					),
 				text: z.string().min(1).optional().describe("kind text"),
 				fontSize: z.number().positive().optional().describe("kind text"),
 				color: z.string().min(1).optional().describe("kind text or figure"),
@@ -1508,6 +1550,83 @@ export function buildRecordlyMcpServer(
 	);
 
 	server.registerTool(
+		"render_preview",
+		{
+			description:
+				"See what the EXPORT will look like, before spending the time to make one. Unlike " +
+				"get_frame and sample_frames, which both return the recorded screen, this composites " +
+				"the frame through the export renderer: cuts and speed, zooms, the look (wallpaper, " +
+				"padding, corner radius, shadow), the cursor, annotations and captions. Use it after " +
+				"any edit you cannot otherwise check — a blur you need to know covers the right thing, " +
+				"a caption's position, a title that an active zoom might crop, a padding value. Times " +
+				"are milliseconds in the EDITED timeline. Each frame is a full composite rather than " +
+				"an ffmpeg tile, so a sheet of 6 can take tens of seconds; ask for one frame when one " +
+				"will do. The reply lists which layers it drew and which it could not, with the " +
+				"reason, so a half-composited frame is never passed off as the finished look. Needs " +
+				"the editor open.",
+			inputSchema: z.object({
+				atMs: z
+					.number()
+					.min(0)
+					.optional()
+					.describe(
+						"One frame at this edited time. Defaults to 0. Not with count/everyMs",
+					),
+				count: z
+					.number()
+					.int()
+					.min(2)
+					.max(6)
+					.optional()
+					.describe("A contact sheet of this many frames, evenly spaced, 2 to 6"),
+				everyMs: z
+					.number()
+					.min(17)
+					.optional()
+					.describe("A frame every this many ms; the total must come to 2 to 6"),
+			}),
+		},
+		async (args, ctx) => {
+			const sheet = (await editor.requestEditor("render_preview", args, {
+				signal: ctx.mcpReq.signal,
+			})) as { image: { data: string; mimeType: string } } & Record<string, unknown>;
+			const { image, ...rest } = sheet;
+			return {
+				content: [
+					{ type: "image" as const, data: image.data, mimeType: image.mimeType },
+					{ type: "text" as const, text: JSON.stringify(rest, null, 2) },
+				],
+			};
+		},
+	);
+
+	server.registerTool(
+		"verify_export",
+		{
+			description:
+				"Check a video file for frames with no picture. export_video already does this to " +
+				"what it writes; use this for a file exported earlier, or to re-check one after " +
+				"moving it. It samples frames across the file and reports the moments that are black " +
+				"or a single flat colour, which is what a broken render leaves behind — a file can " +
+				"have the right size and length and still be minutes of bare wallpaper. It cannot " +
+				"tell a deliberate fade or a plain title card from a fault; it reports what it finds " +
+				"and you decide.",
+			inputSchema: z.object({
+				path: z.string().min(1).describe("Absolute path to the video file"),
+				samples: z
+					.number()
+					.int()
+					.min(1)
+					.max(32)
+					.optional()
+					.describe("How many frames to check, 1 to 32. Defaults to 8"),
+			}),
+		},
+		async ({ path: filePath, samples }, ctx) =>
+			textResult(await remoteExport.verifyFile(filePath, samples, ctx.mcpReq.signal)),
+	);
+
+	server.registerTool(
 		"get_editor_state",
 		{
 			description:
@@ -1517,10 +1636,30 @@ export function buildRecordlyMcpServer(
 				"EDITED timeline — which is how you check a cut against a length budget and how you " +
 				"find the scene index for edit_timeline. Scene times come from the recording's " +
 				"activity log, so for a recording nobody drove they come back as unavailable with the " +
-				"reason while the rest of the state still arrives.",
-			inputSchema: z.object({}),
+				"reason while the rest of the state still arrives. The whole state runs to thousands " +
+				"of tokens on a long take, so ask for what you need: include names the sections to " +
+				"return and the reply says what it left out, and clips summary gives the clip count " +
+				"and kept length instead of every clip. Pass clips full when you need a clip id or " +
+				"time for edit_timeline.",
+			inputSchema: z.object({
+				include: z
+					.array(z.enum(STATE_SECTIONS))
+					.min(1)
+					.optional()
+					.describe("Sections to return. Omit for all of them."),
+				clips: z
+					.enum(CLIP_DETAILS)
+					.optional()
+					.describe("How much clip detail: full (default), summary or none"),
+			}),
 		},
-		async (_args, ctx) => textResult(await editor.getState({ signal: ctx.mcpReq.signal })),
+		async ({ include, clips }, ctx) =>
+			textResult(
+				projectEditorState(await editor.getState({ signal: ctx.mcpReq.signal }), {
+					include,
+					clips,
+				}),
+			),
 	);
 
 	if (!control) return server;

@@ -639,8 +639,35 @@ export function createRemoteExport({
 		return padRendered(result.path ?? rendered, opts.signal);
 	}
 
+	const verifyFile = async (filePath: string, samples?: number, signal?: AbortSignal) => {
+		if (!path.isAbsolute(filePath)) {
+			throw new Error(`path must be an absolute path: ${filePath}`);
+		}
+		const target = path.resolve(filePath);
+		await fs.access(target, constants.R_OK).catch(() => {
+			throw new Error(`There is no readable file at ${target}.`);
+		});
+		const checked = await verifyExportedFrames(target, {
+			binary: getFfmpegBinaryPath(),
+			runFfmpeg: runFfmpegForStdout,
+			samples,
+			signal,
+		});
+		return {
+			path: target,
+			checked: checked.checked,
+			emptyAtMs: checked.emptyAtMs,
+			warnings: checked.warnings,
+			note:
+				checked.warnings.length === 0
+					? `Every one of the ${checked.checked} frames sampled has a picture.`
+					: "A deliberate fade or a plain card looks the same as a fault here; check the moments named before deciding.",
+		};
+	};
+
 	return {
 		exportVideo,
+		verifyFile,
 		getStatus: (): RemoteExportStatus => ({ ...status }),
 	};
 }

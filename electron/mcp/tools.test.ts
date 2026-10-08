@@ -248,6 +248,7 @@ describe("buildRecordlyMcpServer", () => {
 			"perform",
 			"press_key",
 			"recover_recording",
+			"render_preview",
 			"restore_recording",
 			"resume_recording",
 			"review_recording",
@@ -265,6 +266,7 @@ describe("buildRecordlyMcpServer", () => {
 			"stop_recording",
 			"type_text",
 			"undo_last_input",
+			"verify_export",
 			"wait_for",
 			"wait_for_download",
 		]);
@@ -946,6 +948,7 @@ describe("buildRecordlyMcpServer", () => {
 			"list_sources",
 			"pause_recording",
 			"recover_recording",
+			"render_preview",
 			"restore_recording",
 			"resume_recording",
 			"review_recording",
@@ -957,6 +960,7 @@ describe("buildRecordlyMcpServer", () => {
 			"set_overlay",
 			"start_recording",
 			"stop_recording",
+			"verify_export",
 			"wait_for_download",
 		]);
 		const descriptions = JSON.stringify(result.tools);
