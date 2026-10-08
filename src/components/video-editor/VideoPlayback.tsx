@@ -2708,95 +2708,111 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 								</div>
 							</div>
 						) : null}
-						<div
-							className="absolute inset-0"
-							style={{
-								pointerEvents: "none",
-								transform: `matrix(${annotationSceneTransform.scale}, 0, 0, ${annotationSceneTransform.scale}, ${annotationSceneTransform.x}, ${annotationSceneTransform.y})`,
-								transformOrigin: "top left",
-							}}
-						>
-							<div
-								className="absolute"
-								style={{
-									pointerEvents: "none",
-									left: 0,
-									top: 0,
-									width: overlayRef.current?.clientWidth || 800,
-									height: overlayRef.current?.clientHeight || 600,
-								}}
-							>
-								{(() => {
-									const timeMs = Math.round(timelineTime * 1000);
-									const filtered = (annotationRegions || []).filter(
-										(annotation) =>
-											isAnnotationActiveAtTime(annotation, timeMs),
-									);
-
-									const sorted = [...filtered].sort(
-										(a, b) => a.zIndex - b.zIndex,
-									);
-
-									const handleAnnotationClick = (clickedId: string) => {
-										if (!onSelectAnnotation) return;
-
-										if (
-											clickedId === selectedAnnotationId &&
-											sorted.length > 1
-										) {
-											const currentIndex = sorted.findIndex(
-												(a) => a.id === clickedId,
-											);
-											const nextIndex = (currentIndex + 1) % sorted.length;
-											onSelectAnnotation(sorted[nextIndex].id);
-										} else {
-											onSelectAnnotation(clickedId);
+						{(["frame", "screen"] as const).map((space) => {
+							const layerTransform =
+								space === "screen"
+									? { scale: 1, x: 0, y: 0 }
+									: annotationSceneTransform;
+							const layerRect =
+								space === "screen"
+									? {
+											x: 0,
+											y: 0,
+											width: overlayRef.current?.clientWidth || 800,
+											height: overlayRef.current?.clientHeight || 600,
 										}
-									};
-
-									return sorted.map((annotation) => (
-										<AnnotationOverlay
-											key={annotation.id}
-											annotation={annotation}
-											isSelected={annotation.id === selectedAnnotationId}
-											containerWidth={
+									: {
+											x: annotationRecordingRect.x,
+											y: annotationRecordingRect.y,
+											width:
 												annotationRecordingRect.width ||
 												overlayRef.current?.clientWidth ||
-												800
-											}
-											containerHeight={
+												800,
+											height:
 												annotationRecordingRect.height ||
 												overlayRef.current?.clientHeight ||
-												600
-											}
-											recordingRect={{
-												x: annotationRecordingRect.x,
-												y: annotationRecordingRect.y,
-												width:
-													annotationRecordingRect.width ||
-													overlayRef.current?.clientWidth ||
-													800,
-												height:
-													annotationRecordingRect.height ||
-													overlayRef.current?.clientHeight ||
-													600,
-											}}
-											sceneTransform={{ scale: 1, x: 0, y: 0 }}
-											interactionScale={annotationSceneTransform.scale}
-											onPositionChange={(id, position) =>
-												onAnnotationPositionChange?.(id, position)
-											}
-											onSizeChange={(id, size) =>
-												onAnnotationSizeChange?.(id, size)
-											}
-											onClick={handleAnnotationClick}
-											zIndex={annotation.zIndex}
-											isSelectedBoost={annotation.id === selectedAnnotationId}
-										/>
-									));
-								})()}
-							</div>
-						</div>
+												600,
+										};
+							return (
+								<div
+									key={space}
+									className="absolute inset-0"
+									style={{
+										pointerEvents: "none",
+										transform: `matrix(${layerTransform.scale}, 0, 0, ${layerTransform.scale}, ${layerTransform.x}, ${layerTransform.y})`,
+										transformOrigin: "top left",
+									}}
+								>
+									<div
+										className="absolute"
+										style={{
+											pointerEvents: "none",
+											left: 0,
+											top: 0,
+											width: overlayRef.current?.clientWidth || 800,
+											height: overlayRef.current?.clientHeight || 600,
+										}}
+									>
+										{(() => {
+											const timeMs = Math.round(timelineTime * 1000);
+											const filtered = (annotationRegions || []).filter(
+												(annotation) =>
+													(annotation.space ?? "frame") === space &&
+													isAnnotationActiveAtTime(annotation, timeMs),
+											);
+
+											const sorted = [...filtered].sort(
+												(a, b) => a.zIndex - b.zIndex,
+											);
+
+											const handleAnnotationClick = (clickedId: string) => {
+												if (!onSelectAnnotation) return;
+
+												if (
+													clickedId === selectedAnnotationId &&
+													sorted.length > 1
+												) {
+													const currentIndex = sorted.findIndex(
+														(a) => a.id === clickedId,
+													);
+													const nextIndex =
+														(currentIndex + 1) % sorted.length;
+													onSelectAnnotation(sorted[nextIndex].id);
+												} else {
+													onSelectAnnotation(clickedId);
+												}
+											};
+
+											return sorted.map((annotation) => (
+												<AnnotationOverlay
+													key={annotation.id}
+													annotation={annotation}
+													isSelected={
+														annotation.id === selectedAnnotationId
+													}
+													containerWidth={layerRect.width}
+													containerHeight={layerRect.height}
+													recordingRect={layerRect}
+													sceneTransform={{ scale: 1, x: 0, y: 0 }}
+													interactionScale={layerTransform.scale}
+													onPositionChange={(id, position) =>
+														onAnnotationPositionChange?.(id, position)
+													}
+													onSizeChange={(id, size) =>
+														onAnnotationSizeChange?.(id, size)
+													}
+													onClick={handleAnnotationClick}
+													zIndex={annotation.zIndex}
+													isSelectedBoost={
+														annotation.id === selectedAnnotationId
+													}
+												/>
+											));
+										})()}
+									</div>
+								</div>
+							);
+						})}
 					</div>
 				)}
 				{/* Keep the source video off-screen instead of display:none so the

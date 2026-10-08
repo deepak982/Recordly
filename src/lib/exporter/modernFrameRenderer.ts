@@ -53,7 +53,10 @@ import {
 } from "@/components/video-editor/videoPlayback/motionSmoothing";
 import { getSceneEffectMetrics } from "@/components/video-editor/videoPlayback/sceneEffects";
 import { resolveSceneZoomTarget } from "@/components/video-editor/videoPlayback/sceneMotion";
-import { getWebcamMediaTargetTimeSeconds, isWebcamVisibleAtSourceTime } from "@/components/video-editor/videoPlayback/webcamSync";
+import {
+	getWebcamMediaTargetTimeSeconds,
+	isWebcamVisibleAtSourceTime,
+} from "@/components/video-editor/videoPlayback/webcamSync";
 import {
 	applyZoomTransform,
 	computeZoomTransform,
@@ -1530,7 +1533,8 @@ export class FrameRenderer {
 		);
 
 		for (const annotation of annotations) {
-			const annotationRect = this.layoutCache?.maskRect ?? {
+			const pinned = annotation.space === "screen";
+			const annotationRect = (!pinned && this.layoutCache?.maskRect) || {
 				x: 0,
 				y: 0,
 				width: this.config.width,
@@ -1560,7 +1564,7 @@ export class FrameRenderer {
 			const sprite = new Sprite(texture);
 			sprite.position.set(x, y);
 			sprite.visible = false;
-			this.annotationContainer.addChild(sprite);
+			(pinned ? this.overlayContainer : this.annotationContainer)?.addChild(sprite);
 			this.annotationSprites.push({ annotation, sprite, texture });
 		}
 	}
@@ -2725,7 +2729,12 @@ export class FrameRenderer {
 
 	private updateWebcamOverlay(referenceTimeSeconds = this.currentVideoTime): void {
 		const webcam = this.config.webcam;
-		if (!webcam?.enabled || !isWebcamVisibleAtSourceTime(webcam, referenceTimeSeconds) || !this.webcamRootContainer || !this.webcamMaskGraphics) {
+		if (
+			!webcam?.enabled ||
+			!isWebcamVisibleAtSourceTime(webcam, referenceTimeSeconds) ||
+			!this.webcamRootContainer ||
+			!this.webcamMaskGraphics
+		) {
 			if (this.webcamRootContainer) {
 				this.webcamRootContainer.visible = false;
 			}

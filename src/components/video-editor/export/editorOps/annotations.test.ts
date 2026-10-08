@@ -279,3 +279,53 @@ describe("annotate.update / remove / clear", () => {
 		expect(state.selected).toBeNull();
 	});
 });
+
+describe("annotate space", () => {
+	const title = {
+		kind: "text",
+		text: "The end",
+		startMs: 0,
+		endMs: 2000,
+		x: 10,
+		y: 40,
+		width: 80,
+		height: 20,
+	};
+
+	it("defaults to frame and stores screen when asked", () => {
+		const { state, context } = makeContext();
+		expect(annotationsOps["annotate.add"](title, context)).toMatchObject({ space: "frame" });
+		expect(
+			annotationsOps["annotate.add"]({ ...title, space: "screen" }, context),
+		).toMatchObject({
+			space: "screen",
+		});
+		expect(state.regions[0].space).toBeUndefined();
+		expect(state.regions[1].space).toBe("screen");
+	});
+
+	it("moves an existing annotation between spaces", () => {
+		const { state, context } = makeContext();
+		const { id } = add(title, context);
+		annotationsOps["annotate.update"]({ id, space: "screen" }, context);
+		expect(state.regions[0].space).toBe("screen");
+	});
+
+	it("refuses an unknown space", () => {
+		const { state, context } = makeContext();
+		expect(() => add({ ...title, space: "world" }, context)).toThrow(/space must be one of/);
+		expect(state.regions).toHaveLength(0);
+	});
+
+	it("refuses a blur pinned to the screen, on add and on update", () => {
+		const { state, context } = makeContext();
+		expect(() => add({ ...blur, space: "screen" }, context)).toThrow(
+			/cannot use space "screen"/,
+		);
+		const { id } = add(blur, context);
+		expect(() => annotationsOps["annotate.update"]({ id, space: "screen" }, context)).toThrow(
+			/cannot use space "screen"/,
+		);
+		expect(state.regions[0].space).toBeUndefined();
+	});
+});

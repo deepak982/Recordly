@@ -1,5 +1,6 @@
 import {
 	type AnnotationRegion,
+	type AnnotationSpace,
 	type AnnotationType,
 	type ArrowDirection,
 	BLUR_ANNOTATION_STRENGTH,
@@ -34,7 +35,8 @@ const KIND_FIELDS: Record<AnnotationType, string[]> = {
 	blur: ["strength", "blurColor"],
 };
 const ALL_KIND_FIELDS = [...new Set(Object.values(KIND_FIELDS).flat())];
-const GEOMETRY = ["startMs", "endMs", "x", "y", "width", "height", "trackIndex"];
+const SPACES: AnnotationSpace[] = ["frame", "screen"];
+const GEOMETRY = ["startMs", "endMs", "x", "y", "width", "height", "trackIndex", "space"];
 const ADD_FIELDS = ["kind", ...GEOMETRY, ...ALL_KIND_FIELDS];
 const MIN_RENDERED_MS = 67;
 
@@ -114,6 +116,11 @@ function checkKindFields(region: AnnotationRegion, op: string) {
 	if (region.type === "image" && !(region.imageContent ?? "").startsWith("data:image/")) {
 		throw new Error(`${op}: image must be a data:image/... URL.`);
 	}
+	if (region.type === "blur" && region.space === "screen") {
+		throw new Error(
+			`${op}: a blur cannot use space "screen". It must sit on the zoomed picture to track what it hides, so use space "frame".`,
+		);
+	}
 	const intensity = region.blurIntensity;
 	if (region.type === "blur" && intensity !== undefined && (intensity < 1 || intensity > 100)) {
 		throw new Error(`${op}: strength must be between 1 and 100.`);
@@ -183,8 +190,13 @@ function applyGeometry(region: AnnotationRegion, args: Record<string, unknown>) 
 	if (trackIndex !== undefined && (!Number.isInteger(trackIndex) || trackIndex < 0)) {
 		throw new Error("trackIndex must be a whole number, 0 or more.");
 	}
+	const space = args.space;
+	if (space !== undefined && !SPACES.includes(space as AnnotationSpace)) {
+		throw new Error(`space must be one of ${SPACES.join(", ")}.`);
+	}
 	return {
 		...region,
+		space: (space as AnnotationSpace | undefined) ?? region.space,
 		startMs: startMs === undefined ? region.startMs : Math.round(startMs),
 		endMs: endMs === undefined ? region.endMs : Math.round(endMs),
 		position: { x: x ?? region.position.x, y: y ?? region.position.y },
@@ -244,7 +256,13 @@ export const annotationsOps: EditorOpMap = {
 		};
 		context.timeline.setAnnotationRegions((current) => [...current, region]);
 		context.timeline.setSelectedAnnotationId(region.id);
-		return { id: region.id, kind, startMs: region.startMs, endMs: region.endMs };
+		return {
+			id: region.id,
+			kind,
+			space: region.space ?? "frame",
+			startMs: region.startMs,
+			endMs: region.endMs,
+		};
 	},
 
 	"annotate.update": (payload, context) => {

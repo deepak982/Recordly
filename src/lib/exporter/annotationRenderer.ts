@@ -379,17 +379,21 @@ export async function renderAnnotations(
 	};
 
 	for (const annotation of sortedAnnotations) {
+		const pinned = annotation.space === "screen";
+		const space = pinned
+			? { x: 0, y: 0, width: canvasWidth, height: canvasHeight }
+			: annotationRect;
 		const rect = transformAnnotationRect(
 			{
-				x: annotationRect.x + (annotation.position.x / 100) * annotationRect.width,
-				y: annotationRect.y + (annotation.position.y / 100) * annotationRect.height,
-				width: (annotation.size.width / 100) * annotationRect.width,
-				height: (annotation.size.height / 100) * annotationRect.height,
+				x: space.x + (annotation.position.x / 100) * space.width,
+				y: space.y + (annotation.position.y / 100) * space.height,
+				width: (annotation.size.width / 100) * space.width,
+				height: (annotation.size.height / 100) * space.height,
 			},
-			sceneTransform,
+			pinned ? undefined : sceneTransform,
 		);
 		const { x, y, width, height } = rect;
-		const effectiveScaleFactor = scaleFactor * (sceneTransform?.scale ?? 1);
+		const effectiveScaleFactor = scaleFactor * (pinned ? 1 : (sceneTransform?.scale ?? 1));
 
 		switch (annotation.type) {
 			case "text":

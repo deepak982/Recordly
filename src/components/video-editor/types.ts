@@ -490,7 +490,10 @@ export interface AnnotationRegion {
 	figureData?: FigureData;
 	blurIntensity?: number;
 	blurColor?: string;
+	space?: AnnotationSpace;
 }
+
+export type AnnotationSpace = "frame" | "screen";
 
 export const DEFAULT_ANNOTATION_POSITION: AnnotationPosition = {
 	x: 50,
