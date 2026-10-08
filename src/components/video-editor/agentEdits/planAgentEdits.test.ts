@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	type AgentActivityAction,
+	type AgentActivityCameraTarget,
 	type AgentActivityLog,
 	type AgentActivitySpanKind,
 	type AgentActivityTarget,
@@ -681,5 +682,138 @@ describe("planAgentEdits", () => {
 		const unsorted = plan(log, 14000, WIDE, [9000, 1000, 4000, 2000]);
 		const sorted = plan(log, 14000, WIDE, [1000, 2000, 4000, 9000]);
 		expect(unsorted.keepRanges).toEqual(sorted.keepRanges);
+	});
+});
+
+describe("camera targets", () => {
+	const wide = { cx: 0.5, cy: 0.5, width: 0.9 };
+	const rect = (
+		atMs: number,
+		width: number,
+		x = 0.1,
+		y = 0.1,
+		height = width,
+	): AgentActivityCameraTarget => ({
+		atMs,
+		x,
+		y,
+		width,
+		height,
+	});
+	const scenes = () => [clickScene(1000, wide), clickScene(6000, wide)];
+	const withCamera = (cameraTargets?: AgentActivityCameraTarget[], list = scenes()) => ({
+		...buildLog(list),
+		cameraTargets,
+	});
+	const zoomsFor = (cameraTargets?: AgentActivityCameraTarget[], durationMs = 14000) =>
+		plan(withCamera(cameraTargets), durationMs).zooms;
+
+	it("changes nothing without markers", () => {
+		const base = plan(buildLog(scenes()), 14000);
+		expect(zoomsFor(undefined)).toEqual(base.zooms);
+		expect(zoomsFor([])).toEqual(base.zooms);
+		expect(base.zooms).toEqual([]);
+	});
+
+	it("picks the deepest depth that never crops the framed window", () => {
+		const depthFor = (width: number) => zoomsFor([rect(0, width, 0, 0)])[0]?.depth;
+		expect(depthFor(0.9)).toBeUndefined();
+		expect(depthFor(0.8)).toBe(1);
+		expect(depthFor(0.66)).toBe(2);
+		expect(depthFor(0.55)).toBe(3);
+		expect(depthFor(0.45)).toBe(4);
+		expect(depthFor(0.28)).toBe(5);
+		expect(depthFor(0.2)).toBe(6);
+	});
+
+	it("is limited by the taller side of the rectangle", () => {
+		expect(zoomsFor([rect(0, 0.3, 0, 0, 0.7)])[0].depth).toBe(1);
+	});
+
+	it("glides between two apps and focuses each window centre", () => {
+		const zooms = zoomsFor([rect(0, 0.5, 0, 0), rect(5000, 0.5, 0.5, 0.5)]);
+		const before = zooms.filter((zoom) => zoom.startMs < 5000);
+		const after = zooms.filter((zoom) => zoom.startMs >= 5000);
+		expect(before.length).toBeGreaterThan(0);
+		expect(after.length).toBeGreaterThan(0);
+		expect(before.every((zoom) => zoom.depth === 3 && zoom.focus.cx === 0.25)).toBe(true);
+		expect(after.every((zoom) => zoom.depth === 3 && zoom.focus.cx === 0.75)).toBe(true);
+		expect(before.every((zoom) => zoom.endMs <= 5000)).toBe(true);
+	});
+
+	it("merges consecutive markers that frame the same rectangle", () => {
+		const zooms = zoomsFor([rect(0, 0.5, 0, 0), rect(5000, 0.5, 0.01, 0.01)]);
+		expect(zooms.filter((zoom) => zoom.startMs < 5000 && zoom.endMs > 5000)).toHaveLength(1);
+		expect(zooms.every((zoom) => zoom.focus.cx < 0.3)).toBe(true);
+	});
+
+	it("ends a region at a marker that frames the whole display", () => {
+		const zooms = zoomsFor([rect(0, 0.5, 0, 0), rect(5000, 1, 0, 0)]);
+		expect(zooms.length).toBeGreaterThan(0);
+		expect(zooms.every((zoom) => zoom.endMs <= 5000)).toBe(true);
+	});
+
+	it("handles one marker, a marker at 0, and a later marker replacing an equal-time one", () => {
+		expect(zoomsFor([rect(0, 0.5, 0, 0)]).length).toBeGreaterThan(0);
+		const zooms = zoomsFor([rect(5000, 0.9), rect(5000, 0.5, 0.5, 0.5)]);
+		expect(zooms.length).toBeGreaterThan(0);
+		expect(zooms.every((zoom) => zoom.focus.cx === 0.75 && zoom.startMs >= 5000)).toBe(true);
+	});
+
+	it("sorts markers that arrive out of order", () => {
+		const forward = zoomsFor([rect(0, 0.5, 0, 0), rect(5000, 0.5, 0.5, 0.5)]);
+		expect(zoomsFor([rect(5000, 0.5, 0.5, 0.5), rect(0, 0.5, 0, 0)])).toEqual(forward);
+	});
+
+	it("ignores unusable rectangles and markers after the end", () => {
+		expect(
+			zoomsFor([
+				rect(0, 0, 0, 0),
+				rect(0, Number.NaN),
+				{ atMs: 0, x: 0, y: 0, width: 0.5, height: 0 },
+				{ atMs: Number.NaN, x: 0, y: 0, width: 0.5, height: 0.5 },
+				rect(14000, 0.5),
+				rect(99999, 0.5),
+			]),
+		).toEqual([]);
+		expect(zoomsFor([rect(0, 3, 0, 0)])).toEqual([]);
+	});
+
+	it("never survives into a cut or a failed scene", () => {
+		const list = [clickScene(1000, wide), { ...clickScene(6000, wide), failed: true }];
+		const result = plan(withCamera([rect(0, 0.5, 0, 0)], list), 14000);
+		expect(result.zooms.length).toBeGreaterThan(0);
+		for (const zoom of result.zooms) {
+			expect(
+				shotsOf(result).some(
+					(shot) => shot.startMs <= zoom.startMs && zoom.endMs <= shot.endMs,
+				),
+			).toBe(true);
+			expect(zoom.endMs).toBeLessThanOrEqual(6000);
+		}
+	});
+
+	it("drops a marker that lies wholly in a cut", () => {
+		const [first, second] = shotsOf(plan(buildLog(scenes()), 14000));
+		const zooms = zoomsFor([rect(first.endMs + 1, 0.5, 0, 0), rect(second.startMs - 1, 1)]);
+		expect(zooms).toEqual([]);
+	});
+
+	it("lets a click zoom win and resumes the camera region after it", () => {
+		const list = [clickScene(1000, wide), clickScene(6000, button(0.5, 0.5))];
+		const result = plan(withCamera([rect(0, 0.5, 0, 0)], list), 14000);
+		const click = result.zooms.find((zoom) => zoom.depth === 2 && zoom.focus.cx === 0.5);
+		expect(click).toBeDefined();
+		for (let index = 1; index < result.zooms.length; index += 1) {
+			expect(result.zooms[index].startMs).toBeGreaterThanOrEqual(
+				result.zooms[index - 1].endMs,
+			);
+		}
+		const camera = result.zooms.filter((zoom) => zoom.depth === 3);
+		expect(camera.some((zoom) => zoom.endMs <= (click?.startMs ?? 0))).toBe(true);
+	});
+
+	it("adds nothing to tall sources", () => {
+		expect(plan(withCamera([rect(0, 0.5, 0, 0)]), 14000, 0.8).zooms).toEqual([]);
 	});
 });

@@ -1,5 +1,5 @@
 import { MIN_FRESH_RECORDING_AUTO_ZOOM_SOURCE_ASPECT_RATIO } from "../timeline/zoomSuggestionUtils";
-import { clampFocusToDepth, type ZoomDepth, type ZoomFocus } from "../types";
+import { clampFocusToDepth, ZOOM_DEPTH_SCALES, type ZoomDepth, type ZoomFocus } from "../types";
 
 export type AgentActivitySpanKind = "motion" | "hold" | "wait";
 export type AgentActivityAction =
@@ -34,10 +34,20 @@ export interface AgentActivityScene {
 	title?: string;
 }
 
+export interface AgentActivityCameraTarget {
+	atMs: number;
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+	label?: string;
+}
+
 export interface AgentActivityLog {
 	version: 1;
 	scenes: AgentActivityScene[];
 	spans: AgentActivitySpan[];
+	cameraTargets?: AgentActivityCameraTarget[];
 	changeTimesMs?: number[];
 }
 
@@ -84,6 +94,7 @@ export const MEDIUM_TARGET_ZOOM_DEPTH: ZoomDepth = 1;
 export const ZOOM_MERGE_GAP_MS = 1350;
 export const ZOOM_MERGE_FOCUS_DISTANCE = 0.25;
 export const ZOOM_MIN_PIECE_MS = 600;
+export const CAMERA_MERGE_FOCUS_DISTANCE = 0.05;
 export const CAPTION_DURATION_MS = 2500;
 export const CAPTION_MAX_CHARS = 80;
 
@@ -270,13 +281,12 @@ function holdKeepMs(span: AgentActivitySpan, previous: AgentActivitySpan | undef
 	return Math.min(HOLD_READ_KEEP_MAX_MS, Math.max(HOLD_READ_KEEP_MS, span.endMs - span.startMs));
 }
 
-function subtractRange(ranges: TimeRange[], cut: TimeRange): TimeRange[] {
+function subtractRange<T extends TimeRange>(ranges: T[], cut: TimeRange): T[] {
 	return ranges.flatMap((range) => {
 		if (cut.endMs <= range.startMs || cut.startMs >= range.endMs) return [range];
-		const pieces: TimeRange[] = [];
-		if (cut.startMs > range.startMs)
-			pieces.push({ startMs: range.startMs, endMs: cut.startMs });
-		if (cut.endMs < range.endMs) pieces.push({ startMs: cut.endMs, endMs: range.endMs });
+		const pieces: T[] = [];
+		if (cut.startMs > range.startMs) pieces.push({ ...range, endMs: cut.startMs });
+		if (cut.endMs < range.endMs) pieces.push({ ...range, startMs: cut.endMs });
 		return pieces;
 	});
 }
@@ -345,13 +355,62 @@ function planZooms(spans: AgentActivitySpan[], keepRanges: TimeRange[]): ZoomPla
 		merged.push({ ...zoom });
 	}
 
-	return merged.flatMap((zoom) =>
+	return clipToKept(merged, keepRanges);
+}
+
+function clipToKept(zooms: ZoomPlan[], keepRanges: TimeRange[]): ZoomPlan[] {
+	return zooms.flatMap((zoom) =>
 		keepRanges.flatMap((range) => {
 			const startMs = Math.max(zoom.startMs, range.startMs);
 			const endMs = Math.min(zoom.endMs, range.endMs - ZOOM_KEEP_TAIL_MS);
 			return endMs - startMs >= ZOOM_MIN_PIECE_MS ? [{ ...zoom, startMs, endMs }] : [];
 		}),
 	);
+}
+
+const DEPTHS_BY_SCALE = (Object.keys(ZOOM_DEPTH_SCALES).map(Number) as ZoomDepth[]).sort(
+	(a, b) => ZOOM_DEPTH_SCALES[b] - ZOOM_DEPTH_SCALES[a],
+);
+
+function cameraLookForTarget(target: AgentActivityCameraTarget): ZoomLook | null {
+	const { x, y, width, height } = target;
+	if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null;
+	const fitScale = 1 / Math.max(Math.min(width, 1), Math.min(height, 1));
+	const depth = DEPTHS_BY_SCALE.find((candidate) => ZOOM_DEPTH_SCALES[candidate] <= fitScale);
+	if (depth === undefined) return null;
+	return { depth, focus: clampFocusToDepth({ cx: x + width / 2, cy: y + height / 2 }, depth) };
+}
+
+function planCameraZooms(
+	targets: readonly AgentActivityCameraTarget[] | undefined,
+	durationMs: number,
+	keepRanges: TimeRange[],
+	clickZooms: ZoomPlan[],
+): ZoomPlan[] {
+	const markers = (Array.isArray(targets) ? targets : [])
+		.filter((target) => target && Number.isFinite(target.atMs) && target.atMs < durationMs)
+		.map((target) => ({ ...target, atMs: Math.max(0, Math.round(target.atMs)) }))
+		.sort((a, b) => a.atMs - b.atMs);
+	const regions: ZoomPlan[] = [];
+	markers.forEach((marker, index) => {
+		const look = cameraLookForTarget(marker);
+		if (!look) return;
+		const endMs = markers[index + 1]?.atMs ?? durationMs;
+		const prev = regions[regions.length - 1];
+		if (
+			prev &&
+			prev.endMs === marker.atMs &&
+			prev.depth === look.depth &&
+			Math.hypot(prev.focus.cx - look.focus.cx, prev.focus.cy - look.focus.cy) <
+				CAMERA_MERGE_FOCUS_DISTANCE
+		) {
+			prev.endMs = endMs;
+			return;
+		}
+		regions.push({ startMs: marker.atMs, endMs, ...look });
+	});
+	const free = clickZooms.reduce(subtractRange, regions);
+	return clipToKept(free, keepRanges);
 }
 
 function planCaptions(
@@ -433,10 +492,14 @@ export function planAgentEdits(
 	].reduce((ranges, step) => step(ranges), cut);
 	if (shots.length === 0) return null;
 
-	const zooms =
-		sourceAspect < MIN_FRESH_RECORDING_AUTO_ZOOM_SOURCE_ASPECT_RATIO
-			? []
-			: planZooms(spans, shots);
+	let zooms: ZoomPlan[] = [];
+	if (sourceAspect >= MIN_FRESH_RECORDING_AUTO_ZOOM_SOURCE_ASPECT_RATIO) {
+		const clickZooms = planZooms(spans, shots);
+		zooms = [
+			...clickZooms,
+			...planCameraZooms(log.cameraTargets, durationMs, shots, clickZooms),
+		].sort((a, b) => a.startMs - b.startMs);
+	}
 	const captions = planCaptions(scenes, shots);
 	const keepRanges: AgentEditKeepRange[] = [
 		...shots,
