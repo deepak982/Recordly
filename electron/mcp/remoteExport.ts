@@ -1,12 +1,16 @@
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { type IpcMain, ipcMain, type WebContents } from "electron";
+import { getFfmpegBinaryPath } from "../ipc/ffmpeg/binary";
 import { getRecordingsDir } from "../ipc/utils";
 
 const EDITOR_READY_TIMEOUT_MS = 45_000;
 const EXPORT_WAIT_CAP_MS = 5 * 60_000;
+const PAD_TIMEOUT_MS = 5 * 60_000;
+const MAX_PAD_SIDE = 8192;
 
 type ExportFormat = RemoteExportRequest["format"];
 
@@ -16,6 +20,10 @@ export type RemoteExportArgs = {
 	format?: ExportFormat;
 	quality?: RemoteExportRequest["quality"];
 	overwrite?: boolean;
+	/** Letterbox to this aspect ratio ("16:9"); never stretches or crops. */
+	aspect?: string;
+	/** Fit inside and letterbox to exactly this size ("2880x1600"); never stretches. */
+	padTo?: string;
 };
 
 export type RemoteExportStatus = {
@@ -31,6 +39,80 @@ type ActiveExport = {
 	onProgress?: (pct: number) => void;
 	settle: (result: RemoteExportResult) => void;
 };
+
+type PadSpec = { filter: string };
+
+/** Letterbox filters. Only ever add bars: scale keeps the aspect ratio, pad fills the rest. */
+export function buildPadFilter(args: { aspect?: string; padTo?: string }): PadSpec | null {
+	if (args.aspect !== undefined && args.padTo !== undefined) {
+		throw new Error("Pass either aspect or padTo, not both.");
+	}
+	if (args.aspect !== undefined) {
+		const match = /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.exec(args.aspect.trim());
+		if (!match || Number(match[1]) <= 0 || Number(match[2]) <= 0) {
+			throw new Error(`aspect must look like 16:9, not "${args.aspect}".`);
+		}
+		const ratio = `${match[1]}/${match[2]}`;
+		return {
+			filter:
+				`pad='ceil(max(iw,ih*${ratio})/2)*2':'ceil(max(ih,iw/(${ratio}))/2)*2'` +
+				`:'(ow-iw)/2':'(oh-ih)/2':black`,
+		};
+	}
+	if (args.padTo !== undefined) {
+		const match = /^(\d+)x(\d+)$/i.exec(args.padTo.trim());
+		const [width, height] = [Number(match?.[1]), Number(match?.[2])];
+		if (!match || width < 2 || height < 2 || width % 2 || height % 2) {
+			throw new Error(`padTo must look like 2880x1600 with even sizes, not "${args.padTo}".`);
+		}
+		if (width > MAX_PAD_SIDE || height > MAX_PAD_SIDE) {
+			throw new Error(`padTo cannot be larger than ${MAX_PAD_SIDE} px on a side.`);
+		}
+		return {
+			filter:
+				`scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2,` +
+				`pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black`,
+		};
+	}
+	return null;
+}
+
+export function buildPadArgs(input: string, output: string, filter: string) {
+	return [
+		"-y",
+		"-hide_banner",
+		"-i",
+		input,
+		"-vf",
+		filter,
+		"-c:v",
+		"libx264",
+		"-crf",
+		"16",
+		"-preset",
+		"medium",
+		"-pix_fmt",
+		"yuv420p",
+		"-c:a",
+		"copy",
+		"-movflags",
+		"+faststart",
+		output,
+	];
+}
+
+const defaultRunFfmpeg = (args: string[]) =>
+	new Promise<void>((resolve, reject) => {
+		execFile(
+			getFfmpegBinaryPath(),
+			args,
+			{ timeout: PAD_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024 },
+			(error, _stdout, stderr) =>
+				error
+					? reject(new Error(stderr.trim().split("\n").pop() || error.message))
+					: resolve(),
+		);
+	});
 
 const fileExists = (filePath: string) =>
 	fs.stat(filePath, { bigint: true }).then(
@@ -65,8 +147,10 @@ async function resolveTarget(args: RemoteExportArgs, recordingsDir: () => Promis
 	if (requested && !path.isAbsolute(requested)) {
 		throw new Error(`outputPath must be an absolute path: ${requested}`);
 	}
+	const pad = buildPadFilter(args);
 	const format: ExportFormat =
 		args.format ?? (requested?.toLowerCase().endsWith(".gif") ? "gif" : "mp4");
+	if (pad && format !== "mp4") throw new Error("aspect and padTo only work with mp4 exports.");
 	const outputPath = requested
 		? path.resolve(requested)
 		: path.join(await recordingsDir(), `${path.parse(videoPath).name}-export.${format}`);
@@ -84,6 +168,7 @@ async function resolveTarget(args: RemoteExportArgs, recordingsDir: () => Promis
 		fileExists(outputPath),
 		fileExists(videoPath),
 	]);
+	if (!recording?.isFile()) throw new Error(`There is no recording file at ${videoPath}.`);
 	if (existing && recording && isSameFile(outputPath, existing, videoPath, recording)) {
 		throw new Error("outputPath cannot be the recording itself.");
 	}
@@ -91,15 +176,17 @@ async function resolveTarget(args: RemoteExportArgs, recordingsDir: () => Promis
 	if (existing && !args.overwrite) {
 		throw new Error(`${outputPath} already exists. Pass overwrite: true to replace it.`);
 	}
-	return { videoPath, outputPath, format };
+	return { videoPath, outputPath, format, pad };
 }
 
 export function createRemoteExport({
 	ipc = ipcMain,
 	recordingsDir = getRecordingsDir,
+	runFfmpeg = defaultRunFfmpeg,
 }: {
 	ipc?: Pick<IpcMain, "on">;
 	recordingsDir?: () => Promise<string>;
+	runFfmpeg?: (args: string[]) => Promise<void>;
 } = {}) {
 	const readyEditors = new Map<WebContents, string>();
 	const watchedEditors = new WeakSet<WebContents>();
@@ -253,11 +340,49 @@ export function createRemoteExport({
 			throw error;
 		}
 		status = { ...status, state: "exporting", progress: 0 };
+		// The editor renders at its own size; padding is a second ffmpeg pass over its file.
+		const id = randomUUID();
+		const unique = id.slice(0, 8);
+		const rendered = target.pad
+			? path.join(
+					path.dirname(target.outputPath),
+					`.${path.parse(target.outputPath).name}.prepad-${unique}.mp4`,
+				)
+			: target.outputPath;
 		const request: RemoteExportRequest = {
-			id: randomUUID(),
-			outputPath: target.outputPath,
+			id,
+			outputPath: rendered,
 			format: target.format,
 			quality: args.quality,
+		};
+		const padRendered = async (renderedPath: string) => {
+			const staged = `${target.outputPath}.padding-${unique}.mp4`;
+			busy = true;
+			status = { ...status, state: "exporting", progress: 99, outputPath: target.outputPath };
+			try {
+				await runFfmpeg(buildPadArgs(renderedPath, staged, target.pad?.filter ?? ""));
+				await fs.rename(staged, target.outputPath);
+				status = { ...status, state: "done", progress: 100, outputPath: target.outputPath };
+			} catch (error) {
+				const reason = (error as Error).message;
+				const kept = await fs.rename(renderedPath, target.outputPath).then(
+					() => true,
+					() => false,
+				);
+				status = { ...status, state: "failed", error: reason };
+				throw new Error(
+					kept
+						? `The export finished but padding it failed: ${reason}. The unpadded video is at ${target.outputPath}.`
+						: `The export finished but padding it failed: ${reason}`,
+				);
+			} finally {
+				busy = false;
+				await Promise.all([
+					fs.rm(staged, { force: true }),
+					fs.rm(renderedPath, { force: true }),
+				]);
+			}
+			return { status: "done" as const, path: target.outputPath };
 		};
 		const completion = runInEditor(editor, request, opts.onProgress);
 		const result = await new Promise<RemoteExportResult | null>((resolve) => {
@@ -272,10 +397,23 @@ export function createRemoteExport({
 		});
 		if (!result) {
 			if (active?.id === request.id) active.onProgress = undefined;
+			// A padded export that outlives the wait finishes padding in the background.
+			if (target.pad) {
+				void completion
+					.then(async (done) => {
+						if (done.ok) await padRendered(done.path ?? rendered);
+						else await fs.rm(rendered, { force: true });
+					})
+					.catch(() => undefined);
+			}
 			return { status: "still-exporting" };
 		}
-		if (!result.ok) throw new Error(result.error ?? "The export failed.");
-		return { status: "done", path: result.path ?? request.outputPath };
+		if (!result.ok) {
+			if (target.pad) await fs.rm(rendered, { force: true });
+			throw new Error(result.error ?? "The export failed.");
+		}
+		if (!target.pad) return { status: "done", path: result.path ?? request.outputPath };
+		return padRendered(result.path ?? rendered);
 	}
 
 	return {

@@ -10,7 +10,7 @@ vi.mock("electron", () => ({
 	ipcMain: { on: vi.fn() },
 }));
 
-const { createRemoteExport, isSameFile } = await import("./remoteExport");
+const { buildPadFilter, createRemoteExport, isSameFile } = await import("./remoteExport");
 
 let dir: string;
 let videoPath: string;
@@ -33,11 +33,12 @@ function fakeEditor() {
 	});
 }
 
-function setup() {
+function setup(runFfmpeg: (args: string[]) => Promise<void> = async () => undefined) {
 	const ipc = new EventEmitter();
 	const remote = createRemoteExport({
 		ipc: ipc as unknown as IpcMain,
 		recordingsDir: async () => dir,
+		runFfmpeg,
 	});
 	const editor = fakeEditor();
 	const ready = (target: string | null, sender = editor) =>
@@ -101,6 +102,14 @@ describe("output path validation", () => {
 	it("rejects when there is no recording", async () => {
 		const { remote } = setup();
 		await expect(remote.exportVideo({ videoPath: null })).rejects.toThrow(/no recording/);
+	});
+
+	it("rejects a recording file that is not on disk", async () => {
+		const { remote } = setup();
+		await expect(remote.exportVideo({ videoPath: path.join(dir, "gone.mp4") })).rejects.toThrow(
+			/no recording file at/,
+		);
+		expect(remote.getStatus().state).toBe("idle");
 	});
 
 	it("refuses to overwrite unless asked, and never the recording itself", async () => {
@@ -309,6 +318,141 @@ describe("export flow", () => {
 		reply({ ok: true, path: "/out/late.mp4" });
 		expect(remote.getStatus()).toMatchObject({ state: "done", outputPath: "/out/late.mp4" });
 		expect(vi.getTimerCount()).toBe(0);
+	});
+});
+
+describe("videoPath", () => {
+	it("exports the file it is given, not another one the editor has open", async () => {
+		const { remote, ready, sent, lastRequest, reply } = setup();
+		const other = path.join(dir, "recording-2.mp4");
+		await fs.writeFile(other, "");
+		ready(videoPath);
+		const pending = remote.exportVideo({ videoPath: other });
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(remote.getStatus().state).toBe("waiting-for-editor");
+		ready(other);
+		await sent();
+		expect(lastRequest().outputPath).toBe(path.join(dir, "recording-2-export.mp4"));
+		reply({ ok: true, path: lastRequest().outputPath });
+		await pending;
+	});
+});
+
+describe("aspect and padTo", () => {
+	it("letterboxes to a fixed size by fitting first, never stretching", () => {
+		const { filter } = buildPadFilter({ padTo: "2880x1600" }) ?? { filter: "" };
+		expect(filter).toBe(
+			"scale=2880:1600:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=2880:1600:(ow-iw)/2:(oh-ih)/2:black",
+		);
+	});
+
+	it("pads to an aspect ratio by only growing the canvas", () => {
+		const { filter } = buildPadFilter({ aspect: "16:9" }) ?? { filter: "" };
+		expect(filter).toContain("pad='ceil(max(iw,ih*16/9)/2)*2':'ceil(max(ih,iw/(16/9))/2)*2'");
+		expect(filter).not.toMatch(/scale=\d+:\d+(?!:force)/);
+	});
+
+	it.each([
+		[{ aspect: "wide" }, /aspect must look like/],
+		[{ aspect: "16:0" }, /aspect must look like/],
+		[{ padTo: "2881x1600" }, /even/],
+		[{ padTo: "9000x1600" }, /larger than/],
+		[{ aspect: "16:9", padTo: "2880x1600" }, /not both/],
+	])("rejects %o before touching the editor", async (args, message) => {
+		const { remote } = setup();
+		await expect(remote.exportVideo({ videoPath, ...args })).rejects.toThrow(message);
+		expect(remote.getStatus().state).toBe("idle");
+	});
+
+	it("rejects padding a gif", async () => {
+		const { remote } = setup();
+		await expect(
+			remote.exportVideo({ videoPath, format: "gif", padTo: "2880x1600" }),
+		).rejects.toThrow(/only work with mp4/);
+	});
+
+	it("renders to a temp file, pads it with ffmpeg, and leaves only the final file", async () => {
+		const runFfmpeg = vi.fn(async (args: string[]) => {
+			await fs.writeFile(args[args.length - 1], "padded");
+		});
+		const { remote, ready, sent, lastRequest, reply } = setup(runFfmpeg);
+		const out = path.join(dir, "final.mp4");
+		ready(videoPath);
+		const pending = remote.exportVideo({ videoPath, outputPath: out, padTo: "2880x1600" });
+		await sent();
+		const rendered = lastRequest().outputPath;
+		expect(rendered).not.toBe(out);
+		await fs.writeFile(rendered, "raw");
+		reply({ ok: true, path: rendered });
+		await expect(pending).resolves.toEqual({ status: "done", path: out });
+		const args = runFfmpeg.mock.calls[0][0];
+		expect(args[args.indexOf("-vf") + 1]).toContain("pad=2880:1600");
+		expect(args[args.indexOf("-i") + 1]).toBe(rendered);
+		expect(await fs.readFile(out, "utf8")).toBe("padded");
+		expect((await fs.readdir(dir)).sort()).toEqual(["final.mp4", "recording-1.mp4"]);
+		expect(remote.getStatus()).toMatchObject({ state: "done", outputPath: out });
+	});
+
+	it("reports a padding failure plainly", async () => {
+		const { remote, ready, sent, lastRequest, reply } = setup(async () => {
+			throw new Error("Invalid argument");
+		});
+		ready(videoPath);
+		const pending = remote.exportVideo({ videoPath, aspect: "1:1" });
+		await sent();
+		reply({ ok: true, path: lastRequest().outputPath });
+		await expect(pending).rejects.toThrow(/padding it failed: Invalid argument/);
+		expect(remote.getStatus().state).toBe("failed");
+	});
+
+	it("keeps the unpadded video when padding fails", async () => {
+		const { remote, ready, sent, lastRequest, reply } = setup(async () => {
+			throw new Error("Invalid argument");
+		});
+		const out = path.join(dir, "final.mp4");
+		ready(videoPath);
+		const pending = remote.exportVideo({ videoPath, outputPath: out, padTo: "2880x1600" });
+		await sent();
+		await fs.writeFile(lastRequest().outputPath, "raw");
+		reply({ ok: true, path: lastRequest().outputPath });
+		await expect(pending).rejects.toThrow(/The unpadded video is at/);
+		expect(await fs.readFile(out, "utf8")).toBe("raw");
+		expect((await fs.readdir(dir)).sort()).toEqual(["final.mp4", "recording-1.mp4"]);
+	});
+
+	it("removes the pre-pad file when the editor's export fails", async () => {
+		const { remote, ready, sent, lastRequest, reply } = setup();
+		ready(videoPath);
+		const pending = remote.exportVideo({
+			videoPath,
+			outputPath: path.join(dir, "final.mp4"),
+			padTo: "2880x1600",
+		});
+		await sent();
+		await fs.writeFile(lastRequest().outputPath, "half");
+		reply({ ok: false, error: "Encoder crashed" });
+		await expect(pending).rejects.toThrow("Encoder crashed");
+		expect(await fs.readdir(dir)).toEqual(["recording-1.mp4"]);
+	});
+
+	it("leaves a file that already sits at a temp path alone", async () => {
+		const runFfmpeg = vi.fn(async (args: string[]) => {
+			await fs.writeFile(args[args.length - 1], "padded");
+		});
+		const { remote, ready, sent, lastRequest, reply } = setup(runFfmpeg);
+		const out = path.join(dir, "final.mp4");
+		const prepad = path.join(dir, ".final.prepad.mp4");
+		const staged = `${out}.padding.mp4`;
+		await fs.writeFile(prepad, "mine");
+		await fs.writeFile(staged, "mine");
+		ready(videoPath);
+		const pending = remote.exportVideo({ videoPath, outputPath: out, padTo: "2880x1600" });
+		await sent();
+		await fs.writeFile(lastRequest().outputPath, "raw");
+		reply({ ok: true, path: lastRequest().outputPath });
+		await expect(pending).resolves.toEqual({ status: "done", path: out });
+		expect(await fs.readFile(prepad, "utf8")).toBe("mine");
+		expect(await fs.readFile(staged, "utf8")).toBe("mine");
 	});
 });
 
