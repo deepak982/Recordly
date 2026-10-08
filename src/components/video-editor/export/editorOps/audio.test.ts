@@ -3,12 +3,7 @@ import type { AudioRegion } from "../../types";
 import { audioOps } from "./audio";
 import type { EditorOpContext } from "./types";
 
-const resolveSource = vi.hoisted(() => vi.fn());
-
-vi.mock("@/lib/exporter/localMediaSource", async (importActual) => ({
-	...(await importActual<typeof import("@/lib/exporter/localMediaSource")>()),
-	resolveMediaElementSource: resolveSource,
-}));
+const getLocalMediaUrl = vi.hoisted(() => vi.fn());
 
 type Clip = { id: string; startMs: number; endMs: number; speed: number; muted?: boolean };
 type TrackSettings = Record<string, { volume: number; normalize: boolean }>;
@@ -107,10 +102,9 @@ const region = (over: Partial<AudioRegion> = {}): AudioRegion => ({
 });
 
 beforeEach(() => {
-	resolveSource.mockImplementation(async (resource: string) => ({
-		src: resource,
-		revoke: () => undefined,
-	}));
+	getLocalMediaUrl.mockReset();
+	getLocalMediaUrl.mockImplementation(async (path: string) => ({ success: true, url: path }));
+	vi.stubGlobal("window", { electronAPI: { getLocalMediaUrl } });
 });
 
 afterEach(() => {
@@ -195,35 +189,83 @@ describe("audio.add", () => {
 		expect(state.regions).toEqual([]);
 	});
 
-	it("rejects a file that is missing or not playable and changes nothing", async () => {
+	it("says a file that will not decode is unreadable audio, not unreadable access", async () => {
 		stubAudio("error");
 		const { state, context } = makeContext();
-		await expect(run("audio.add", { path: "/gone.mp3" }, context)).rejects.toThrow(
-			/does not exist or is not audio/,
+		await expect(run("audio.add", { path: "/silent.wav" }, context)).rejects.toThrow(
+			/was found but the editor could not decode it/,
 		);
 		expect(state.regions).toEqual([]);
+	});
+
+	it("says so, and never loads the player, when the file is not approved or served", async () => {
+		const loaded = vi.fn();
+		class Never {
+			addEventListener() {}
+			removeAttribute() {}
+			load() {}
+			set src(value: string) {
+				loaded(value);
+			}
+		}
+		vi.stubGlobal("Audio", Never);
+		getLocalMediaUrl.mockResolvedValueOnce({ success: false });
+		const { state, context } = makeContext();
+		await expect(
+			run("audio.add", { path: "/Users/me/Downloads/a.mp3" }, context),
+		).rejects.toThrow(/not allowed to read \/Users\/me\/Downloads\/a.mp3.*Add audio control/);
+		expect(loaded).not.toHaveBeenCalled();
+		expect(state.regions).toEqual([]);
+	});
+
+	it("loads the served url rather than the raw path", async () => {
+		const loaded = vi.fn();
+		class Serving {
+			private onMeta: () => void = () => undefined;
+			duration = 2;
+			addEventListener(name: string, handler: () => void) {
+				if (name === "loadedmetadata") this.onMeta = handler;
+			}
+			removeAttribute() {}
+			load() {}
+			set src(value: string) {
+				loaded(value);
+				queueMicrotask(this.onMeta);
+			}
+		}
+		vi.stubGlobal("Audio", Serving);
+		getLocalMediaUrl.mockResolvedValueOnce({ success: true, url: "http://127.0.0.1:1/m?p=a" });
+		await run("audio.add", { path: "/Users/me/a.mp3" }, makeContext().context);
+		expect(getLocalMediaUrl).toHaveBeenCalledWith("/Users/me/a.mp3");
+		expect(loaded).toHaveBeenCalledWith("http://127.0.0.1:1/m?p=a");
+	});
+
+	it("says so outside the Recordly app", async () => {
+		stubAudio(3);
+		vi.stubGlobal("window", {});
+		await expect(run("audio.add", { path: "/a.mp3" }, makeContext().context)).rejects.toThrow(
+			/inside the Recordly app/,
+		);
 	});
 
 	it("gives up when the media server never answers, and when it fails", async () => {
 		vi.useFakeTimers();
 		stubAudio(3);
-		resolveSource.mockReturnValueOnce(new Promise(() => undefined));
+		getLocalMediaUrl.mockReturnValueOnce(new Promise(() => undefined));
 		const first = makeContext();
 		const pending = run("audio.add", { path: "/slow.mp3" }, first.context) as Promise<unknown>;
 		const assertion = expect(pending).rejects.toThrow(/Timed out reading/);
 		await vi.advanceTimersByTimeAsync(10_001);
 		await assertion;
 		expect(first.state.regions).toEqual([]);
-		resolveSource.mockRejectedValueOnce(new Error("media server down"));
+		getLocalMediaUrl.mockRejectedValueOnce(new Error("media server down"));
 		await expect(run("audio.add", { path: "/a.mp3" }, makeContext().context)).rejects.toThrow(
-			/Could not open \/a.mp3: media server down/,
+			/media server down/,
 		);
 	});
 
 	it("releases the player after a failed read", async () => {
 		const removeAttribute = vi.fn();
-		const revoke = vi.fn();
-		resolveSource.mockResolvedValueOnce({ src: "/gone.mp3", revoke });
 		class Failing {
 			private onError: () => void = () => undefined;
 			addEventListener(name: string, handler: () => void) {
@@ -238,9 +280,8 @@ describe("audio.add", () => {
 		vi.stubGlobal("Audio", Failing);
 		await expect(
 			run("audio.add", { path: "/gone.mp3" }, makeContext().context),
-		).rejects.toThrow(/not audio/);
+		).rejects.toThrow(/could not decode/);
 		expect(removeAttribute).toHaveBeenCalledWith("src");
-		expect(revoke).toHaveBeenCalledTimes(1);
 	});
 
 	it("says there is no recording when its length is unknown", async () => {
@@ -248,29 +289,6 @@ describe("audio.add", () => {
 		await expect(
 			run("audio.add", { path: "/a.mp3" }, makeContext({ durationSec: 0 }).context),
 		).rejects.toThrow(/no recording loaded/);
-	});
-
-	it("revokes a source that resolves after the read already timed out", async () => {
-		vi.useFakeTimers();
-		stubAudio("never");
-		const revoke = vi.fn();
-		let resolveLate: (value: { src: string; revoke: () => void }) => void = () => undefined;
-		resolveSource.mockReturnValueOnce(
-			new Promise((resolve) => {
-				resolveLate = resolve;
-			}),
-		);
-		const pending = run(
-			"audio.add",
-			{ path: "/slow.mp3" },
-			makeContext().context,
-		) as Promise<unknown>;
-		const assertion = expect(pending).rejects.toThrow(/Timed out reading/);
-		await vi.advanceTimersByTimeAsync(10_001);
-		await assertion;
-		resolveLate({ src: "/slow.mp3", revoke });
-		await vi.advanceTimersByTimeAsync(0);
-		expect(revoke).toHaveBeenCalledTimes(1);
 	});
 
 	it("never writes a region of no length from fractional times", async () => {

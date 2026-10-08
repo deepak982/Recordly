@@ -1,4 +1,4 @@
-import { isAbsoluteLocalPath, resolveMediaElementSource } from "@/lib/exporter/localMediaSource";
+import { isAbsoluteLocalPath } from "@/lib/exporter/localMediaSource";
 import type { SourceAudioTrackSetting } from "../../audio/audioTypes";
 import { resolveAudioPlacement } from "../../timeline/hooks/utils/timelineAudioPlacement";
 import { type AudioRegion, getTimelineDurationMs } from "../../types";
@@ -32,18 +32,28 @@ function requireAudioRegion(id: string, context: EditorOpContext) {
 	return region;
 }
 
+async function resolveReadableUrl(audioPath: string) {
+	const getUrl = window.electronAPI?.getLocalMediaUrl;
+	if (!getUrl) throw new Error("Audio files can only be read inside the Recordly app.");
+	const result = await getUrl(audioPath);
+	if (!result.success) {
+		throw new Error(
+			`Recordly is not allowed to read ${audioPath}. Only files you have chosen in Recordly can be read, so pick the file with the Add audio control once, or check that the path exists, is a file and is an mp3, wav or ogg.`,
+		);
+	}
+	return result.url;
+}
+
 function probeAudioDurationMs(audioPath: string): Promise<number> {
 	return new Promise<number>((resolve, reject) => {
 		const audio = new Audio();
 		let settled = false;
-		let revoke = () => undefined as void;
 		const finish = (settle: () => void) => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
 			audio.removeAttribute("src");
 			audio.load();
-			revoke();
 			settle();
 		};
 		const timer = setTimeout(
@@ -68,29 +78,17 @@ function probeAudioDurationMs(audioPath: string): Promise<number> {
 				finish(() =>
 					reject(
 						new Error(
-							`${audioPath} does not exist or is not audio the editor can play.`,
+							`${audioPath} was found but the editor could not decode it. It has no audio track or uses a format the editor cannot play.`,
 						),
 					),
 				),
 			{ once: true },
 		);
-		resolveMediaElementSource(audioPath).then(
-			(resolved) => {
-				if (settled) {
-					resolved.revoke();
-					return;
-				}
-				revoke = resolved.revoke;
-				audio.src = resolved.src;
+		resolveReadableUrl(audioPath).then(
+			(src) => {
+				if (!settled) audio.src = src;
 			},
-			(error) =>
-				finish(() =>
-					reject(
-						new Error(
-							`Could not open ${audioPath}: ${error instanceof Error ? error.message : String(error)}`,
-						),
-					),
-				),
+			(error) => finish(() => reject(error)),
 		);
 	});
 }
