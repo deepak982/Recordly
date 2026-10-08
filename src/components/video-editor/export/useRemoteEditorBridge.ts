@@ -1,12 +1,18 @@
 import { useEffect, useRef } from "react";
+import type { useAppearanceState } from "../state/useAppearanceState";
 import type { useTimelineState } from "../state/useTimelineState";
 import { getTimelineDurationMs } from "../types";
+import { runEditorOp } from "./editorOps";
+import type { EditorOpContext } from "./editorOps/types";
 
 type Input = {
 	ready: boolean;
 	duration: number;
 	videoSourcePath: string | null;
 	timeline: ReturnType<typeof useTimelineState>;
+	appearance: ReturnType<typeof useAppearanceState>;
+	history: { undo: () => void; redo: () => void; canUndo: boolean; canRedo: boolean };
+	ids: EditorOpContext["ids"];
 };
 
 type Editor = Input;
@@ -25,18 +31,22 @@ function getState({ duration, videoSourcePath, timeline }: Editor) {
 	};
 }
 
-function runOp(op: string, _payload: unknown, editor: Editor) {
-	switch (op) {
-		case "get_state":
-			return getState(editor);
-		default:
-			throw new Error(`The editor does not support "${op}".`);
-	}
+function runOp(op: string, payload: unknown, editor: Editor) {
+	if (op === "get_state") return getState(editor);
+	return runEditorOp(op, payload, {
+		duration: editor.duration,
+		videoSourcePath: editor.videoSourcePath,
+		timeline: editor.timeline,
+		appearance: editor.appearance,
+		history: editor.history,
+		ids: editor.ids,
+	});
 }
 
 export function useRemoteEditorBridge(input: Input) {
 	const latestRef = useRef(input);
 	latestRef.current = input;
+	const queueRef = useRef<Promise<unknown>>(Promise.resolve());
 
 	useEffect(
 		() =>
@@ -49,10 +59,11 @@ export function useRemoteEditorBridge(input: Input) {
 					return;
 				}
 				try {
-					reply({
-						ok: true,
-						data: await runOp(request.op, request.payload, latestRef.current),
-					});
+					const run = queueRef.current.then(() =>
+						runOp(request.op, request.payload, latestRef.current),
+					);
+					queueRef.current = run.catch(() => undefined);
+					reply({ ok: true, data: await run });
 				} catch (error) {
 					reply({
 						ok: false,

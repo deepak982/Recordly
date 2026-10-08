@@ -265,7 +265,7 @@ export default function VideoEditor() {
 	});
 	const {
 		snapshot: { currentSourcePath },
-		history: { handleUndo, handleRedo },
+		history: { handleUndo, handleRedo, canUndo, canRedo },
 		lifecycle: { handleUploadWebcam, handleClearWebcam },
 		autoCaption: autoCaptionController,
 	} = projectController;
@@ -320,6 +320,14 @@ export default function VideoEditor() {
 
 	const exportController = useEditorExportController({
 		t,
+		history: { undo: handleUndo, redo: handleRedo, canUndo, canRedo },
+		ids: {
+			zoom: nextZoomIdRef,
+			clip: nextClipIdRef,
+			audio: nextAudioIdRef,
+			annotation: nextAnnotationIdRef,
+			annotationZIndex: nextAnnotationZIndexRef,
+		},
 		videoPath,
 		videoSourcePath,
 		videoPlaybackRef,
