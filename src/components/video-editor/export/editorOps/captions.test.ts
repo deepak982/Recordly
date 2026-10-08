@@ -548,3 +548,136 @@ describe("captions.generate from audio", () => {
 		expect(state.cues).toEqual([]);
 	});
 });
+
+describe("captions.fit_to_scenes", () => {
+	const scene = (startMs: number, endMs: number, extra: object = {}) => ({
+		startMs,
+		endMs,
+		failed: false,
+		...extra,
+	});
+	const withScenes = (scenes: unknown[]) =>
+		stubApi({
+			getAgentActivity: vi
+				.fn()
+				.mockResolvedValue({ success: true, log: { version: 1, scenes, spans: [] } }),
+		});
+	const cutClips: Clip[] = [
+		{ id: "a", startMs: 0, endMs: 4000, speed: 1 },
+		{ id: "b", startMs: 4000, endMs: 9000, speed: 1, sourceStartMs: 5000 },
+	];
+
+	it("places one cue per scene inside a shot, in source time, padded", async () => {
+		withScenes([scene(0, 4000), scene(5000, 10000)]);
+		const { state, context } = makeContext({ clips: cutClips });
+		const result = await run("captions.fit_to_scenes", { texts: ["One", "Two"] }, context);
+		expect(state.cues.map((cue) => [cue.startMs, cue.endMs, cue.text])).toEqual([
+			[200, 3800, "One"],
+			[5200, 9800, "Two"],
+		]);
+		expect(result.skipped).toEqual([]);
+		expect(state.settings.enabled).toBe(true);
+	});
+
+	it("never crosses a cut: a scene spanning one picks its longest shot", async () => {
+		withScenes([scene(0, 10000)]);
+		const { state, context } = makeContext({ clips: cutClips });
+		await run("captions.fit_to_scenes", { texts: ["All"], padMs: 0 }, context);
+		const shown = projectCaptionCues(state.cues, cutClips as never);
+		expect(shown).toHaveLength(1);
+		expect(state.cues[0]).toMatchObject({ startMs: 5000, endMs: 10000 });
+	});
+
+	it("skips a scene that is cut away and names it", async () => {
+		withScenes([scene(0, 4000), scene(4100, 4900, { title: "Hidden" }), scene(5000, 10000)]);
+		const { state, context } = makeContext({ clips: cutClips });
+		const result = await run("captions.fit_to_scenes", { texts: ["a", "b", "c"] }, context);
+		expect(state.cues.map((cue) => cue.text)).toEqual(["a", "c"]);
+		expect(result.skipped).toMatchObject([{ scene: 1, title: "Hidden" }]);
+	});
+
+	it("keeps a cue off a cut boundary and clamps padding to the room", async () => {
+		withScenes([scene(0, 1000)]);
+		const { state, context } = makeContext({ clips: cutClips });
+		await run("captions.fit_to_scenes", { texts: ["Short"], padMs: 2000 }, context);
+		expect(state.cues[0].startMs).toBe(250);
+		expect(state.cues[0].endMs).toBe(750);
+	});
+
+	it("maps through speed and a shifted source start", async () => {
+		const clips: Clip[] = [{ id: "a", startMs: 0, endMs: 2000, speed: 2, sourceStartMs: 3000 }];
+		withScenes([scene(3000, 7000)]);
+		const { state, context } = makeContext({ clips });
+		await run("captions.fit_to_scenes", { texts: ["Fast"], padMs: 0 }, context);
+		expect(state.cues[0]).toMatchObject({ startMs: 3000, endMs: 7000 });
+	});
+
+	it("works with no clips and drops failed scenes from the count", async () => {
+		withScenes([scene(0, 2000), scene(2000, 3000, { failed: true }), scene(3000, 6000)]);
+		const { state, context } = makeContext();
+		await run("captions.fit_to_scenes", { texts: ["a", "b"], padMs: 0 }, context);
+		expect(state.cues.map((cue) => [cue.startMs, cue.endMs])).toEqual([
+			[0, 2000],
+			[3000, 6000],
+		]);
+	});
+
+	it("handles duplicate scene times without overlapping cues", async () => {
+		withScenes([scene(0, 4000), scene(0, 4000)]);
+		const { state, context } = makeContext();
+		const result = await run(
+			"captions.fit_to_scenes",
+			{ texts: ["a", "b"], padMs: 0 },
+			context,
+		);
+		expect(state.cues).toHaveLength(1);
+		expect(result.skipped).toHaveLength(1);
+	});
+
+	it("refuses a count mismatch naming both counts, changing nothing", async () => {
+		withScenes([scene(0, 4000), scene(4000, 8000)]);
+		const { state, context } = makeContext({
+			cues: [{ id: "old", startMs: 0, endMs: 100, text: "old" }],
+		});
+		await expect(run("captions.fit_to_scenes", { texts: ["only"] }, context)).rejects.toThrow(
+			/1 entries but .* 2 scenes/,
+		);
+		expect(state.cues.map((cue) => cue.id)).toEqual(["old"]);
+	});
+
+	it("refuses bad input before reading scenes", async () => {
+		const getAgentActivity = vi.fn();
+		stubApi({ getAgentActivity });
+		const { context } = makeContext();
+		const call = (payload: unknown) => run("captions.fit_to_scenes", payload, context);
+		await expect(call({ texts: [] })).rejects.toThrow(/non-empty/);
+		await expect(call({ texts: ["x".repeat(10000)] })).rejects.toThrow(/longer than 80/);
+		await expect(call({ texts: ["  "] })).rejects.toThrow(/empty/);
+		await expect(call({ texts: ["a"], padMs: -1 })).rejects.toThrow(/padMs/);
+		await expect(call({ texts: ["a"], pad: 1 })).rejects.toThrow(/unknown field/);
+		expect(getAgentActivity).not.toHaveBeenCalled();
+	});
+
+	it("refuses clearly when there are no scenes, all failed, none fit, or no log", async () => {
+		const { state, context } = makeContext({ clips: cutClips });
+		withScenes([]);
+		await expect(run("captions.fit_to_scenes", { texts: ["a"] }, context)).rejects.toThrow(
+			/no scenes/,
+		);
+		withScenes([scene(0, 100, { failed: true })]);
+		await expect(run("captions.fit_to_scenes", { texts: ["a"] }, context)).rejects.toThrow(
+			/failed/,
+		);
+		withScenes([scene(4100, 4900)]);
+		await expect(run("captions.fit_to_scenes", { texts: ["a"] }, context)).rejects.toThrow(
+			/No scene has room/,
+		);
+		stubApi({
+			getAgentActivity: vi.fn().mockResolvedValue({ success: false, error: "no log here" }),
+		});
+		await expect(run("captions.fit_to_scenes", { texts: ["a"] }, context)).rejects.toThrow(
+			/no log here/,
+		);
+		expect(state.cues).toEqual([]);
+	});
+});

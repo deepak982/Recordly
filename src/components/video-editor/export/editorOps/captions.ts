@@ -6,14 +6,18 @@ import {
 	type AutoCaptionAnimation,
 	type AutoCaptionSettings,
 	type CaptionCue,
+	type ClipRegion,
 	findClipAtTimelineTime,
 	getClipSourceEndMs,
 	getClipSourceStartMs,
 	getTimelineDurationMs,
+	sortClipRegions,
 } from "../../types";
 import {
 	type EditorOpContext,
 	type EditorOpMap,
+	loadAgentActivity,
+	rejectUnknown,
 	requireFiniteNumber,
 	requireObject,
 } from "./types";
@@ -33,6 +37,10 @@ const NUMBER_STYLES: Record<string, [number, number, boolean]> = {
 	boxRadius: [0, 40, false],
 	backgroundOpacity: [0, 1, false],
 };
+const DEFAULT_PAD_MS = 200;
+const MAX_PAD_MS = 2000;
+const MIN_CUE_MS = 500;
+const MAX_FIT_TEXTS = 500;
 const COLOR_STYLES = ["textColor", "inactiveTextColor"];
 
 let generation: { source: string; startedAt: number } | null = null;
@@ -200,7 +208,128 @@ async function cuesFromAudio(context: EditorOpContext, timeoutMs: number): Promi
 	return result.cues;
 }
 
+type SceneSlot = { index: number; title: string | null; startMs: number; endMs: number };
+
+function planSceneSpan(
+	scene: SceneSlot,
+	context: EditorOpContext,
+	padMs: number,
+	notBefore: number,
+) {
+	const sourceMs = Math.round(context.duration * 1000);
+	const clips = context.timeline.clipRegions.length
+		? sortClipRegions(context.timeline.clipRegions)
+		: [{ id: "all", startMs: 0, endMs: sourceMs, speed: 1 } as ClipRegion];
+	let best: { startMs: number; endMs: number } | null = null;
+	for (const clip of clips) {
+		const clipStart = getClipSourceStartMs(clip);
+		const clipEnd = getClipSourceEndMs(clip);
+		const from = Math.max(scene.startMs, clipStart);
+		const to = Math.min(scene.endMs, clipEnd);
+		if (to <= from) continue;
+		const speed = clip.speed > 0 ? clip.speed : 1;
+		const start = Math.max(Math.ceil(clip.startMs + (from - clipStart) / speed), notBefore);
+		const end = Math.floor(clip.startMs + (to - clipStart) / speed);
+		const room = end - start;
+		if (room < MIN_CUE_MS) continue;
+		const pad = Math.min(padMs, Math.floor((room - MIN_CUE_MS) / 2));
+		const span = { startMs: start + pad, endMs: end - pad };
+		if (!best || span.endMs - span.startMs > best.endMs - best.startMs) best = span;
+	}
+	return best;
+}
+
 export const captionsOps: EditorOpMap = {
+	"captions.fit_to_scenes": async (payload, context) => {
+		const args = requireObject(payload, "captions.fit_to_scenes");
+		rejectUnknown(args, ["texts", "padMs"], "captions.fit_to_scenes");
+		if (!Array.isArray(args.texts) || args.texts.length === 0) {
+			throw new Error("texts must be a non-empty list with one caption per scene.");
+		}
+		if (args.texts.length > MAX_FIT_TEXTS) {
+			throw new Error(
+				`texts has ${args.texts.length} entries; the most allowed is ${MAX_FIT_TEXTS}.`,
+			);
+		}
+		const texts = args.texts.map((raw, index) => {
+			const text = requireText(raw, `texts[${index}]`);
+			if (Array.from(text).length > CAPTION_MAX_CHARS) {
+				throw new Error(`texts[${index}] is longer than ${CAPTION_MAX_CHARS} characters.`);
+			}
+			return text;
+		});
+		let padMs = DEFAULT_PAD_MS;
+		if (args.padMs !== undefined) {
+			padMs = requireFiniteNumber(args.padMs, "padMs");
+			if (padMs < 0 || padMs > MAX_PAD_MS) {
+				throw new Error(`padMs must be between 0 and ${MAX_PAD_MS}.`);
+			}
+		}
+		const log = await loadAgentActivity(
+			context.videoSourcePath,
+			"Captions can only be fitted to scenes of a recording an agent drove; use captions.set with explicit times instead.",
+		);
+		const all = log.scenes
+			.slice()
+			.sort((a, b) => a.startMs - b.startMs)
+			.map((scene, index) => ({
+				index,
+				failed: scene.failed,
+				title: scene.title ?? null,
+				startMs: scene.startMs,
+				endMs: scene.endMs,
+			}));
+		const scenes = all.filter((scene) => !scene.failed);
+		if (scenes.length === 0) {
+			throw new Error(
+				all.length === 0
+					? "This recording has no scenes to fit captions to."
+					: `All ${all.length} scenes failed and are cut from the export, so there is nothing to caption.`,
+			);
+		}
+		if (texts.length !== scenes.length) {
+			throw new Error(
+				`texts has ${texts.length} entries but the recording has ${scenes.length} scenes to caption (${all.length - scenes.length} failed scenes are excluded). Give exactly one text per scene, in scene order.`,
+			);
+		}
+		const built: CaptionCue[] = [];
+		const skipped: { scene: number; title: string | null; reason: string }[] = [];
+		let notBefore = 0;
+		scenes.forEach((scene, position) => {
+			const span = planSceneSpan(scene, context, padMs, notBefore);
+			if (!span) {
+				skipped.push({
+					scene: scene.index,
+					title: scene.title,
+					reason: `no stretch of at least ${MIN_CUE_MS} ms is left in one shot (too short, cut away or overlapped by the previous caption)`,
+				});
+				return;
+			}
+			notBefore = span.endMs;
+			built.push(
+				createCaptionCue({
+					...toSourceSpan(span.startMs, span.endMs, context, `scene ${scene.index}`),
+					text: texts[position],
+				}),
+			);
+		});
+		if (built.length === 0) {
+			throw new Error(
+				`No scene has room for a caption: ${skipped.map((s) => s.scene).join(", ")} are all too short or cut away. Nothing was changed.`,
+			);
+		}
+		rejectOverlap(built, "The scene captions");
+		const cues = built.reduce<CaptionCue[]>(addCue, []);
+		apply(context, cues);
+		context.timeline.setSelectedCaptionId(null);
+		return {
+			count: cues.length,
+			cues: cues.map(({ id, startMs, endMs, text }) => ({ id, startMs, endMs, text })),
+			skipped,
+			note: "Replaced all existing captions. Cue times are recording (source) times.",
+		};
+	},
+
 	"captions.generate": async (payload, context) => {
 		const args = requireObject(payload, "captions.generate");
 		const from = args.from;
