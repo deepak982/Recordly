@@ -1,3 +1,336 @@
-import type { EditorOpMap } from "./types";
+import {
+	ADVANCED_VERTICAL_PADDING_MAX,
+	type CropRegion,
+	type CursorClickEffectStyle,
+	type Padding,
+	type WebcamCorner,
+	type WebcamOverlaySettings,
+	type WebcamPositionPreset,
+	type ZoomMotionBlurTuning,
+	type ZoomTransitionEasing,
+} from "../../types";
+import {
+	type EditorOpContext,
+	type EditorOpMap,
+	requireFiniteNumber,
+	requireObject,
+} from "./types";
 
-export const lookOps: EditorOpMap = {};
+type Appearance = EditorOpContext["appearance"];
+type Range = readonly [number, number];
+
+const NOT_UNDOABLE =
+	"Look settings are not part of the editor history, so history.undo will not revert this. Set the previous values again to go back.";
+
+const EASINGS: ZoomTransitionEasing[] = ["recordly", "glide", "smooth", "snappy", "linear"];
+const CLICK_EFFECTS: CursorClickEffectStyle[] = ["none", "spotlight", "ripple", "echo"];
+const CURSOR_STYLES = ["macos", "tahoe", "tahoe-inverted", "windows11", "dot", "figma"];
+const CORNERS: WebcamCorner[] = ["top-left", "top-right", "bottom-left", "bottom-right"];
+const PRESETS: WebcamPositionPreset[] = [
+	...CORNERS,
+	"top-center",
+	"center-left",
+	"center",
+	"center-right",
+	"bottom-center",
+	"custom",
+];
+
+const MOTION_NUMBERS: Record<string, Range> = {
+	zoomInDurationMs: [60, 4000],
+	zoomOutDurationMs: [60, 4000],
+	connectedZoomDurationMs: [60, 4000],
+	connectedZoomGapMs: [0, 5000],
+	zoomSmoothness: [0, 1],
+	zoomMotionBlur: [0, 2],
+	cursorSize: [0.5, 10],
+	cursorSmoothing: [0, 2],
+	cursorMotionBlur: [0, 2],
+	cursorSway: [0, 2],
+	cursorClickBounce: [0, 5],
+	cursorClickBounceDuration: [60, 500],
+	cursorClickEffectScale: [0.5, 2],
+	cursorClickEffectOpacity: [0, 1],
+	cursorClickEffectDurationMs: [120, 1200],
+	cursorSpringStiffnessMultiplier: [0.25, 3],
+	cursorSpringDampingMultiplier: [0.25, 3],
+	cursorSpringMassMultiplier: [0.25, 3],
+	cameraSpringStiffnessMultiplier: [0.25, 3],
+	cameraSpringDampingMultiplier: [0.25, 3],
+	cameraSpringMassMultiplier: [0.25, 3],
+};
+
+const MOTION_EASINGS = ["zoomInEasing", "zoomOutEasing", "connectedZoomEasing"];
+const MOTION_BOOLEANS = ["zoomClassicMode", "connectZooms"];
+const BLUR_TUNING: Record<keyof ZoomMotionBlurTuning, Range> = {
+	panVelocityThreshold: [0, 240],
+	zoomVelocityThreshold: [0, 0.4],
+	maxDirectionalBlurPx: [0, 96],
+	maxRadialBlurStrength: [0, 1.5],
+	panResponsePerSecond: [1, 30],
+	zoomResponsePerSecond: [1, 30],
+	zoomSafeZoneRadiusPx: [0, 80],
+};
+
+const WEBCAM_NUMBERS: Record<string, Range> = {
+	size: [10, 100],
+	width: [10, 100],
+	height: [10, 100],
+	roundness: [0, 100],
+	shadow: [0, 1],
+	margin: [0, 96],
+	positionX: [0, 1],
+	positionY: [0, 1],
+};
+const WEBCAM_BOOLEANS = ["enabled", "mirror", "reactToZoom"];
+const WEBCAM_FIELDS = [
+	...Object.keys(WEBCAM_NUMBERS),
+	...WEBCAM_BOOLEANS,
+	"timeOffsetMs",
+	"corner",
+	"positionPreset",
+	"cropRegion",
+];
+
+function rejectUnknown(args: Record<string, unknown>, allowed: string[], op: string) {
+	const unknown = Object.keys(args).filter((key) => !allowed.includes(key));
+	if (unknown.length > 0) {
+		throw new Error(
+			`${op}: unknown field ${unknown.join(", ")}. Accepted: ${allowed.join(", ")}.`,
+		);
+	}
+}
+
+function requireInRange(value: unknown, field: string, [min, max]: Range) {
+	const number = requireFiniteNumber(value, field);
+	if (number < min || number > max) {
+		throw new Error(`${field} must be between ${min} and ${max}, not ${number}.`);
+	}
+	return number;
+}
+
+function requireBoolean(value: unknown, field: string) {
+	if (typeof value !== "boolean") throw new Error(`${field} must be true or false.`);
+	return value;
+}
+
+function requireOneOf<T extends string>(value: unknown, field: string, allowed: readonly T[]) {
+	if (typeof value !== "string" || !allowed.includes(value as T)) {
+		throw new Error(`${field} must be one of ${allowed.join(", ")}, not ${String(value)}.`);
+	}
+	return value as T;
+}
+
+function requireCrop(value: unknown, field: string): CropRegion {
+	const crop = requireObject(value, field);
+	rejectUnknown(crop, ["x", "y", "width", "height"], field);
+	const x = requireInRange(crop.x, `${field}.x`, [0, 1]);
+	const y = requireInRange(crop.y, `${field}.y`, [0, 1]);
+	const width = requireFiniteNumber(crop.width, `${field}.width`);
+	const height = requireFiniteNumber(crop.height, `${field}.height`);
+	if (width <= 0 || height <= 0) {
+		throw new Error(
+			`${field}: width and height are fractions of the frame and must be above 0.`,
+		);
+	}
+	if (x + width > 1 + 1e-9 || y + height > 1 + 1e-9) {
+		throw new Error(
+			`${field}: x + width and y + height must not exceed 1 (the crop would be larger than the frame).`,
+		);
+	}
+	return { x, y, width, height };
+}
+
+function requirePadding(value: unknown): Padding {
+	if (typeof value === "number") {
+		const all = requireInRange(value, "padding", [0, 100]);
+		return { top: all, bottom: all, left: all, right: all, linked: true };
+	}
+	const padding = requireObject(value, "padding");
+	rejectUnknown(padding, ["top", "bottom", "left", "right"], "padding");
+	return {
+		top: requireInRange(padding.top, "padding.top", [0, ADVANCED_VERTICAL_PADDING_MAX]),
+		bottom: requireInRange(padding.bottom, "padding.bottom", [
+			0,
+			ADVANCED_VERTICAL_PADDING_MAX,
+		]),
+		left: requireInRange(padding.left, "padding.left", [0, 100]),
+		right: requireInRange(padding.right, "padding.right", [0, 100]),
+		linked: false,
+	};
+}
+
+function requireWebcam(value: unknown, current: WebcamOverlaySettings) {
+	const args = requireObject(value, "webcam");
+	rejectUnknown(args, WEBCAM_FIELDS, "webcam");
+	const next: WebcamOverlaySettings = { ...current };
+	const record = next as unknown as Record<string, unknown>;
+	for (const [key, range] of Object.entries(WEBCAM_NUMBERS)) {
+		if (args[key] !== undefined)
+			record[key] = requireInRange(args[key], `webcam.${key}`, range);
+	}
+	for (const key of WEBCAM_BOOLEANS) {
+		if (args[key] !== undefined) record[key] = requireBoolean(args[key], `webcam.${key}`);
+	}
+	if (args.timeOffsetMs !== undefined) {
+		next.timeOffsetMs = Math.round(
+			requireFiniteNumber(args.timeOffsetMs, "webcam.timeOffsetMs"),
+		);
+	}
+	if (args.corner !== undefined)
+		next.corner = requireOneOf(args.corner, "webcam.corner", CORNERS);
+	if (args.positionPreset !== undefined) {
+		next.positionPreset = requireOneOf(args.positionPreset, "webcam.positionPreset", PRESETS);
+	}
+	if (args.cropRegion !== undefined)
+		next.cropRegion = requireCrop(args.cropRegion, "webcam.cropRegion");
+	if (next.enabled && !next.sourcePath) {
+		throw new Error(
+			"webcam.enabled cannot be turned on because this project has no webcam recording to show.",
+		);
+	}
+	return next;
+}
+
+function requireBlurTuning(value: unknown, current: ZoomMotionBlurTuning) {
+	const args = requireObject(value, "zoomMotionBlurTuning");
+	rejectUnknown(args, Object.keys(BLUR_TUNING), "zoomMotionBlurTuning");
+	const next = { ...current };
+	for (const [key, range] of Object.entries(BLUR_TUNING)) {
+		if (args[key] !== undefined) {
+			next[key as keyof ZoomMotionBlurTuning] = requireInRange(
+				args[key],
+				`zoomMotionBlurTuning.${key}`,
+				range,
+			);
+		}
+	}
+	return next;
+}
+
+function setterName(key: string) {
+	return `set${key[0].toUpperCase()}${key.slice(1)}`;
+}
+
+function apply(appearance: Appearance, key: string, value: unknown) {
+	const setter = (appearance as unknown as Record<string, (v: unknown) => void>)[setterName(key)];
+	setter(value);
+}
+
+function nonEmptyArgs(args: Record<string, unknown>, op: string) {
+	if (Object.values(args).every((value) => value === undefined)) {
+		throw new Error(`${op} needs at least one field to change.`);
+	}
+}
+
+export const lookOps: EditorOpMap = {
+	"look.set": (payload, { appearance }) => {
+		const args = requireObject(payload, "look.set");
+		rejectUnknown(
+			args,
+			[
+				"wallpaper",
+				"padding",
+				"borderRadius",
+				"shadowIntensity",
+				"backgroundBlur",
+				"crop",
+				"webcam",
+			],
+			"look.set",
+		);
+		nonEmptyArgs(args, "look.set");
+		const updates: Record<string, unknown> = {};
+		if (args.wallpaper !== undefined) {
+			if (typeof args.wallpaper !== "string" || args.wallpaper.trim() === "") {
+				throw new Error(
+					"wallpaper must be a non-empty string: a wallpaper path, image URL or colour.",
+				);
+			}
+			updates.wallpaper = args.wallpaper;
+		}
+		if (args.padding !== undefined) updates.padding = requirePadding(args.padding);
+		if (args.borderRadius !== undefined) {
+			updates.borderRadius = requireInRange(args.borderRadius, "borderRadius", [0, 50]);
+		}
+		if (args.shadowIntensity !== undefined) {
+			updates.shadowIntensity = requireInRange(
+				args.shadowIntensity,
+				"shadowIntensity",
+				[0, 1],
+			);
+		}
+		if (args.backgroundBlur !== undefined) {
+			updates.backgroundBlur = requireInRange(args.backgroundBlur, "backgroundBlur", [0, 8]);
+		}
+		if (args.crop !== undefined) updates.cropRegion = requireCrop(args.crop, "crop");
+		if (args.webcam !== undefined)
+			updates.webcam = requireWebcam(args.webcam, appearance.webcam);
+		for (const [key, value] of Object.entries(updates)) apply(appearance, key, value);
+		const { cropRegion, ...rest } = updates;
+		return {
+			applied: cropRegion ? { ...rest, crop: cropRegion } : rest,
+			undoable: false,
+			note: NOT_UNDOABLE,
+		};
+	},
+
+	"look.motion": (payload, { appearance }) => {
+		const args = requireObject(payload, "look.motion");
+		const numberKeys = [...Object.keys(MOTION_NUMBERS), "zoomInOverlapMs"];
+		rejectUnknown(
+			args,
+			[
+				...numberKeys,
+				...MOTION_EASINGS,
+				...MOTION_BOOLEANS,
+				"cursorStyle",
+				"cursorClickEffect",
+				"zoomMotionBlurTuning",
+			],
+			"look.motion",
+		);
+		nonEmptyArgs(args, "look.motion");
+		const updates: Record<string, unknown> = {};
+		for (const [key, range] of Object.entries(MOTION_NUMBERS)) {
+			if (args[key] !== undefined) updates[key] = requireInRange(args[key], key, range);
+		}
+		for (const key of MOTION_EASINGS) {
+			if (args[key] !== undefined) updates[key] = requireOneOf(args[key], key, EASINGS);
+		}
+		for (const key of MOTION_BOOLEANS) {
+			if (args[key] !== undefined) updates[key] = requireBoolean(args[key], key);
+		}
+		if (args.cursorStyle !== undefined) {
+			updates.cursorStyle = requireOneOf(args.cursorStyle, "cursorStyle", CURSOR_STYLES);
+		}
+		if (args.cursorClickEffect !== undefined) {
+			updates.cursorClickEffect = requireOneOf(
+				args.cursorClickEffect,
+				"cursorClickEffect",
+				CLICK_EFFECTS,
+			);
+		}
+		if (args.zoomMotionBlurTuning !== undefined) {
+			updates.zoomMotionBlurTuning = requireBlurTuning(
+				args.zoomMotionBlurTuning,
+				appearance.zoomMotionBlurTuning,
+			);
+		}
+		if (args.zoomInOverlapMs !== undefined || updates.zoomInDurationMs !== undefined) {
+			const duration = (updates.zoomInDurationMs ?? appearance.zoomInDurationMs) as number;
+			const overlap =
+				args.zoomInOverlapMs === undefined
+					? appearance.zoomInOverlapMs
+					: requireInRange(args.zoomInOverlapMs, "zoomInOverlapMs", [0, 4000]);
+			if (overlap > duration) {
+				throw new Error(
+					`zoomInOverlapMs (${overlap}) cannot be longer than zoomInDurationMs (${duration}).`,
+				);
+			}
+			if (args.zoomInOverlapMs !== undefined) updates.zoomInOverlapMs = overlap;
+		}
+		for (const [key, value] of Object.entries(updates)) apply(appearance, key, value);
+		return { applied: updates, undoable: false, note: NOT_UNDOABLE };
+	},
+};
