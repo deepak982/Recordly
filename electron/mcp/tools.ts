@@ -861,8 +861,13 @@ export function buildRecordlyMcpServer(
 				"brings the whole video to targetMs — both only shorten, by speeding up and trimming " +
 				"the idle stretches the automatic edit already finds, never cutting into action, and " +
 				"both need the scene list from a recording an agent drove. If a target is out of reach " +
-				"nothing changes and the error says by how much it fell short. Times are milliseconds " +
-				"in the edited timeline. Reversible with history undo.",
+				"nothing changes and the error says by how much it fell short. op join adds another " +
+				"recording to the end (or at index), as ONE continuous video: the two share a single " +
+				"media source, so the cursor does not jump and nothing needs re-scaling. You rarely " +
+				"need it — recording a whole screen keeps two apps in one take — so use it for " +
+				"genuinely separate takes or two different displays. It joins straight, with no " +
+				"crossfade. Times are milliseconds in the edited timeline. Reversible with history " +
+				"undo.",
 			inputSchema: z.object({
 				op: z.enum([
 					"trim",
@@ -872,6 +877,7 @@ export function buildRecordlyMcpServer(
 					"reorder",
 					"set_scene_duration",
 					"fit",
+					"join",
 				]),
 				startMs: z.number().min(0).optional(),
 				endMs: z.number().min(0).optional(),
@@ -893,6 +899,11 @@ export function buildRecordlyMcpServer(
 					.describe("op set_scene_duration: the scene"),
 				ms: z.number().min(0).optional().describe("op set_scene_duration"),
 				targetMs: z.number().min(0).optional().describe("op fit"),
+				path: z
+					.string()
+					.min(1)
+					.optional()
+					.describe("op join: absolute path of another recording in the library"),
 			}),
 		},
 		async ({ op, ...rest }, ctx) =>
@@ -1425,9 +1436,12 @@ export function buildRecordlyMcpServer(
 		{
 			description:
 				"List what the editor is about to export: the loaded recording, the raw and edited " +
-				"durations, and every clip, zoom, annotation, audio region and caption with its times. Use " +
-				"it before export_video to check an edit you made with trim, set_zoom or add_overlay " +
-				"landed, or to find the time range of a scene to pass to get_frame.",
+				"durations, every clip, zoom, annotation, audio region and caption with its times, the " +
+				"look and motion settings, and each rehearsed scene with its start and end in the " +
+				"EDITED timeline — which is how you check a cut against a length budget and how you " +
+				"find the scene index for edit_timeline. Scene times come from the recording's " +
+				"activity log, so for a recording nobody drove they come back as unavailable with the " +
+				"reason while the rest of the state still arrives.",
 			inputSchema: z.object({}),
 		},
 		async (_args, ctx) => textResult(await editor.getState({ signal: ctx.mcpReq.signal })),
