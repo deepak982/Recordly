@@ -235,7 +235,7 @@ export const audioOps: EditorOpMap = {
 		const known = Object.keys(context.timeline.defaultSourceAudioTrackSettings);
 		if (known.length === 0) {
 			throw new Error(
-				"The recording's sound tracks are not available. Call get_editor_state and read sourceAudio.status: \"loading\" means they are still being read, so retry in a moment; \"none\" means this recording captured no audio and there is nothing to adjust; \"ready\" means they are listed in sourceAudio.default.",
+				'The recording\'s sound tracks are not available. Call get_editor_state and read sourceAudio.status: "loading" means they are still being read, so retry in a moment; "none" means this recording captured no audio and there is nothing to adjust; "ready" means they are listed in sourceAudio.default.',
 			);
 		}
 		if (!known.includes(track)) {

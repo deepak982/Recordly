@@ -371,6 +371,15 @@ describe("camera targets", () => {
 		expect("cameraTargets" in snapshotAgentActivity(500)).toBe(false);
 	});
 
+	it("keeps only the part of a rectangle that is on screen", () => {
+		startRecording();
+		at(100);
+		expect(markCameraTarget({ x: 0.6, y: 0.1, width: 0.8, height: 0.2 })).toBe(true);
+		expect(snapshotAgentActivity(200).cameraTargets).toEqual([
+			{ atMs: 100, x: 0.6, y: 0.1, width: 0.4, height: 0.2 },
+		]);
+	});
+
 	it("refuses unusable rectangles and a stopped clock, and drops markers at or after the stop", () => {
 		expect(markCameraTarget(rect)).toBe(false);
 		startRecording();
@@ -378,11 +387,12 @@ describe("camera targets", () => {
 		expect(markCameraTarget({ ...rect, width: 0 })).toBe(false);
 		expect(markCameraTarget({ ...rect, height: Number.NaN })).toBe(false);
 		expect(markCameraTarget({ ...rect, x: Number.POSITIVE_INFINITY })).toBe(false);
-		expect(markCameraTarget({ x: -1, y: 2, width: 3, height: 3 })).toBe(true);
+		expect(markCameraTarget({ x: -1, y: 2, width: 3, height: 3 })).toBe(false);
+		expect(markCameraTarget({ x: -0.25, y: 0.5, width: 0.75, height: 2 })).toBe(true);
 		at(800);
 		markCameraTarget(rect);
 		const log = snapshotAgentActivity(800);
-		expect(log.cameraTargets).toEqual([{ atMs: 100, x: 0, y: 1, width: 1, height: 1 }]);
+		expect(log.cameraTargets).toEqual([{ atMs: 100, x: 0, y: 0.5, width: 0.5, height: 0.5 }]);
 	});
 
 	it("persists a marker-only log and reads it back normalized", async () => {

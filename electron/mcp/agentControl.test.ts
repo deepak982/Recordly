@@ -3095,7 +3095,7 @@ describe("recording a whole display", () => {
 			{
 				atMs: clock.ms,
 				x: FRAME.x / 2000,
-				y: FRAME.y / 1200,
+				y: Math.round((FRAME.y / 1200) * 1e6) / 1e6,
 				width: FRAME.width / 2000,
 				height: FRAME.height / 1200,
 			},

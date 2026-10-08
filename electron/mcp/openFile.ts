@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { shell } from "electron";
@@ -23,13 +23,21 @@ const defaultDeps = (): OpenFileDeps => ({
 	openPath: (filePath) => shell.openPath(filePath),
 	openWithApp: (filePath, app) =>
 		new Promise((resolve, reject) => {
-			const [command, args] =
-				process.platform === "darwin" ? ["open", ["-a", app, filePath]] : [app, [filePath]];
-			execFile(command, args, (error) =>
-				error
-					? reject(new Error(`Could not open the file with ${app}: ${error.message}`))
-					: resolve(),
-			);
+			const failed = (error: Error) =>
+				reject(new Error(`Could not open the file with ${app}: ${error.message}`));
+			if (process.platform === "darwin") {
+				execFile("open", ["-a", app, filePath], (error) =>
+					error ? failed(error) : resolve(),
+				);
+				return;
+			}
+			const child = spawn(app, [filePath], { detached: true, stdio: "ignore" });
+			child.once("error", failed);
+			child.once("spawn", () => {
+				child.removeListener("error", failed);
+				child.unref();
+				resolve();
+			});
 		}),
 	sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 	now: Date.now,

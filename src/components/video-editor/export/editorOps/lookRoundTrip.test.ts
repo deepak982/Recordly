@@ -97,6 +97,7 @@ function context(): EditorOpContext {
 		history: { undo: vi.fn(), redo: vi.fn(), canUndo: false, canRedo: false },
 		ids: {},
 		assertSameRecording: () => undefined,
+		adoptJoinedMedia: () => undefined,
 	} as unknown as EditorOpContext;
 }
 

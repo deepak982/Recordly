@@ -60,6 +60,7 @@ function makeContext(clips: ClipRegion[], duration = 20) {
 			annotationZIndex: { current: 1 },
 		},
 		assertSameRecording: () => undefined,
+		adoptJoinedMedia: () => undefined,
 	} as unknown as EditorOpContext;
 	return { state, context };
 }
@@ -624,7 +625,12 @@ describe("timeline.set_scene_duration", () => {
 	});
 
 	describe("timeline.join", () => {
-		const media = { path: "/media/joined.mp4", sourceStartMs: 20_000, durationMs: 5_000 };
+		const media = {
+			path: "/media/joined.mp4",
+			url: "recordly://joined",
+			sourceStartMs: 20_000,
+			durationMs: 5_000,
+		};
 
 		const api = (over: Record<string, unknown> = {}) => {
 			const electronAPI = {
@@ -653,6 +659,30 @@ describe("timeline.set_scene_duration", () => {
 				["/media/joined.mp4"],
 				["/media/joined.mp4", true],
 			]);
+		});
+
+		it("switches playback to the combined file, or the joined clip plays nothing", async () => {
+			api();
+			const adopted: { path: string; url: string }[] = [];
+			const { state, context } = makeContext([clip("a", 0, 6000)]);
+			const withAdopt = {
+				...context,
+				adoptJoinedMedia: (m: { path: string; url: string }) => adopted.push(m),
+			} as unknown as EditorOpContext;
+			await run({ path: "/videos/second.mp4" }, withAdopt);
+			expect(adopted).toEqual([{ path: "/media/joined.mp4", url: "recordly://joined" }]);
+			expect(state.clips[1]).toMatchObject({ sourceStartMs: 20_000 });
+		});
+
+		it("refuses when the combined media could not be kept", async () => {
+			api({
+				finishRecordingImport: vi.fn(async (_path: string, commit?: boolean) =>
+					commit === true ? { success: false, error: "disk full" } : { success: true },
+				),
+			});
+			const { state, context } = makeContext([clip("a", 0, 6000)]);
+			await expect(run({ path: "/videos/second.mp4" }, context)).rejects.toThrow(/disk full/);
+			expect(state.clips.map((c) => c.id)).toEqual(["a"]);
 		});
 
 		it("releases the imported media when finalizing fails, and changes nothing", async () => {

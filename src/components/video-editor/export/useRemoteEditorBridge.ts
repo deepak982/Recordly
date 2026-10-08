@@ -13,6 +13,7 @@ type Input = {
 	appearance: ReturnType<typeof useAppearanceState>;
 	history: { undo: () => void; redo: () => void; canUndo: boolean; canRedo: boolean };
 	ids: EditorOpContext["ids"];
+	adoptJoinedMedia: EditorOpContext["adoptJoinedMedia"];
 };
 
 type Editor = Input;
@@ -33,6 +34,7 @@ function runOp(op: string, payload: unknown, editor: Editor, live: () => Editor)
 		appearance: editor.appearance,
 		history: editor.history,
 		ids: editor.ids,
+		adoptJoinedMedia: editor.adoptJoinedMedia,
 	};
 	if (op === "get_state") return getEditorState(context);
 	return runEditorOp(op, payload, context);

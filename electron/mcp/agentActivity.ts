@@ -145,14 +145,14 @@ export function markCameraTarget(
 ): boolean {
 	const atMs = getAgentActivityMs();
 	if (atMs === null || !isValidRect(rect)) return false;
-	cameraTargets.push({
-		atMs,
-		x: clamp(rect.x, 0, 1),
-		y: clamp(rect.y, 0, 1),
-		width: clamp(rect.width, 0, 1),
-		height: clamp(rect.height, 0, 1),
-		...(label ? { label } : {}),
-	});
+	const round = (value: number) => Math.round(value * 1e6) / 1e6;
+	const unit = (value: number) => round(clamp(value, 0, 1));
+	const x = unit(rect.x);
+	const y = unit(rect.y);
+	const width = round(unit(rect.x + rect.width) - x);
+	const height = round(unit(rect.y + rect.height) - y);
+	if (width <= 0 || height <= 0) return false;
+	cameraTargets.push({ atMs, x, y, width, height, ...(label ? { label } : {}) });
 	return true;
 }
 

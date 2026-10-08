@@ -10,6 +10,7 @@ export type EditorOpContext = {
 	appearance: ReturnType<typeof useAppearanceState>;
 	history: { undo: () => void; redo: () => void; canUndo: boolean; canRedo: boolean };
 	assertSameRecording: () => void;
+	adoptJoinedMedia: (media: { path: string; url: string }) => void;
 	ids: {
 		zoom: MutableRefObject<number>;
 		clip: MutableRefObject<number>;

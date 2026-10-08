@@ -651,16 +651,25 @@ export const timelineOps: EditorOpMap = {
 				);
 			}
 			context.assertSameRecording();
-			await finishRecordingImport(media.path, true);
+			const committed = await finishRecordingImport(media.path, true);
+			if (!committed.success) {
+				throw new Error(
+					`timeline.join: ${committed.error ?? "the added media could not be kept."}`,
+				);
+			}
 			accepted = true;
 		} finally {
 			if (!accepted) {
 				await finishRecordingImport(media.path, false).catch(() => undefined);
 			}
 		}
-		const joined = appendImportedClip(clips, media, nextId(context.ids.clip, "clip"), index);
+		const latest = sortClipRegions(context.timeline.clipRegions);
+		const at = Math.min(index, latest.length);
+		const joined = appendImportedClip(latest, media, nextId(context.ids.clip, "clip"), at);
+		const applied = applySequence(context, latest, joined);
+		context.adoptJoinedMedia({ path: media.path, url: media.url });
 		return {
-			...applySequence(context, clips, joined),
+			...applied,
 			joined: { path, durationMs: media.durationMs, sourcePath: media.path },
 		};
 	},

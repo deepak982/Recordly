@@ -65,6 +65,7 @@ function makeContext(
 			annotationZIndex: { current: 1 },
 		},
 		assertSameRecording: () => undefined,
+		adoptJoinedMedia: () => undefined,
 	} as unknown as EditorOpContext;
 	return { state, context };
 }

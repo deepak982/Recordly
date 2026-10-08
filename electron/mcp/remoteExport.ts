@@ -488,16 +488,19 @@ export function createRemoteExport({
 			format: target.format,
 			quality: args.quality,
 		};
-		const describeFile = async (filePath: string): Promise<ExportedVideoInfo> => {
+		const describeFile = async (
+			filePath: string,
+			signal?: AbortSignal,
+		): Promise<ExportedVideoInfo> => {
 			try {
-				return await probeVideo(filePath, opts.signal);
+				return await probeVideo(filePath, signal);
 			} catch (error) {
 				return {
 					probeNote: `The file was written but could not be read back: ${(error as Error).message}`,
 				};
 			}
 		};
-		const padRendered = async (renderedPath: string) => {
+		const padRendered = async (renderedPath: string, signal?: AbortSignal) => {
 			const staged = `${target.outputPath}.padding-${unique}.mp4`;
 			busy = true;
 			status = { ...status, state: "exporting", progress: 99, outputPath: target.outputPath };
@@ -505,7 +508,7 @@ export function createRemoteExport({
 				const spec = target.pad as PostSpec;
 				let posterSeekMs = spec.posterAtMs;
 				if (posterSeekMs !== undefined) {
-					const { durationMs } = await probeVideo(renderedPath, opts.signal);
+					const { durationMs } = await probeVideo(renderedPath, signal);
 					if (durationMs === undefined || posterSeekMs > durationMs) {
 						throw new Error(
 							`posterAtMs ${Math.round(posterSeekMs)} is past the end of the exported video (${durationMs ?? "unknown"} ms)`,
@@ -542,7 +545,7 @@ export function createRemoteExport({
 			return {
 				status: "done" as const,
 				path: target.outputPath,
-				...(await describeFile(target.outputPath)),
+				...(await describeFile(target.outputPath, signal)),
 			};
 		};
 		const completion = runInEditor(editor, request, opts.onProgress);
@@ -575,9 +578,13 @@ export function createRemoteExport({
 		}
 		if (!target.pad) {
 			const donePath = result.path ?? request.outputPath;
-			return { status: "done", path: donePath, ...(await describeFile(donePath)) };
+			return {
+				status: "done",
+				path: donePath,
+				...(await describeFile(donePath, opts.signal)),
+			};
 		}
-		return padRendered(result.path ?? rendered);
+		return padRendered(result.path ?? rendered, opts.signal);
 	}
 
 	return {

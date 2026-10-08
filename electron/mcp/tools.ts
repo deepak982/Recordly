@@ -1480,8 +1480,18 @@ export function buildRecordlyMcpServer(
 				"a suspect moment and then get_frame at that time to read it. Moments that fall in a " +
 				"cut gap are skipped and listed.",
 			inputSchema: z.object({
-				everyMs: z.number().optional().describe("One frame every this long"),
-				count: z.number().int().optional().describe("This many, evenly spaced"),
+				everyMs: z
+					.number()
+					.min(17)
+					.optional()
+					.describe("One frame every this long, at least 17 ms"),
+				count: z
+					.number()
+					.int()
+					.min(2)
+					.max(12)
+					.optional()
+					.describe("This many, evenly spaced, 2 to 12"),
 				source: z.enum(["edited", "raw"]).optional().describe("Defaults to edited"),
 			}),
 		},
@@ -1607,7 +1617,10 @@ export function buildRecordlyMcpServer(
 					.string()
 					.min(1)
 					.optional()
-					.describe('Open it with this app instead, e.g. "Microsoft Excel"'),
+					.describe(
+						'An app name on macOS, e.g. "Microsoft Excel"; an executable path on Windows ' +
+							"and Linux. Omit it to use whatever opens the file by default",
+					),
 				then_select_source: z
 					.boolean()
 					.optional()

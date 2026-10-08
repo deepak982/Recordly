@@ -43,6 +43,7 @@ function makeContext(options: { cues?: CaptionCue[]; clips?: Clip[]; durationSec
 			},
 		},
 		assertSameRecording: () => undefined,
+		adoptJoinedMedia: () => undefined,
 	} as unknown as EditorOpContext;
 	return { state, context };
 }

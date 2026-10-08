@@ -321,6 +321,12 @@ export default function VideoEditor() {
 	const exportController = useEditorExportController({
 		t,
 		history: { undo: handleUndo, redo: handleRedo, canUndo, canRedo },
+		adoptJoinedMedia: ({ path, url }: { path: string; url: string }) => {
+			setVideoSourcePath(path);
+			setVideoPath(url);
+			setIsPreviewReady(false);
+			setPreviewVersion((version) => version + 1);
+		},
 		ids: {
 			zoom: nextZoomIdRef,
 			clip: nextClipIdRef,

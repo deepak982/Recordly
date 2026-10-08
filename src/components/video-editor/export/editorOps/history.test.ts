@@ -11,6 +11,7 @@ const context = (over: { canUndo?: boolean; canRedo?: boolean } = {}) => {
 		context: {
 			history: { undo, redo, canUndo: over.canUndo ?? true, canRedo: over.canRedo ?? true },
 			assertSameRecording: () => undefined,
+			adoptJoinedMedia: () => undefined,
 		} as unknown as EditorOpContext,
 	};
 };
