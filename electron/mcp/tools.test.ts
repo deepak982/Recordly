@@ -45,6 +45,7 @@ function setup(
 		})),
 		findElements: vi.fn(async () => ({ elements: [], truncated: false })),
 		chooseWindow: vi.fn(async (id: string) => ({ id, type: "window", control: true })),
+		setInputPolicy: vi.fn((policy: unknown) => policy),
 	} as unknown as AgentControl & Record<string, ReturnType<typeof vi.fn>>;
 	const review = {
 		reviewRecording: vi.fn(async () => ({
@@ -162,6 +163,7 @@ describe("buildRecordlyMcpServer", () => {
 			"screenshot",
 			"scroll",
 			"select_source",
+			"set_input_policy",
 			"start_recording",
 			"stop_recording",
 			"type_text",
@@ -689,6 +691,46 @@ describe("buildRecordlyMcpServer", () => {
 			...result.tools.map((tool: { description: string }) => tool.description),
 		].filter((text: string) => text.length > 2048);
 		expect(tooLong).toEqual([]);
+	});
+
+	it.each([
+		"darwin",
+		"win32",
+		"linux",
+	] as const)("says a takeover ends the scene, not the take, on %s", async (platform) => {
+		const { call } = setup("idle", { platform });
+		const init = await call("initialize", INITIALIZE);
+		expect(init.result.instructions).toContain("cuts only that scene");
+		expect(init.result.instructions).not.toContain("stop and ask the user");
+		const prompt = await call("prompts/get", {
+			name: "record_demo",
+			arguments: { goal: "creating a project" },
+		});
+		const text = JSON.stringify(prompt.result);
+		expect(text).toContain("ends the scene, not the recording");
+		expect(text).not.toContain("Stop and ask the user");
+	});
+
+	it("passes set_input_policy to the agent and states the pacing levers in perform", async () => {
+		const { call, agent } = setup("idle", { platform: "darwin" });
+		const { result } = await call("tools/call", {
+			name: "set_input_policy",
+			arguments: { onTakeover: "pause", tolerancePx: 30, autoResumeAfterMs: 1500 },
+		});
+		expect(result.isError).toBeFalsy();
+		expect(agent.setInputPolicy).toHaveBeenCalledWith({
+			onTakeover: "pause",
+			tolerancePx: 30,
+			autoResumeAfterMs: 1500,
+		});
+		const bad = await call("tools/call", {
+			name: "set_input_policy",
+			arguments: { onTakeover: "sulk" },
+		});
+		expect(bad.result.isError).toBe(true);
+		const list = await call("tools/list", {});
+		const perform = list.result.tools.find((tool: { name: string }) => tool.name === "perform");
+		expect(perform.description).toContain("wait {ms} IS the hold");
 	});
 
 	it("chooses the control window on Linux without changing what is recorded", async () => {

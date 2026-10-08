@@ -67,7 +67,7 @@ export type AgentHit = AgentFrame & { role: string; label: string };
 export type AgentCommand =
 	| { cmd: "preflight" }
 	| { cmd: "cursor" }
-	| { cmd: "arm" }
+	| { cmd: "arm"; tolerancePx?: number }
 	| { cmd: "disarm" }
 	| { cmd: "move"; x: number; y: number; ms: number }
 	| {

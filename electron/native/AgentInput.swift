@@ -5,7 +5,7 @@ import CoreGraphics
 import Foundation
 
 let agentTag: Int64 = 0x52434459
-let driftLimit = 8.0
+let defaultDriftLimit = 8.0
 let driftWindow: TimeInterval = 1
 
 struct Failure: Error {
@@ -19,6 +19,7 @@ final class SharedState {
 	private var armedEpoch: Int?
 	private var lastEmit: TimeInterval = 0
 	private var drift = 0.0
+	private var driftLimit = defaultDriftLimit
 	private var driftStart: TimeInterval = 0
 	var tap: CFMachPort?
 
@@ -40,10 +41,11 @@ final class SharedState {
 		return armedEpoch != nil
 	}
 
-	func setArmed(_ armed: Bool) {
+	func setArmed(_ armed: Bool, tolerance: Double = defaultDriftLimit) {
 		lock.lock()
 		defer { lock.unlock() }
 		if armed {
+			driftLimit = tolerance
 			armedEpoch = epoch
 			drift = 0
 			driftStart = ProcessInfo.processInfo.systemUptime
@@ -709,10 +711,11 @@ func eventMask(_ types: [CGEventType]) -> CGEventMask {
 	types.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
 }
 
-func arm() throws {
+func arm(_ request: [String: Any]) throws {
+	let tolerance = (request["tolerancePx"] as? NSNumber)?.doubleValue ?? defaultDriftLimit
 	if let tap = state.tap {
 		CGEvent.tapEnable(tap: tap, enable: true)
-		state.setArmed(true)
+		state.setArmed(true, tolerance: tolerance)
 		return
 	}
 	let mouseTypes: [CGEventType] = [
@@ -735,7 +738,7 @@ func arm() throws {
 		CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
 		CGEvent.tapEnable(tap: tap, enable: true)
 		state.tap = tap
-		state.setArmed(true)
+		state.setArmed(true, tolerance: tolerance)
 		return
 	}
 	throw Failure("event tap unavailable")
@@ -1157,7 +1160,7 @@ func handle(_ line: String) {
 	case "key":
 		runInput(id) { try key(request) }
 	case "arm":
-		DispatchQueue.main.sync { respond(id) { try arm(); return [:] } }
+		DispatchQueue.main.sync { respond(id) { try arm(request); return [:] } }
 	case "disarm":
 		DispatchQueue.main.sync { respond(id) { disarm(); return [:] } }
 	case "frontmost_window":

@@ -146,7 +146,7 @@ With both switches on, an agent can produce a finished demo of any website or de
 6. **`stop_recording`**. The editor opens with the agent's thinking time already cut and zooms on its clicks (see [Automatic edits](#automatic-edits-for-agent-recordings)).
 7. **`review_recording`** to check the contact sheet and summary, then **`export_video`** with the destination and format you asked for.
 
-Keep your hands off the mouse and keyboard while it runs: touching either stops the agent (see [Mouse and keyboard control](#mouse-and-keyboard-control)). If you do take over, the agent asks you before carrying on from a fresh screenshot.
+Keep your hands off the mouse and keyboard while it runs: touching either stops the agent (see [Mouse and keyboard control](#mouse-and-keyboard-control)). If you do take over, only that scene ends: Recordly cuts it from the video and the agent waits until you are done, re-aims from a fresh screenshot and continues with the next `perform`. It asks you only if you clearly want the machine back.
 
 ### The `record_demo` prompt
 
@@ -237,7 +237,7 @@ While an agent drives the window, Recordly notes what it does and when. When the
 - **Waiting is shortened.** A window coming to the front shrinks to a brief beat.
 - **Actions and reading time stay.** Every movement, click, scroll, keystroke and the agent's own `wait` steps are kept in full.
 - **Zooms follow the actions.** Each click zooms in from the moment the pointer heads for it until the result has been on screen, close clicks share one zoom, and nothing zooms on a large target or while scrolling.
-- **An interrupted take is removed.** If you take over during a scene and the agent redoes it, the interrupted attempt is cut. When a step fails, the steps before it stay in the recording, so you can see where the take diverged before the agent discards it.
+- **An interrupted scene is removed.** A takeover ends the scene, not the recording, and any scene that fails, for whatever reason, is cut from the video automatically. The agent carries on with the next `perform`. When a step fails, the steps before it stay in the recording, so you can see where the take diverged before the agent discards it.
 
 The edits are ordinary clips, zooms and captions on the timeline, so you can change or undo any of them, and `export_video` exports them. Recordings you make yourself are not affected. To turn this off, clear **Tighten agent recordings** in the editor settings.
 
@@ -353,7 +353,9 @@ Driving your mouse and keyboard is far more powerful than recording, so it has i
 
 - **Let agents use the mouse and keyboard** is off by default and stored with the connection settings. While it is off, `open_url` and every input tool refuse; `screenshot` and `find_elements` still work.
 - Input goes only into the selected window. Pointer targets must fall inside it, re-measured before every step, and typing and key presses go to it only while its app is frontmost — never to Recordly's own editor or to whatever happened to be in front.
-- You can always take back control. Moving the mouse, clicking, scrolling or pressing any key yourself stops the running action or `perform` at once, and pressing **Esc** does the same. A pointer drift of a few points, such as a hand resting on the trackpad, does not count, and neither do two fingers resting on it without scrolling. The agent is told *stopped: the user took over*, along with what Recordly noticed, and is instructed to ask you before continuing.
+- You can always take back control. Moving the mouse, clicking, scrolling or pressing any key yourself stops the running action or `perform` at once, and pressing **Esc** does the same. A pointer drift of a few points, such as a hand resting on the trackpad, does not count, and neither do two fingers resting on it without scrolling. The agent is told *stopped: the user took over*, along with what Recordly noticed, and is instructed to wait until you are done, re-aim and continue with the next `perform`; the interrupted scene is cut from the video. Esc, or a clear request for the machine back, makes it stop and ask.
+- `set_input_policy { onTakeover, autoResumeAfterMs?, tolerancePx? }` changes the reaction. The default, `abort`, ends the `perform` at once. `pause` stops acting, waits until the pointer has been still for `autoResumeAfterMs` (default 2000), then re-arms and carries on with the interrupted step and the rest of that `perform`; the pause is logged as waiting, so the editor shortens it. `tolerancePx` (default 8, macOS only) is how far the pointer may drift in one second before it counts as a takeover. Esc always aborts, under either policy.
+- **Pacing levers.** `wait {ms}` is the hold: it is logged as a hold and kept whole in the video, so use it for longer reading. `waitFor` is logged as waiting and shortened, so use it only for slow content. `durationMs` on `move`, `click` and `drag` sets that step's glide. There is no separate `hold` step.
 - Clicks are real posted events, not simulated inside a page, so the recording shows the cursor moving and the editor adds automatic zooms where the agent clicked.
 - `open_url` accepts only `http` and `https` addresses.
 - `perform` is capped at 200 steps, 30 seconds per wait and 10 minutes per call; a key may repeat at most 100 times.
@@ -414,7 +416,7 @@ Driving your mouse and keyboard is far more powerful than recording, so it has i
 
 **"Recordly can't post input."** Open **System Settings → Privacy & Security → Accessibility**, turn Recordly on, then quit and reopen it. In a development build (`npm run dev`) macOS checks the terminal app that started Recordly instead, so input fails even though Recordly itself is allowed — test agent control with the installed app.
 
-**"Stopped: the user took over."** You moved the mouse, scrolled, clicked or pressed a key while the agent was acting, or pressed **Esc**. The message ends with what Recordly noticed, such as *the mouse moved* or *a key was pressed*. Typing in another app, such as replying to the agent while a demo runs, counts too. This is the safety stop working. Keep your hands off while a demo runs; the agent asks you before picking up again from a fresh `screenshot`.
+**"Stopped: the user took over."** You moved the mouse, scrolled, clicked or pressed a key while the agent was acting, or pressed **Esc**. The message ends with what Recordly noticed, such as *the mouse moved* or *a key was pressed*. Typing in another app, such as replying to the agent while a demo runs, counts too. This is the safety stop working. Keep your hands off while a demo runs; the scene you interrupted is cut from the video, and the agent waits, re-aims from a fresh `screenshot` and continues with the next `perform`.
 
 **A key is refused as unknown.** Use a name from [Keys and modifiers](#keys-and-modifiers) or one character, and pass shortcuts as a key plus `modifiers` — `"cmd+c"` in one string is refused. A character that isn't on the current layout can't be combined with modifiers. For words and other scripts, `type_text` works whatever the layout.
 

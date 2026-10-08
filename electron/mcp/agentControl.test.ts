@@ -556,7 +556,7 @@ describe("activity log", () => {
 		});
 	});
 
-	it("keeps a scene whose step or check fails, since the earlier steps stay, and logs nothing for refused calls", async () => {
+	it("cuts a scene whose step or check fails for any reason, and logs nothing for refused calls", async () => {
 		const { agent } = timed({
 			click: (command) => {
 				tick(command);
@@ -580,8 +580,8 @@ describe("activity log", () => {
 		await expect(offWindow.agent.perform([{ action: "wait", ms: 1 }])).rejects.toThrow();
 		const log = snapshotAgentActivity(5_000);
 		expect(log.scenes).toEqual([
-			{ startMs: 1_000, endMs: 1_600, failed: false },
-			{ startMs: 3_000, endMs: 3_005, failed: false },
+			{ startMs: 1_000, endMs: 1_600, failed: true },
+			{ startMs: 3_000, endMs: 3_005, failed: true },
 		]);
 		expect(log.spans).toEqual([
 			{
@@ -2037,7 +2037,7 @@ describe("ranking, scrolling and limits", () => {
 			]),
 		).rejects.toThrow("Step 2 (click): the perform passed its 10-minute limit.");
 		expect([count("click"), count("disarm")]).toEqual([0, 1]);
-		expect(snapshotAgentActivity(clock.ms).scenes[0].failed).toBe(false);
+		expect(snapshotAgentActivity(clock.ms).scenes[0].failed).toBe(true);
 	});
 
 	it("stops a waitFor poll once the perform passes 10 minutes", async () => {
@@ -2498,5 +2498,133 @@ describe("Windows and Linux", () => {
 		);
 		await agent.chooseWindow("7");
 		await expect(agent.findElements({})).rejects.toThrow(/ACCESSIBILITY_ENABLED=1/);
+	});
+});
+
+describe("input policy", () => {
+	const pointer = { event: "user-input", kind: "move", escape: false } as const;
+	const esc = { event: "user-input", kind: "key", escape: true } as const;
+
+	beforeEach(() => {
+		clock.ms = 1_000;
+		resetAgentActivity();
+	});
+
+	const hangFirstWait = () => {
+		let release!: () => void;
+		let hung = false;
+		const sleep = async (ms: number) => {
+			if (ms === 5000 && !hung) {
+				hung = true;
+				await new Promise<void>((resolve) => {
+					release = resolve;
+				});
+				return;
+			}
+			clock.ms += ms;
+		};
+		return { sleep, release: () => release() };
+	};
+
+	it("pauses on a takeover, waits for stillness, re-arms and finishes the remaining steps", async () => {
+		const park = hangFirstWait();
+		const {
+			agent,
+			events: bus,
+			commands,
+			count,
+		} = setup({ sleep: park.sleep }, { click: tick });
+		agent.setInputPolicy({ onTakeover: "pause", autoResumeAfterMs: 1_000 });
+		const running = agent.perform([
+			{ action: "click", x: 10, y: 10 },
+			{ action: "wait", ms: 5000 },
+			{ action: "click", x: 20, y: 20 },
+		]);
+		await flush();
+		expect(count("click")).toBe(1);
+		bus.emit("user-input", pointer);
+		park.release();
+		await expect(running).resolves.toEqual({ performed: 3, durationMs: expect.any(Number) });
+		expect(count("arm")).toBe(2);
+		expect(count("disarm")).toBe(1);
+		expect(commands.filter((c) => c.cmd === "click")).toHaveLength(2);
+		const waits = snapshotAgentActivity(clock.ms + 10_000).spans.filter(
+			(span) => span.kind === "wait",
+		);
+		expect(waits.length).toBeGreaterThan(0);
+		expect(bus.listenerCount("user-input")).toBe(0);
+	});
+
+	it("keeps waiting while the pointer keeps moving, then resumes", async () => {
+		const park = hangFirstWait();
+		const { agent, events, count } = setup({
+			sleep: async (ms) => {
+				await park.sleep(ms);
+				if (ms !== 5000 && clock.ms < 3_000) events.emit("user-input", pointer);
+			},
+		});
+		agent.setInputPolicy({ onTakeover: "pause", autoResumeAfterMs: 500 });
+		const running = agent.perform([
+			{ action: "wait", ms: 5000 },
+			{ action: "click", x: 1, y: 1 },
+		]);
+		await flush();
+		events.emit("user-input", pointer);
+		park.release();
+		await running;
+		expect(count("click")).toBe(1);
+		expect(count("arm")).toBe(2);
+		expect(clock.ms).toBeGreaterThanOrEqual(3_000);
+	});
+
+	it("still aborts by default", async () => {
+		const { agent, events } = setup({ sleep: () => new Promise(() => undefined) });
+		const running = agent.perform([{ action: "wait", ms: 5000 }]);
+		await flush();
+		events.emit("user-input", pointer);
+		await expect(running).rejects.toThrow(TAKEOVER_MESSAGE);
+	});
+
+	it.each(["abort", "pause"] as const)("Esc aborts under %s", async (onTakeover) => {
+		const { agent, events, count } = setup({ sleep: () => new Promise(() => undefined) });
+		agent.setInputPolicy({ onTakeover });
+		const running = agent.perform([
+			{ action: "wait", ms: 5000 },
+			{ action: "click", x: 1, y: 1 },
+		]);
+		await flush();
+		events.emit("user-input", esc);
+		await expect(running).rejects.toThrow("Esc was pressed");
+		expect(count("click")).toBe(0);
+		expect(count("disarm")).toBe(1);
+	});
+
+	it("Esc during a pause aborts instead of resuming", async () => {
+		const { agent, events, count } = setup({
+			sleep: async (ms) => {
+				if (ms === 5000) return new Promise(() => undefined);
+				clock.ms += ms;
+				events.emit("user-input", esc);
+			},
+		});
+		agent.setInputPolicy({ onTakeover: "pause", autoResumeAfterMs: 2_000 });
+		const running = agent.perform([{ action: "wait", ms: 5000 }]);
+		await flush();
+		events.emit("user-input", pointer);
+		await expect(running).rejects.toThrow("Esc was pressed");
+		expect(count("arm")).toBe(1);
+	});
+
+	it("sends the tolerance to the helper only when set", async () => {
+		const plain = setup();
+		await plain.agent.perform([{ action: "wait", ms: 1 }]);
+		expect(plain.commands.find((c) => c.cmd === "arm")).toEqual({ cmd: "arm" });
+		const tuned = setup();
+		tuned.agent.setInputPolicy({ tolerancePx: 40 });
+		await tuned.agent.perform([{ action: "wait", ms: 1 }]);
+		expect(tuned.commands.find((c) => c.cmd === "arm")).toEqual({
+			cmd: "arm",
+			tolerancePx: 40,
+		});
 	});
 });

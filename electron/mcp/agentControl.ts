@@ -193,6 +193,11 @@ type Run = {
 	signal: AbortSignal;
 	deadline: number;
 };
+type InputPolicy = {
+	tolerancePx?: number;
+	autoResumeAfterMs: number;
+	onTakeover: "pause" | "abort";
+};
 type Probe = Omit<AgentDryRunStep, "index" | "action">;
 type Resolved = { element: AgentElement; frame: WindowBounds; scrolled: boolean };
 type Aimed = { at: Point; ms: number };
@@ -663,6 +668,7 @@ export function createAgentControl(
 	const webWindows = new Map<number, boolean>();
 	let busy = false;
 	let controlWindowId: number | null = null;
+	let policy: InputPolicy = { autoResumeAfterMs: 2000, onTakeover: "abort" };
 
 	function toHelper(command: AgentCommand): AgentCommand {
 		const point = platform.toHelperPoint;
@@ -1357,20 +1363,33 @@ export function createAgentControl(
 		}
 		let stopped = false;
 		let tookOver = false;
+		let paused = false;
+		let lastInput = 0;
 		let cause: string | undefined;
-		const controller = new AbortController();
+		const mode = { ...policy };
+		let controller = new AbortController();
 		const takeover = () =>
 			new Error(
 				cause ? `${TAKEOVER_MESSAGE} Recordly noticed that ${cause}.` : TAKEOVER_MESSAGE,
 			);
 		let abort!: () => void;
-		const aborted = new Promise<never>((_, reject) => {
-			abort = () => reject(takeover());
-		});
-		aborted.catch(() => undefined);
+		const freshAbort = () => {
+			const promise = new Promise<never>((_, reject) => {
+				abort = () => reject(takeover());
+			});
+			promise.catch(() => undefined);
+			return promise;
+		};
 		const onUserInput = (event: AgentEvent) => {
-			if (!tookOver) cause = event.escape ? "Esc was pressed" : TAKEOVER_CAUSES[event.kind];
-			tookOver = true;
+			lastInput = deps.now();
+			if (mode.onTakeover === "pause" && !event.escape && !tookOver) {
+				if (paused) return;
+				paused = true;
+			} else {
+				if (!tookOver)
+					cause = event.escape ? "Esc was pressed" : TAKEOVER_CAUSES[event.kind];
+				tookOver = true;
+			}
 			stopped = true;
 			abort();
 			controller.abort();
@@ -1379,20 +1398,72 @@ export function createAgentControl(
 			if (stopped) return Promise.reject(takeover());
 			return request(command);
 		};
-		const run: Run = { start, post, pace, aborted, signal: controller.signal, deadline };
+		const run: Run = {
+			start,
+			post,
+			pace,
+			aborted: freshAbort(),
+			signal: controller.signal,
+			deadline,
+		};
+		const armHelper = () =>
+			request(
+				mode.tolerancePx === undefined
+					? { cmd: "arm" }
+					: { cmd: "arm", tolerancePx: mode.tolerancePx },
+			);
+		const resume = async () => {
+			const endPause = beginSpan("wait", "wait");
+			try {
+				for (;;) {
+					if (tookOver) throw takeover();
+					checkDeadline(run);
+					const quiet = deps.now() - lastInput;
+					if (quiet >= mode.autoResumeAfterMs) break;
+					await deps.sleep(Math.min(POLL_MS, mode.autoResumeAfterMs - quiet));
+				}
+				await armHelper();
+				if (tookOver) throw takeover();
+			} finally {
+				endPause();
+			}
+			paused = false;
+			stopped = false;
+			controller = new AbortController();
+			run.signal = controller.signal;
+			run.aborted = freshAbort();
+		};
 		deps.setHudPassthrough(true);
-		await request({ cmd: "arm" });
+		await armHelper();
 		input.events.on("user-input", onUserInput);
 		try {
 			for (const [index, step] of steps.entries()) {
-				try {
-					if (stopped) throw takeover();
-					checkDeadline(run);
-					await Promise.race([runStep(step, run), aborted]);
-					if (readsAfter(steps, index)) await Promise.race([readResult(run), aborted]);
-				} catch (error) {
-					const userInput = error instanceof Error && error.message === "user-input";
-					throw stepError(index, step, tookOver || userInput ? takeover() : error);
+				for (;;) {
+					try {
+						if (stopped) throw takeover();
+						checkDeadline(run);
+						await Promise.race([runStep(step, run), run.aborted]);
+						if (readsAfter(steps, index)) {
+							await Promise.race([readResult(run), run.aborted]);
+						}
+						break;
+					} catch (error) {
+						const userInput = error instanceof Error && error.message === "user-input";
+						if (userInput && mode.onTakeover === "pause" && !paused && !tookOver) {
+							lastInput = deps.now();
+							paused = true;
+							stopped = true;
+						}
+						if (paused && !tookOver) {
+							try {
+								await resume();
+							} catch (resumeError) {
+								throw stepError(index, step, resumeError);
+							}
+							continue;
+						}
+						throw stepError(index, step, tookOver || userInput ? takeover() : error);
+					}
 				}
 			}
 		} finally {
@@ -1501,7 +1572,7 @@ export function createAgentControl(
 					await runSteps(steps, pace, startedAt + AGENT_LIMITS.totalMs);
 					endScene(false);
 				} catch (error) {
-					endScene(error instanceof Error && error.message.includes(TAKEOVER_MESSAGE));
+					endScene(true);
 					throw error;
 				}
 				result.performed = steps.length;
@@ -1619,7 +1690,23 @@ export function createAgentControl(
 		return selectControlWindow(id);
 	}
 
-	return { preflightInput, perform, findElements, screenshot, openUrl, chooseWindow };
+	function setInputPolicy(next: Partial<InputPolicy>) {
+		policy = {
+			...policy,
+			...Object.fromEntries(Object.entries(next).filter(([, v]) => v !== undefined)),
+		};
+		return policy;
+	}
+
+	return {
+		preflightInput,
+		setInputPolicy,
+		perform,
+		findElements,
+		screenshot,
+		openUrl,
+		chooseWindow,
+	};
 }
 
 export type AgentControl = ReturnType<typeof createAgentControl>;

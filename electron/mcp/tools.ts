@@ -55,7 +55,9 @@ const INPUT_NOTE =
 
 const INPUT_HELP =
 	`${INPUT_NOTE} Errors and what to do: 'the user took over' — the user moved the ` +
-	"mouse, typed or pressed Esc; stop and ask the user before doing anything else. 'Mouse and keyboard " +
+	"mouse, typed or pressed Esc; that ends the scene, not the recording, and Recordly cuts the scene from " +
+	"the video, so wait for the user to be done, screenshot, re-aim and continue with the next perform " +
+	"(ask only if they clearly want the machine back). 'Mouse and keyboard " +
 	`control is off' — ask the user to turn on ${CONTROL_SWITCH}. 'not allowed to post mouse and ` +
 	"keyboard input' — ask the user to grant Recordly Accessibility permission in System Settings, then " +
 	"reopen it. 'another app is in front' — typing, keys and actions with modifiers go only to the " +
@@ -82,7 +84,8 @@ const MAC_INSTRUCTIONS =
 	"one per scene reads best. Leave timing to Recordly; title only for captions.\n" +
 	"6. stop_recording, review_recording, then export_video.\n\n" +
 	"Coordinates are window-relative points; (0,0) is the window's top-left.\n\n" +
-	"Errors: 'the user took over' → stop and ask the user. 'Mouse and keyboard control is off' → ask " +
+	"Errors: 'the user took over' cuts only that scene: wait, re-aim, carry on; ask " +
+	"only if they want the machine back. 'Mouse and keyboard control is off' → ask " +
 	`the user to turn on ${CONTROL_SWITCH}. Missing permission → ask the user to grant it in System ` +
 	"Settings and reopen Recordly. Window closed, covered or on another desktop → list_sources, " +
 	"select_source, screenshot. A failed step ('Step n') means the page diverged: cancel_recording, " +
@@ -428,7 +431,9 @@ function demoPrompt(
 			"- Auth / logout. If the flow signs out, the reset in step 8 must sign back in. Check " +
 				"you are signed in before start_recording.",
 			"- Covered or resized window. select_source again and screenshot before start_recording.",
-			"- The user took over. Stop and ask the user.",
+			"- The user took over. That ends the scene, not the recording, and the scene is cut from " +
+				"the video. Wait until the user is done, screenshot, re-aim, and continue with the " +
+				"next perform. Stop and ask only if they clearly want the machine back.",
 			"",
 			"HARD STOPS",
 			"- Never call start_recording before a clean rehearsal of the whole flow.",
@@ -958,7 +963,7 @@ export function buildRecordlyMcpServer(
 			description:
 				"Press one key or shortcut in the selected window, optionally several times; sent only while " +
 				`its app is frontmost. ${KEY_REFERENCE} ${INPUT_NOTE} Errors are explained in click's ` +
-				"description; 'the user took over' means stop and ask the user.",
+				"description; 'the user took over' ends the scene, not the recording: wait, re-aim, continue.",
 			inputSchema: z.object(keyArgs),
 		},
 		async (args) => perform([{ action: "key", ...args }]),
@@ -978,29 +983,49 @@ export function buildRecordlyMcpServer(
 	);
 
 	server.registerTool(
+		"set_input_policy",
+		{
+			description:
+				"Set how mouse and keyboard control reacts when the user touches the mouse or keyboard. " +
+				"onTakeover 'abort' (default) ends the perform at once. 'pause' stops acting, waits " +
+				"until the pointer has been still for autoResumeAfterMs (default 2000), then re-arms and " +
+				"carries on, re-running the interrupted step; the pause is logged as waiting and shortened. " +
+				"tolerancePx is how far the pointer may drift in one second before it counts as a " +
+				"takeover (default 8; macOS only). Esc always aborts. Settings last until changed.",
+			inputSchema: z.object({
+				tolerancePx: z.number().min(1).max(500).optional(),
+				autoResumeAfterMs: z.number().int().min(200).max(30000).optional(),
+				onTakeover: z.enum(["pause", "abort"]),
+			}),
+		},
+		async (args) => textResult({ policy: agent.setInputPolicy(args) }),
+	);
+
+	server.registerTool(
 		"perform",
 		{
 			description:
 				"Run one rehearsed scene: steps executed back to back with exact timing (separate calls " +
-				"split a scene into many cuts). Each step takes the matching tool's own fields plus " +
+				"mean extra cuts). Each step takes the matching tool's own fields plus " +
 				"action: move, click, drag, scroll, type, key, wait {ms} or waitFor. A target {text, " +
 				"role?, index?} is found on screen when its step runs (waiting " +
 				"up to 5 s, scrolling it into view), so a scene may change page; prefer targets to " +
-				"coordinates. Leave out durationMs and waits: Recordly glides at a natural speed and, after " +
-				"a click or Enter, waits for the screen to settle and holds the result for reading. A wait " +
-				"or waitFor right after one replaces that hold: " +
-				"use wait only for longer reading and waitFor only for slow content. dryRun acts on nothing: " +
+				"coordinates. Leave out durationMs and waits: Recordly glides naturally and, after " +
+				"a click or Enter, waits for the screen to settle and holds the result. A wait " +
+				"or waitFor right after one replaces that hold. wait {ms} IS the hold, kept " +
+				"whole in the video, for longer reading; waitFor is shortened as waiting, for slow content; " +
+				"durationMs sets one move, click or drag's glide. dryRun acts on nothing: " +
 				"it probes up to and including the first step that can change the page and returns dryRun: " +
 				"[{index (1-based, as in 'Step n'), action, found, label?, candidates?, ambiguous?, " +
 				"matches?, note?}], the steps after it as found: null with note 'validated at run time'. " +
-				"found: false with candidates > 1 (ambiguous: true, matches listed) means ambiguous, not " +
+				"found: false with candidates > 1 means ambiguous, not " +
 				"missing. dryRun and then: 'elements' also return page, a signature to compare between the " +
 				"rehearsal and the take; then: 'elements' adds the visible controls. Limits: 1–200 steps, " +
-				"waits up to 30000 ms, 10 minutes per " +
-				"call. A failure says 'Step n (action)': the earlier steps have run and the page has " +
-				"diverged, so cancel_recording and take the scene again. Returns " +
-				`{ performed, durationMs }. ${POINT_HELP} ${INPUT_NOTE} 'the user took over' means stop and ` +
-				"ask the user; other errors are explained in click's description.",
+				"waits up to 30000 ms, 10 min per call." +
+				" A failure says 'Step n (action)': the page has diverged, so " +
+				"cancel_recording and take the scene again. Returns " +
+				`{ performed, durationMs }. ${POINT_HELP} ${INPUT_NOTE} Errors, including 'the user took over' (it ends ` +
+				"the scene, not the recording), are explained in click's description.",
 			inputSchema: z.object({
 				steps: z.array(stepSchema).min(1).max(200),
 				title: z
