@@ -7,7 +7,9 @@ vi.mock("electron", () => ({
 	ipcMain: { on: vi.fn() },
 }));
 
-const { createRemoteEditor, frameArgs, timelineToSourceMs } = await import("./remoteEditor");
+const { createRemoteEditor, frameArgs, sampleSheetArgs, timelineToSourceMs } = await import(
+	"./remoteEditor"
+);
 
 afterEach(() => vi.useRealTimers());
 
@@ -213,6 +215,220 @@ describe("get_frame", () => {
 	it("rejects a time past the end", async () => {
 		const { result } = await frame({ atMs: 9000, source: "edited" });
 		await expect(result).rejects.toThrow(/past the end/);
+	});
+});
+
+describe("sample_frames", () => {
+	const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00]);
+	const run = async (
+		args: { everyMs?: number; count?: number; source?: "edited" | "raw" },
+		options: {
+			runFfmpeg?: ReturnType<typeof vi.fn>;
+			data?: unknown;
+			signal?: AbortSignal;
+			ffmpegPath?: () => string;
+		} = {},
+	) => {
+		const runFfmpeg = options.runFfmpeg ?? vi.fn(async () => jpeg);
+		const probeVideo = vi.fn(async () => ({ width: 1920, height: 1080 }));
+		const ctx = setup({
+			ffmpegPath: options.ffmpegPath ?? (() => "ffmpeg"),
+			runFfmpeg,
+			probeVideo,
+		});
+		ctx.ready();
+		const result = ctx.remote.sampleFrames(args, { signal: options.signal });
+		const settled = result.catch(() => undefined);
+		await ctx.sent(1);
+		ctx.reply(0, { ok: true, data: options.data ?? state });
+		await settled;
+		return { result, runFfmpeg, probeVideo, ctx };
+	};
+
+	it("returns one sheet and where each tile came from, mapping edited time through the cuts", async () => {
+		const { result, runFfmpeg } = await run({ count: 3 });
+		const out = await result;
+		expect(out.frames).toEqual([
+			{ atMs: 0, sourceMs: 0 },
+			{ atMs: 4000, sourceMs: 6000 },
+			{ atMs: 8000, sourceMs: 9960 },
+		]);
+		expect(out.image.mimeType).toBe("image/jpeg");
+		expect(out.image.data).toBe(jpeg.toString("base64"));
+		expect([out.cols, out.rows]).toEqual([2, 2]);
+		const args = runFfmpeg.mock.calls[0][1] as string[];
+		expect(args).not.toContain("-noaccurate_seek");
+		expect(args.filter((arg) => arg === "-i")).toHaveLength(3);
+	});
+
+	it("samples every N ms from the start and never past the end", async () => {
+		const out = await (await run({ everyMs: 3000, source: "raw" })).result;
+		expect(out.frames.map((frame) => frame.atMs)).toEqual([0, 3000, 6000, 9000]);
+		expect(out.frames.map((frame) => frame.sourceMs)).toEqual([0, 3000, 6000, 9000]);
+	});
+
+	it("keeps accurate seeking, which the review sheet turns off", () => {
+		const args = sampleSheetArgs("/v/a.mp4", [100], {
+			cols: 1,
+			rows: 1,
+			tileWidth: 320,
+			tileHeight: 180,
+			width: 320,
+			height: 180,
+		});
+		expect(args).not.toContain("-noaccurate_seek");
+		expect(args).toContain("0.100");
+	});
+
+	it.each([
+		["both", { everyMs: 1000, count: 4 }, /exactly one of everyMs or count/],
+		["neither", {}, /exactly one of everyMs or count/],
+		["count 0", { count: 0 }, /count must be a whole number from 2 to 12/],
+		["count 1", { count: 1 }, /count must be a whole number from 2 to 12/],
+		["count 13", { count: 13 }, /from 2 to 12/],
+		["count 2.5", { count: 2.5 }, /whole number/],
+		["everyMs under a frame", { everyMs: 5 }, /at least 17 ms/],
+		["everyMs NaN", { everyMs: Number.NaN }, /at least 17 ms/],
+		["unknown source", { count: 3, source: "x" as "raw" }, /source must be/],
+	])("rejects %s before it reads the editor or runs ffmpeg", async (_name, args, message) => {
+		const runFfmpeg = vi.fn(async () => jpeg);
+		const ctx = setup({ runFfmpeg });
+		ctx.ready();
+		await expect(ctx.remote.sampleFrames(args)).rejects.toThrow(message);
+		expect(runFfmpeg).not.toHaveBeenCalled();
+		expect(ctx.editor.send).not.toHaveBeenCalled();
+	});
+
+	it("rejects an everyMs that needs too many frames or outlasts the video", async () => {
+		const many = await run({ everyMs: 100 });
+		await expect(many.result).rejects.toThrow(/would need 81 frames .* the most is 12/);
+		const long = await run({ everyMs: 20_000 });
+		await expect(long.result).rejects.toThrow(/longer than the edited video/);
+		expect(many.runFfmpeg).not.toHaveBeenCalled();
+		expect(long.runFfmpeg).not.toHaveBeenCalled();
+	});
+
+	it("rejects when nothing is loaded in the editor", async () => {
+		const { result } = await run({ count: 3 }, { data: { ...state, videoPath: null } });
+		await expect(result).rejects.toThrow(/no recording loaded/);
+	});
+
+	it("rejects a video with no length", async () => {
+		const { result, runFfmpeg } = await run(
+			{ count: 3 },
+			{ data: { ...state, durationMs: 0, clips: [] } },
+		);
+		await expect(result).rejects.toThrow(/no length/);
+		expect(runFfmpeg).not.toHaveBeenCalled();
+	});
+
+	it("samples a video with no clips as if nothing were cut", async () => {
+		const out = await (
+			await run({ count: 2 }, { data: { ...state, durationMs: 1000, clips: [] } })
+		).result;
+		expect(out.frames.map((frame) => frame.sourceMs)).toEqual([0, 1000]);
+	});
+
+	it("skips moments that fall in a gap and says which", async () => {
+		const gap = {
+			...state,
+			durationMs: 3000,
+			clips: [
+				{ startMs: 0, endMs: 1000, sourceStartMs: 0, speed: 1 },
+				{ startMs: 2000, endMs: 3000, sourceStartMs: 5000, speed: 1 },
+			],
+		};
+		const out = await (await run({ count: 4 }, { data: gap })).result;
+		expect(out.frames.map((frame) => frame.atMs)).toEqual([0, 2000, 3000]);
+		expect(out.skippedAtMs).toEqual([1000]);
+	});
+
+	it("rejects when fewer than two moments play anything", async () => {
+		const gap = {
+			...state,
+			durationMs: 3000,
+			clips: [{ startMs: 0, endMs: 1000, sourceStartMs: 0, speed: 1 }],
+		};
+		const { result } = await run({ count: 2 }, { data: { ...gap, durationMs: 3000 } });
+		await expect(result).rejects.toThrow(/Fewer than two/);
+	});
+
+	it("names the reason when ffmpeg fails", async () => {
+		const cases: [Record<string, unknown>, RegExp][] = [
+			[{ killed: true, message: "x" }, /took longer than 60 s/],
+			[{ code: "ENOENT", message: "spawn ENOENT" }, /FFmpeg was not found/],
+			[{ message: "failed", stderr: Buffer.from("Invalid data\n") }, /Invalid data/],
+		];
+		for (const [failure, pattern] of cases) {
+			const runFfmpeg = vi.fn(async () => {
+				throw Object.assign(new Error(String(failure.message)), failure);
+			});
+			const { result } = await run({ count: 3 }, { runFfmpeg });
+			await expect(result).rejects.toThrow(pattern);
+		}
+	});
+
+	it("reports a missing ffmpeg binary and an unreadable video size", async () => {
+		const missing = await run(
+			{ count: 3 },
+			{
+				ffmpegPath: () => {
+					throw new Error("No binary.");
+				},
+			},
+		);
+		await expect(missing.result).rejects.toThrow(/cannot build a contact sheet without FFmpeg/);
+		const ctx = setup({
+			ffmpegPath: () => "ffmpeg",
+			runFfmpeg: vi.fn(async () => jpeg),
+			probeVideo: async () => {
+				throw new Error("Unable to parse");
+			},
+		});
+		ctx.ready();
+		const result = ctx.remote.sampleFrames({ count: 3 });
+		const settled = result.catch(() => undefined);
+		await ctx.sent(1);
+		ctx.reply(0, { ok: true, data: state });
+		await settled;
+		await expect(result).rejects.toThrow(/could not read the video's size: Unable to parse/);
+	});
+
+	it("rejects output that is empty, not a JPEG, or over the byte limit", async () => {
+		const big = Buffer.concat([jpeg, Buffer.alloc(4 * 1024 * 1024)]);
+		const cases: [Buffer, RegExp][] = [
+			[Buffer.alloc(0), /no image/],
+			[Buffer.from("junk!"), /did not return an image/],
+			[big, /byte limit/],
+		];
+		for (const [output, pattern] of cases) {
+			const { result } = await run({ count: 3 }, { runFfmpeg: vi.fn(async () => output) });
+			await expect(result).rejects.toThrow(pattern);
+		}
+	});
+
+	it("cancels when the signal aborts mid-run", async () => {
+		const controller = new AbortController();
+		const runFfmpeg = vi.fn(
+			(_binary: string, _args: string[], opts: { signal?: AbortSignal }) =>
+				new Promise<Buffer>((_resolve, reject) => {
+					opts.signal?.addEventListener("abort", () =>
+						reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+					);
+					controller.abort();
+				}),
+		);
+		const { result } = await run({ count: 3 }, { runFfmpeg, signal: controller.signal });
+		await expect(result).rejects.toThrow(/canceled/);
+	});
+
+	it("rejects at once when the signal is already aborted", async () => {
+		const ctx = setup();
+		ctx.ready();
+		await expect(
+			ctx.remote.sampleFrames({ count: 3 }, { signal: AbortSignal.abort() }),
+		).rejects.toThrow(/canceled/);
+		expect(ctx.editor.send).not.toHaveBeenCalled();
 	});
 });
 

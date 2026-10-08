@@ -10,7 +10,9 @@ vi.mock("electron", () => ({
 	ipcMain: { on: vi.fn() },
 }));
 
-const { buildPadFilter, createRemoteExport, isSameFile } = await import("./remoteExport");
+const { buildPadFilter, buildPostArgs, buildPostSpec, createRemoteExport, isSameFile } =
+	await import("./remoteExport");
+type ExportedInfo = import("./remoteExport").ExportedVideoInfo;
 
 let dir: string;
 let videoPath: string;
@@ -33,12 +35,18 @@ function fakeEditor() {
 	});
 }
 
-function setup(runFfmpeg: (args: string[]) => Promise<void> = async () => undefined) {
+const info = { width: 1920, height: 1080, durationMs: 60_000, fps: 30 };
+
+function setup(
+	runFfmpeg: (args: string[]) => Promise<void> = async () => undefined,
+	probeVideo: (path: string) => Promise<ExportedInfo> = async () => info,
+) {
 	const ipc = new EventEmitter();
 	const remote = createRemoteExport({
 		ipc: ipc as unknown as IpcMain,
 		recordingsDir: async () => dir,
 		runFfmpeg,
+		probeVideo,
 	});
 	const editor = fakeEditor();
 	const ready = (target: string | null, sender = editor) =>
@@ -131,7 +139,7 @@ describe("output path validation", () => {
 		const pending = remote.exportVideo({ videoPath, outputPath: existing, overwrite: true });
 		await sent();
 		reply({ ok: true, path: existing });
-		await expect(pending).resolves.toEqual({ status: "done", path: existing });
+		await expect(pending).resolves.toEqual({ status: "done", path: existing, ...info });
 	});
 
 	it("defaults to the recordings dir and infers gif from the extension", async () => {
@@ -174,7 +182,7 @@ describe("export flow", () => {
 		expect(other.send).not.toHaveBeenCalled();
 		expect(remote.getStatus().state).toBe("exporting");
 		reply({ ok: true, path: "/out/final.mp4" });
-		await expect(pending).resolves.toEqual({ status: "done", path: "/out/final.mp4" });
+		await expect(pending).resolves.toEqual({ status: "done", path: "/out/final.mp4", ...info });
 		expect(remote.getStatus()).toEqual({
 			state: "done",
 			progress: 100,
@@ -223,7 +231,7 @@ describe("export flow", () => {
 		ready(videoPath);
 		await sent(2);
 		reply({ ok: true, path: "/out/retry.mp4" });
-		await expect(retry).resolves.toEqual({ status: "done", path: "/out/retry.mp4" });
+		await expect(retry).resolves.toEqual({ status: "done", path: "/out/retry.mp4", ...info });
 	});
 
 	it("ignores in-page navigation and skips crashed editors", async () => {
@@ -384,7 +392,7 @@ describe("aspect and padTo", () => {
 		expect(rendered).not.toBe(out);
 		await fs.writeFile(rendered, "raw");
 		reply({ ok: true, path: rendered });
-		await expect(pending).resolves.toEqual({ status: "done", path: out });
+		await expect(pending).resolves.toEqual({ status: "done", path: out, ...info });
 		const args = runFfmpeg.mock.calls[0][0];
 		expect(args[args.indexOf("-vf") + 1]).toContain("pad=2880:1600");
 		expect(args[args.indexOf("-i") + 1]).toBe(rendered);
@@ -450,9 +458,156 @@ describe("aspect and padTo", () => {
 		await sent();
 		await fs.writeFile(lastRequest().outputPath, "raw");
 		reply({ ok: true, path: lastRequest().outputPath });
-		await expect(pending).resolves.toEqual({ status: "done", path: out });
+		await expect(pending).resolves.toEqual({ status: "done", path: out, ...info });
 		expect(await fs.readFile(prepad, "utf8")).toBe("mine");
 		expect(await fs.readFile(staged, "utf8")).toBe("mine");
+	});
+});
+
+describe("scale, fps and posterAtMs", () => {
+	it("chains pad, then scale, then fps into one filter", () => {
+		const spec = buildPostSpec({ videoPath, aspect: "16:9", scale: 0.5, fps: 24 });
+		const filter = spec?.filter ?? "";
+		expect(filter.indexOf("pad=")).toBeLessThan(filter.indexOf("scale=trunc(iw*0.5/2)*2"));
+		expect(filter.indexOf("scale=trunc")).toBeLessThan(filter.indexOf("fps=24"));
+		expect(buildPostSpec({ videoPath })).toBeNull();
+		expect(buildPostSpec({ videoPath, fps: 30 })?.label).toBe("post-processing");
+	});
+
+	it.each([
+		[{ scale: 0 }, /scale must be a number from 0.05 to 1/],
+		[{ scale: -1 }, /scale must be/],
+		[{ scale: Number.NaN }, /scale must be/],
+		[{ scale: Number.POSITIVE_INFINITY }, /scale must be/],
+		[{ scale: 2 }, /scale must be/],
+		[{ scale: "half" as unknown as number }, /scale must be/],
+		[{ fps: 0 }, /fps must be a number from 1 to 120/],
+		[{ fps: -30 }, /fps must be/],
+		[{ fps: Number.NaN }, /fps must be/],
+		[{ fps: 1000 }, /fps must be a number from 1 to 120/],
+		[{ posterAtMs: -1 }, /posterAtMs must be 0 or more/],
+		[{ posterAtMs: Number.NaN }, /posterAtMs must be/],
+		[{ padTo: "2880x1600", scale: 0.5 }, /either padTo or scale/],
+	])("rejects %o before touching the editor", async (args, message) => {
+		const { remote, editor } = setup();
+		await expect(remote.exportVideo({ videoPath, ...args })).rejects.toThrow(message);
+		expect(remote.getStatus().state).toBe("idle");
+		expect(editor.send).not.toHaveBeenCalled();
+		expect(await fs.readdir(dir)).toEqual(["recording-1.mp4"]);
+	});
+
+	it("rejects a gif export with any of them", async () => {
+		const { remote } = setup();
+		for (const extra of [{ scale: 0.5 }, { fps: 24 }, { posterAtMs: 100 }]) {
+			await expect(
+				remote.exportVideo({ videoPath, format: "gif", ...extra }),
+			).rejects.toThrow(/only work with mp4/);
+		}
+	});
+
+	it("scales and resamples in one pass and reports what it wrote", async () => {
+		const runFfmpeg = vi.fn(async (args: string[]) => {
+			await fs.writeFile(args[args.length - 1], "small");
+		});
+		const probe = vi.fn(async () => ({ width: 960, height: 540, durationMs: 59_900, fps: 24 }));
+		const { remote, ready, sent, lastRequest, reply } = setup(runFfmpeg, probe);
+		const out = path.join(dir, "small.mp4");
+		ready(videoPath);
+		const pending = remote.exportVideo({ videoPath, outputPath: out, scale: 0.5, fps: 24 });
+		await sent();
+		await fs.writeFile(lastRequest().outputPath, "raw");
+		reply({ ok: true, path: lastRequest().outputPath });
+		await expect(pending).resolves.toEqual({
+			status: "done",
+			path: out,
+			width: 960,
+			height: 540,
+			durationMs: 59_900,
+			fps: 24,
+		});
+		expect(runFfmpeg).toHaveBeenCalledTimes(1);
+		const args = runFfmpeg.mock.calls[0][0];
+		expect(args[args.indexOf("-vf") + 1]).toBe(
+			"scale=trunc(iw*0.5/2)*2:trunc(ih*0.5/2)*2,fps=24",
+		);
+		expect(probe).toHaveBeenCalledWith(out, undefined);
+		expect((await fs.readdir(dir)).sort()).toEqual(["recording-1.mp4", "small.mp4"]);
+	});
+
+	it("still reports done, with a note, when the file cannot be read back", async () => {
+		const { remote, ready, sent, lastRequest, reply } = setup(undefined, async () => {
+			throw new Error("FFmpeg did not report a video stream.");
+		});
+		ready(videoPath);
+		const pending = remote.exportVideo({ videoPath, outputPath: path.join(dir, "o.mp4") });
+		await sent();
+		reply({ ok: true, path: lastRequest().outputPath });
+		const result = await pending;
+		expect(result).toMatchObject({ status: "done", path: path.join(dir, "o.mp4") });
+		expect(result).toHaveProperty(
+			"probeNote",
+			expect.stringContaining("could not be read back"),
+		);
+		expect(result).not.toHaveProperty("width");
+	});
+
+	it("attaches the poster frame in the same pass, backing off the very end", () => {
+		const args = buildPostArgs("/in.mp4", "/out.mp4", { filter: "fps=24", posterAtMs: 40_000 });
+		expect(args[args.indexOf("-ss") + 1]).toBe("40.000");
+		expect(args).toContain("attached_pic");
+		expect(args[args.indexOf("-filter_complex") + 1]).toBe(
+			"[0:v]fps=24[v];[1:v]format=yuvj420p,trim=end_frame=1,setpts=PTS-STARTPTS[p]",
+		);
+		expect(args).toContain("0:a?");
+	});
+
+	it("rejects a poster past the end of the export and keeps the unprocessed video", async () => {
+		const runFfmpeg = vi.fn(async () => undefined);
+		const { remote, ready, sent, lastRequest, reply } = setup(runFfmpeg, async () => info);
+		const out = path.join(dir, "final.mp4");
+		ready(videoPath);
+		const pending = remote.exportVideo({ videoPath, outputPath: out, posterAtMs: 90_000 });
+		await sent();
+		await fs.writeFile(lastRequest().outputPath, "raw");
+		reply({ ok: true, path: lastRequest().outputPath });
+		await expect(pending).rejects.toThrow(/posterAtMs 90000 is past the end .*60000 ms/);
+		await expect(pending).rejects.toThrow(/The unprocessed video is at/);
+		expect(runFfmpeg).not.toHaveBeenCalled();
+		expect(await fs.readFile(out, "utf8")).toBe("raw");
+		expect((await fs.readdir(dir)).sort()).toEqual(["final.mp4", "recording-1.mp4"]);
+	});
+
+	it("seeks the poster at the requested time and leaves no temp files", async () => {
+		const runFfmpeg = vi.fn(async (args: string[]) => {
+			await fs.writeFile(args[args.length - 1], "with poster");
+		});
+		const { remote, ready, sent, lastRequest, reply } = setup(runFfmpeg);
+		const out = path.join(dir, "final.mp4");
+		ready(videoPath);
+		const pending = remote.exportVideo({ videoPath, outputPath: out, posterAtMs: 60_000 });
+		await sent();
+		await fs.writeFile(lastRequest().outputPath, "raw");
+		reply({ ok: true, path: lastRequest().outputPath });
+		await expect(pending).resolves.toMatchObject({ status: "done", path: out });
+		const args = runFfmpeg.mock.calls[0][0];
+		expect(args[args.indexOf("-ss") + 1]).toBe("59.960");
+		expect((await fs.readdir(dir)).sort()).toEqual(["final.mp4", "recording-1.mp4"]);
+	});
+
+	it("keeps the unprocessed video and removes temp files when the pass fails", async () => {
+		const { remote, ready, sent, lastRequest, reply } = setup(async () => {
+			throw new Error("Invalid argument");
+		});
+		const out = path.join(dir, "final.mp4");
+		ready(videoPath);
+		const pending = remote.exportVideo({ videoPath, outputPath: out, fps: 24 });
+		await sent();
+		await fs.writeFile(lastRequest().outputPath, "raw");
+		reply({ ok: true, path: lastRequest().outputPath });
+		await expect(pending).rejects.toThrow(
+			/post-processing it failed: Invalid argument. The unprocessed video is at/,
+		);
+		expect((await fs.readdir(dir)).sort()).toEqual(["final.mp4", "recording-1.mp4"]);
 	});
 });
 

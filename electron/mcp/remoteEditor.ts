@@ -4,6 +4,8 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { type IpcMain, ipcMain, type WebContents } from "electron";
 import { getFfmpegBinaryPath } from "../ipc/ffmpeg/binary";
+import { probeNativeVideoMetadata } from "../ipc/ffmpeg/metadata";
+import { contactSheetArgs, planSheet } from "./reviewRecording";
 
 const EDITOR_READY_TIMEOUT_MS = 45_000;
 const EDITOR_REPLY_TIMEOUT_MS = 20_000;
@@ -11,6 +13,11 @@ const FRAME_TIMEOUT_MS = 30_000;
 const MAX_FRAME_WIDTH = 1920;
 const END_FRAME_BACKOFF_MS = 40;
 const MAX_FRAME_BYTES = 16 * 1024 * 1024;
+const SHEET_TIMEOUT_MS = 60_000;
+const MAX_SAMPLE_FRAMES = 12;
+const MIN_EVERY_MS = 17;
+const MAX_SHEET_BYTES = 4 * 1024 * 1024;
+const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff]);
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
 
 const execFileAsync = promisify(execFile);
@@ -92,6 +99,20 @@ export function frameArgs(videoPath: string, sourceMs: number) {
 	];
 }
 
+export const sampleSheetArgs = (...args: Parameters<typeof contactSheetArgs>) =>
+	contactSheetArgs(...args).filter((arg) => arg !== "-noaccurate_seek");
+
+export type SampledFrame = { atMs: number; sourceMs: number };
+
+export type SampledFrames = {
+	image: { data: string; mimeType: "image/jpeg"; width: number; height: number };
+	cols: number;
+	rows: number;
+	source: EditorFrameSource;
+	frames: SampledFrame[];
+	skippedAtMs?: number[];
+};
+
 function describeFfmpegError(error: unknown, timeoutMs: number) {
 	const failure = error as NodeJS.ErrnoException & { killed?: boolean; stderr?: Buffer | string };
 	if (failure.name === "AbortError" || failure.code === "ABORT_ERR") {
@@ -108,12 +129,18 @@ export function createRemoteEditor({
 	ipc = ipcMain,
 	ffmpegPath = getFfmpegBinaryPath,
 	runFfmpeg = runFfmpegProcess,
+	probeVideo = probeNativeVideoMetadata,
 	readyTimeoutMs = EDITOR_READY_TIMEOUT_MS,
 	replyTimeoutMs = EDITOR_REPLY_TIMEOUT_MS,
 }: {
 	ipc?: Pick<IpcMain, "on">;
 	ffmpegPath?: () => string;
 	runFfmpeg?: RunFfmpeg;
+	probeVideo?: (
+		binary: string,
+		videoPath: string,
+		signal?: AbortSignal,
+	) => Promise<{ width: number; height: number }>;
 	readyTimeoutMs?: number;
 	replyTimeoutMs?: number;
 } = {}) {
@@ -255,6 +282,16 @@ export function createRemoteEditor({
 		return state;
 	};
 
+	function resolveBinary(action: string) {
+		try {
+			return ffmpegPath();
+		} catch (error) {
+			throw new Error(
+				`Recordly cannot ${action} without FFmpeg. ${(error as Error).message}`,
+			);
+		}
+	}
+
 	async function getFrame(
 		{ atMs, source = "edited" }: { atMs: number; source?: EditorFrameSource },
 		opts: { signal?: AbortSignal } = {},
@@ -280,14 +317,7 @@ export function createRemoteEditor({
 			sourceMs,
 			Math.max(0, state.sourceDurationMs - END_FRAME_BACKOFF_MS),
 		);
-		let binary: string;
-		try {
-			binary = ffmpegPath();
-		} catch (error) {
-			throw new Error(
-				`Recordly cannot read a frame without FFmpeg. ${(error as Error).message}`,
-			);
-		}
+		const binary = resolveBinary("read a frame");
 		const png = await runFfmpeg(binary, frameArgs(state.videoPath, seekMs), {
 			timeoutMs: FRAME_TIMEOUT_MS,
 			signal: opts.signal,
@@ -308,7 +338,115 @@ export function createRemoteEditor({
 		};
 	}
 
-	return { requestEditor, getState, getFrame };
+	async function sampleFrames(
+		{
+			everyMs,
+			count,
+			source = "edited",
+		}: { everyMs?: number; count?: number; source?: EditorFrameSource },
+		opts: { signal?: AbortSignal } = {},
+	): Promise<SampledFrames> {
+		if ((everyMs === undefined) === (count === undefined)) {
+			throw new Error("Pass exactly one of everyMs or count.");
+		}
+		if (source !== "edited" && source !== "raw") {
+			throw new Error(`source must be "edited" or "raw", not "${source}".`);
+		}
+		if (everyMs !== undefined && !(Number.isFinite(everyMs) && everyMs >= MIN_EVERY_MS)) {
+			throw new Error(`everyMs must be at least ${MIN_EVERY_MS} ms (one frame at 60 fps).`);
+		}
+		if (
+			count !== undefined &&
+			!(Number.isInteger(count) && count >= 2 && count <= MAX_SAMPLE_FRAMES)
+		) {
+			throw new Error(
+				`count must be a whole number from 2 to ${MAX_SAMPLE_FRAMES}. get_frame returns a single frame.`,
+			);
+		}
+		const state = await getState(opts);
+		const limit = source === "raw" ? state.sourceDurationMs : state.durationMs;
+		if (limit <= 0) throw new Error(`The ${source} video has no length to sample.`);
+		let times: number[];
+		if (count !== undefined) {
+			times = Array.from({ length: count }, (_, i) => Math.round((i * limit) / (count - 1)));
+		} else {
+			const every = everyMs as number;
+			const total = Math.floor(limit / every) + 1;
+			if (total > MAX_SAMPLE_FRAMES) {
+				throw new Error(
+					`everyMs ${Math.round(every)} would need ${total} frames over ${Math.round(limit)} ms; the most is ${MAX_SAMPLE_FRAMES}. Use a larger everyMs or pass count.`,
+				);
+			}
+			if (total < 2) {
+				throw new Error(
+					`everyMs ${Math.round(every)} is longer than the ${source} video (${Math.round(limit)} ms).`,
+				);
+			}
+			times = Array.from({ length: total }, (_, i) => Math.round(i * every));
+		}
+		const frames: SampledFrame[] = [];
+		const skippedAtMs: number[] = [];
+		const lastSeekMs = Math.max(0, state.sourceDurationMs - END_FRAME_BACKOFF_MS);
+		for (const atMs of times) {
+			const sourceMs =
+				source === "raw" ? atMs : timelineToSourceMs(state.clips as EditorClip[], atMs);
+			if (sourceMs === null) skippedAtMs.push(atMs);
+			else frames.push({ atMs, sourceMs: Math.round(Math.min(sourceMs, lastSeekMs)) });
+		}
+		if (frames.length < 2) {
+			throw new Error("Fewer than two of those moments play anything; they fall in gaps.");
+		}
+		const binary = resolveBinary("build a contact sheet");
+		const { width, height } = await probeVideo(binary, state.videoPath, opts.signal).catch(
+			(error) => {
+				throw new Error(
+					`Recordly could not read the video's size: ${describeFfmpegError(error, FRAME_TIMEOUT_MS)}`,
+				);
+			},
+		);
+		const plan = planSheet(frames.length, width, height);
+		const jpeg = await runFfmpeg(
+			binary,
+			sampleSheetArgs(
+				state.videoPath,
+				frames.map((frame) => frame.sourceMs),
+				plan,
+			),
+			{ timeoutMs: SHEET_TIMEOUT_MS, signal: opts.signal },
+		).catch((error) => {
+			throw new Error(
+				`Recordly could not build the contact sheet: ${describeFfmpegError(error, SHEET_TIMEOUT_MS)}`,
+			);
+		});
+		if (jpeg.length === 0) {
+			throw new Error("Recordly could not build the contact sheet: no image.");
+		}
+		if (!jpeg.subarray(0, 3).equals(JPEG_SIGNATURE)) {
+			throw new Error(
+				"Recordly could not build the contact sheet: FFmpeg did not return an image.",
+			);
+		}
+		if (jpeg.length > MAX_SHEET_BYTES) {
+			throw new Error(
+				`The contact sheet is ${jpeg.length} bytes, over the ${MAX_SHEET_BYTES} byte limit. Ask for fewer frames.`,
+			);
+		}
+		return {
+			image: {
+				data: jpeg.toString("base64"),
+				mimeType: "image/jpeg",
+				width: plan.width,
+				height: plan.height,
+			},
+			cols: plan.cols,
+			rows: plan.rows,
+			source,
+			frames,
+			...(skippedAtMs.length > 0 && { skippedAtMs }),
+		};
+	}
+
+	return { requestEditor, getState, getFrame, sampleFrames };
 }
 
 export type RemoteEditor = ReturnType<typeof createRemoteEditor>;

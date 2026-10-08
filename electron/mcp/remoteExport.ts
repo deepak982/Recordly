@@ -5,12 +5,17 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { type IpcMain, ipcMain, type WebContents } from "electron";
 import { getFfmpegBinaryPath } from "../ipc/ffmpeg/binary";
+import { parseFfmpegFrameRate, parseNativeVideoMetadataProbeOutput } from "../ipc/ffmpeg/metadata";
 import { getRecordingsDir } from "../ipc/utils";
 
 const EDITOR_READY_TIMEOUT_MS = 45_000;
 const EXPORT_WAIT_CAP_MS = 5 * 60_000;
 const PAD_TIMEOUT_MS = 5 * 60_000;
 const MAX_PAD_SIDE = 8192;
+const MIN_SCALE = 0.05;
+const MAX_FPS = 120;
+const POSTER_END_BACKOFF_MS = 40;
+const PROBE_TIMEOUT_MS = 30_000;
 
 type ExportFormat = RemoteExportRequest["format"];
 
@@ -24,7 +29,23 @@ export type RemoteExportArgs = {
 	aspect?: string;
 	/** Fit inside and letterbox to exactly this size ("2880x1600"); never stretches. */
 	padTo?: string;
+	/** Shrink the output by this factor (0.05 to 1); applied after aspect, not with padTo. */
+	scale?: number;
+	/** Output frame rate, 1 to 120. */
+	fps?: number;
+	/** Use the frame at this time of the exported video as the file's poster image. */
+	posterAtMs?: number;
 };
+
+export type ExportedVideoInfo = {
+	width?: number;
+	height?: number;
+	durationMs?: number;
+	fps?: number | null;
+	probeNote?: string;
+};
+
+export type ProbeVideo = (videoPath: string, signal?: AbortSignal) => Promise<ExportedVideoInfo>;
 
 export type RemoteExportStatus = {
 	state: "idle" | "waiting-for-editor" | "exporting" | "done" | "failed";
@@ -40,10 +61,57 @@ type ActiveExport = {
 	settle: (result: RemoteExportResult) => void;
 };
 
-type PadSpec = { filter: string };
+type PostSpec = { filter: string; posterAtMs?: number; label: "padding" | "post-processing" };
+
+function requireNumber(name: string, value: unknown, ok: (value: number) => boolean, rule: string) {
+	if (typeof value !== "number" || !Number.isFinite(value) || !ok(value)) {
+		throw new Error(`${name} must be ${rule}, not ${JSON.stringify(value)}.`);
+	}
+}
+
+/** One ffmpeg pass: aspect or padTo letterboxes, then scale shrinks, then fps resamples. */
+export function buildPostSpec(args: RemoteExportArgs): PostSpec | null {
+	const pad = buildPadFilter(args);
+	if (args.padTo !== undefined && args.scale !== undefined) {
+		throw new Error(
+			"Pass either padTo or scale, not both: padTo already fixes the output size. Use aspect with scale, or padTo alone.",
+		);
+	}
+	if (args.scale !== undefined) {
+		requireNumber(
+			"scale",
+			args.scale,
+			(value) => value >= MIN_SCALE && value <= 1,
+			`a number from ${MIN_SCALE} to 1 (it only shrinks)`,
+		);
+	}
+	if (args.fps !== undefined) {
+		requireNumber(
+			"fps",
+			args.fps,
+			(value) => value >= 1 && value <= MAX_FPS,
+			`a number from 1 to ${MAX_FPS}`,
+		);
+	}
+	if (args.posterAtMs !== undefined) {
+		requireNumber("posterAtMs", args.posterAtMs, (value) => value >= 0, "0 or more");
+	}
+	const filter = [
+		pad?.filter,
+		args.scale !== undefined && `scale=trunc(iw*${args.scale}/2)*2:trunc(ih*${args.scale}/2)*2`,
+		args.fps !== undefined && `fps=${args.fps}`,
+	]
+		.filter(Boolean)
+		.join(",");
+	if (!filter && args.posterAtMs === undefined) return null;
+	return { filter, posterAtMs: args.posterAtMs, label: pad ? "padding" : "post-processing" };
+}
 
 /** Letterbox filters. Only ever add bars: scale keeps the aspect ratio, pad fills the rest. */
-export function buildPadFilter(args: { aspect?: string; padTo?: string }): PadSpec | null {
+export function buildPadFilter(args: {
+	aspect?: string;
+	padTo?: string;
+}): { filter: string } | null {
 	if (args.aspect !== undefined && args.padTo !== undefined) {
 		throw new Error("Pass either aspect or padTo, not both.");
 	}
@@ -77,26 +145,60 @@ export function buildPadFilter(args: { aspect?: string; padTo?: string }): PadSp
 	return null;
 }
 
-export function buildPadArgs(input: string, output: string, filter: string) {
-	return [
-		"-y",
-		"-hide_banner",
-		"-i",
-		input,
-		"-vf",
-		filter,
-		"-c:v",
+export function buildPostArgs(
+	input: string,
+	output: string,
+	spec: Pick<PostSpec, "filter" | "posterAtMs">,
+	posterSeekMs = spec.posterAtMs,
+) {
+	const encode = [
+		"-c:v:0",
 		"libx264",
 		"-crf",
 		"16",
 		"-preset",
 		"medium",
-		"-pix_fmt",
+		"-pix_fmt:v:0",
 		"yuv420p",
 		"-c:a",
 		"copy",
 		"-movflags",
 		"+faststart",
+	];
+	if (posterSeekMs === undefined) {
+		return ["-y", "-hide_banner", "-i", input, "-vf", spec.filter, ...encode, output];
+	}
+	const main = spec.filter || "null";
+	const poster = [
+		spec.filter.replace(/,?fps=[^,]+$/, ""),
+		"format=yuvj420p",
+		"trim=end_frame=1",
+		"setpts=PTS-STARTPTS",
+	]
+		.filter(Boolean)
+		.join(",");
+	return [
+		"-y",
+		"-hide_banner",
+		"-i",
+		input,
+		"-ss",
+		(posterSeekMs / 1000).toFixed(3),
+		"-i",
+		input,
+		"-filter_complex",
+		`[0:v]${main}[v];[1:v]${poster}[p]`,
+		"-map",
+		"[v]",
+		"-map",
+		"0:a?",
+		"-map",
+		"[p]",
+		...encode,
+		"-c:v:1",
+		"mjpeg",
+		"-disposition:v:1",
+		"attached_pic",
 		output,
 	];
 }
@@ -113,6 +215,31 @@ const defaultRunFfmpeg = (args: string[]) =>
 					: resolve(),
 		);
 	});
+
+const defaultProbe: ProbeVideo = async (videoPath, signal) => {
+	const output = await new Promise<string>((resolve, reject) => {
+		execFile(
+			getFfmpegBinaryPath(),
+			["-hide_banner", "-i", videoPath],
+			{ timeout: PROBE_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024, signal },
+			(error, stdout, stderr) => {
+				const text = `${stdout}\n${stderr}`;
+				// ffmpeg -i with no output exits 1 after printing the stream info.
+				if (error && !/Duration:/.test(text)) reject(error);
+				else resolve(text);
+			},
+		);
+	});
+	const meta = parseNativeVideoMetadataProbeOutput(output);
+	if (!meta) throw new Error("FFmpeg did not report a video stream.");
+	const videoLine = output.split(/\r?\n/).find((line) => /\bVideo:\s*/i.test(line)) ?? "";
+	return {
+		width: meta.width,
+		height: meta.height,
+		durationMs: Math.round(meta.duration * 1000),
+		fps: parseFfmpegFrameRate(videoLine),
+	};
+};
 
 const fileExists = (filePath: string) =>
 	fs.stat(filePath, { bigint: true }).then(
@@ -147,10 +274,12 @@ async function resolveTarget(args: RemoteExportArgs, recordingsDir: () => Promis
 	if (requested && !path.isAbsolute(requested)) {
 		throw new Error(`outputPath must be an absolute path: ${requested}`);
 	}
-	const pad = buildPadFilter(args);
+	const pad = buildPostSpec(args);
 	const format: ExportFormat =
 		args.format ?? (requested?.toLowerCase().endsWith(".gif") ? "gif" : "mp4");
-	if (pad && format !== "mp4") throw new Error("aspect and padTo only work with mp4 exports.");
+	if (pad && format !== "mp4") {
+		throw new Error("aspect, padTo, scale, fps and posterAtMs only work with mp4 exports.");
+	}
 	const outputPath = requested
 		? path.resolve(requested)
 		: path.join(await recordingsDir(), `${path.parse(videoPath).name}-export.${format}`);
@@ -183,10 +312,12 @@ export function createRemoteExport({
 	ipc = ipcMain,
 	recordingsDir = getRecordingsDir,
 	runFfmpeg = defaultRunFfmpeg,
+	probeVideo = defaultProbe,
 }: {
 	ipc?: Pick<IpcMain, "on">;
 	recordingsDir?: () => Promise<string>;
 	runFfmpeg?: (args: string[]) => Promise<void>;
+	probeVideo?: ProbeVideo;
 } = {}) {
 	const readyEditors = new Map<WebContents, string>();
 	const watchedEditors = new WeakSet<WebContents>();
@@ -315,7 +446,9 @@ export function createRemoteExport({
 	async function exportVideo(
 		args: RemoteExportArgs,
 		opts: { onProgress?: (pct: number) => void; signal?: AbortSignal } = {},
-	): Promise<{ status: "done"; path: string } | { status: "still-exporting" }> {
+	): Promise<
+		({ status: "done"; path: string } & ExportedVideoInfo) | { status: "still-exporting" }
+	> {
 		if (busy) throw new Error("An export is already running. get_status shows its progress.");
 		busy = true;
 		let target: Awaited<ReturnType<typeof resolveTarget>>;
@@ -355,12 +488,35 @@ export function createRemoteExport({
 			format: target.format,
 			quality: args.quality,
 		};
+		const describeFile = async (filePath: string): Promise<ExportedVideoInfo> => {
+			try {
+				return await probeVideo(filePath, opts.signal);
+			} catch (error) {
+				return {
+					probeNote: `The file was written but could not be read back: ${(error as Error).message}`,
+				};
+			}
+		};
 		const padRendered = async (renderedPath: string) => {
 			const staged = `${target.outputPath}.padding-${unique}.mp4`;
 			busy = true;
 			status = { ...status, state: "exporting", progress: 99, outputPath: target.outputPath };
 			try {
-				await runFfmpeg(buildPadArgs(renderedPath, staged, target.pad?.filter ?? ""));
+				const spec = target.pad as PostSpec;
+				let posterSeekMs = spec.posterAtMs;
+				if (posterSeekMs !== undefined) {
+					const { durationMs } = await probeVideo(renderedPath, opts.signal);
+					if (durationMs === undefined || posterSeekMs > durationMs) {
+						throw new Error(
+							`posterAtMs ${Math.round(posterSeekMs)} is past the end of the exported video (${durationMs ?? "unknown"} ms)`,
+						);
+					}
+					posterSeekMs = Math.min(
+						posterSeekMs,
+						Math.max(0, durationMs - POSTER_END_BACKOFF_MS),
+					);
+				}
+				await runFfmpeg(buildPostArgs(renderedPath, staged, spec, posterSeekMs));
 				await fs.rename(staged, target.outputPath);
 				status = { ...status, state: "done", progress: 100, outputPath: target.outputPath };
 			} catch (error) {
@@ -370,10 +526,11 @@ export function createRemoteExport({
 					() => false,
 				);
 				status = { ...status, state: "failed", error: reason };
+				const label = target.pad?.label ?? "post-processing";
 				throw new Error(
 					kept
-						? `The export finished but padding it failed: ${reason}. The unpadded video is at ${target.outputPath}.`
-						: `The export finished but padding it failed: ${reason}`,
+						? `The export finished but ${label} it failed: ${reason}. The ${label === "padding" ? "unpadded" : "unprocessed"} video is at ${target.outputPath}.`
+						: `The export finished but ${label} it failed: ${reason}`,
 				);
 			} finally {
 				busy = false;
@@ -382,7 +539,11 @@ export function createRemoteExport({
 					fs.rm(renderedPath, { force: true }),
 				]);
 			}
-			return { status: "done" as const, path: target.outputPath };
+			return {
+				status: "done" as const,
+				path: target.outputPath,
+				...(await describeFile(target.outputPath)),
+			};
 		};
 		const completion = runInEditor(editor, request, opts.onProgress);
 		const result = await new Promise<RemoteExportResult | null>((resolve) => {
@@ -412,7 +573,10 @@ export function createRemoteExport({
 			if (target.pad) await fs.rm(rendered, { force: true });
 			throw new Error(result.error ?? "The export failed.");
 		}
-		if (!target.pad) return { status: "done", path: result.path ?? request.outputPath };
+		if (!target.pad) {
+			const donePath = result.path ?? request.outputPath;
+			return { status: "done", path: donePath, ...(await describeFile(donePath)) };
+		}
 		return padRendered(result.path ?? rendered);
 	}
 
