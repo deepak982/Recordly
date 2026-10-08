@@ -7,6 +7,8 @@ import { type IpcMain, ipcMain, type WebContents } from "electron";
 import { getFfmpegBinaryPath } from "../ipc/ffmpeg/binary";
 import { parseFfmpegFrameRate, parseNativeVideoMetadataProbeOutput } from "../ipc/ffmpeg/metadata";
 import { getRecordingsDir } from "../ipc/utils";
+import { verifyExportedFrames } from "./exportVerify";
+import type { RunFfmpeg } from "./remoteEditor";
 
 const EDITOR_READY_TIMEOUT_MS = 45_000;
 const EXPORT_WAIT_CAP_MS = 5 * 60_000;
@@ -43,6 +45,7 @@ export type ExportedVideoInfo = {
 	durationMs?: number;
 	fps?: number | null;
 	probeNote?: string;
+	warnings?: string[];
 };
 
 export type ProbeVideo = (videoPath: string, signal?: AbortSignal) => Promise<ExportedVideoInfo>;
@@ -203,6 +206,41 @@ export function buildPostArgs(
 	];
 }
 
+const VERIFY_MAX_BUFFER = 16 * 1024 * 1024;
+
+export type VerifyFrames = (
+	filePath: string,
+	durationMs: number | undefined,
+	signal?: AbortSignal,
+) => Promise<{ warnings: string[] }>;
+
+const runFfmpegForStdout: RunFfmpeg = (binary, args, { timeoutMs, signal }) =>
+	new Promise<Buffer>((resolve, reject) => {
+		execFile(
+			binary,
+			args,
+			{
+				encoding: "buffer",
+				timeout: timeoutMs,
+				maxBuffer: VERIFY_MAX_BUFFER,
+				signal,
+				windowsHide: true,
+			},
+			(error, stdout, stderr) => {
+				if (!error) return resolve(stdout);
+				reject(Object.assign(error, { stderr }));
+			},
+		);
+	});
+
+const defaultVerifyFrames: VerifyFrames = (filePath, durationMs, signal) =>
+	verifyExportedFrames(filePath, {
+		binary: getFfmpegBinaryPath(),
+		runFfmpeg: runFfmpegForStdout,
+		durationMs,
+		signal,
+	});
+
 const defaultRunFfmpeg = (args: string[]) =>
 	new Promise<void>((resolve, reject) => {
 		execFile(
@@ -313,11 +351,13 @@ export function createRemoteExport({
 	recordingsDir = getRecordingsDir,
 	runFfmpeg = defaultRunFfmpeg,
 	probeVideo = defaultProbe,
+	verifyFrames = defaultVerifyFrames,
 }: {
 	ipc?: Pick<IpcMain, "on">;
 	recordingsDir?: () => Promise<string>;
 	runFfmpeg?: (args: string[]) => Promise<void>;
 	probeVideo?: ProbeVideo;
+	verifyFrames?: VerifyFrames;
 } = {}) {
 	const readyEditors = new Map<WebContents, string>();
 	const watchedEditors = new WeakSet<WebContents>();
@@ -492,11 +532,23 @@ export function createRemoteExport({
 			filePath: string,
 			signal?: AbortSignal,
 		): Promise<ExportedVideoInfo> => {
+			let info: ExportedVideoInfo;
 			try {
-				return await probeVideo(filePath, signal);
+				info = await probeVideo(filePath, signal);
 			} catch (error) {
 				return {
 					probeNote: `The file was written but could not be read back: ${(error as Error).message}`,
+				};
+			}
+			try {
+				const checked = await verifyFrames(filePath, info.durationMs, signal);
+				return checked.warnings.length > 0 ? { ...info, warnings: checked.warnings } : info;
+			} catch (error) {
+				return {
+					...info,
+					warnings: [
+						`The exported frames could not be checked: ${(error as Error).message}`,
+					],
 				};
 			}
 		};

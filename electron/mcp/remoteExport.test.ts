@@ -13,6 +13,7 @@ vi.mock("electron", () => ({
 const { buildPadFilter, buildPostArgs, buildPostSpec, createRemoteExport, isSameFile } =
 	await import("./remoteExport");
 type ExportedInfo = import("./remoteExport").ExportedVideoInfo;
+type VerifyFrames = import("./remoteExport").VerifyFrames;
 
 let dir: string;
 let videoPath: string;
@@ -40,6 +41,7 @@ const info = { width: 1920, height: 1080, durationMs: 60_000, fps: 30 };
 function setup(
 	runFfmpeg: (args: string[]) => Promise<void> = async () => undefined,
 	probeVideo: (path: string) => Promise<ExportedInfo> = async () => info,
+	verifyFrames: VerifyFrames = async () => ({ warnings: [] }),
 ) {
 	const ipc = new EventEmitter();
 	const remote = createRemoteExport({
@@ -47,6 +49,7 @@ function setup(
 		recordingsDir: async () => dir,
 		runFfmpeg,
 		probeVideo,
+		verifyFrames,
 	});
 	const editor = fakeEditor();
 	const ready = (target: string | null, sender = editor) =>
@@ -503,6 +506,55 @@ describe("scale, fps and posterAtMs", () => {
 				remote.exportVideo({ videoPath, format: "gif", ...extra }),
 			).rejects.toThrow(/only work with mp4/);
 		}
+	});
+
+	it("reports frames the exported file is missing", async () => {
+		const verify = vi.fn(async () => ({
+			warnings: ["14.0 s of frames are a single flat colour with no video content (38.0 s)"],
+		}));
+		const { remote, ready, sent, lastRequest, reply } = setup(undefined, undefined, verify);
+		const out = path.join(dir, "blank.mp4");
+		ready(videoPath);
+		const pending = remote.exportVideo({ videoPath, outputPath: out });
+		await sent();
+		await fs.writeFile(lastRequest().outputPath, "raw");
+		reply({ ok: true, path: lastRequest().outputPath });
+		await expect(pending).resolves.toMatchObject({
+			status: "done",
+			warnings: ["14.0 s of frames are a single flat colour with no video content (38.0 s)"],
+		});
+		expect(verify).toHaveBeenCalledWith(out, info.durationMs, undefined);
+	});
+
+	it("says nothing extra when every sampled frame has a picture", async () => {
+		const { remote, ready, sent, lastRequest, reply } = setup();
+		const out = path.join(dir, "fine.mp4");
+		ready(videoPath);
+		const pending = remote.exportVideo({ videoPath, outputPath: out });
+		await sent();
+		await fs.writeFile(lastRequest().outputPath, "raw");
+		reply({ ok: true, path: lastRequest().outputPath });
+		const result = await pending;
+		expect(result).toMatchObject({ status: "done" });
+		expect(result).not.toHaveProperty("warnings");
+	});
+
+	it("keeps a finished export when the frame check itself fails", async () => {
+		const verify = vi.fn(async () => {
+			throw new Error("ffmpeg is missing");
+		});
+		const { remote, ready, sent, lastRequest, reply } = setup(undefined, undefined, verify);
+		const out = path.join(dir, "unchecked.mp4");
+		ready(videoPath);
+		const pending = remote.exportVideo({ videoPath, outputPath: out });
+		await sent();
+		await fs.writeFile(lastRequest().outputPath, "raw");
+		reply({ ok: true, path: lastRequest().outputPath });
+		await expect(pending).resolves.toMatchObject({
+			status: "done",
+			path: out,
+			warnings: ["The exported frames could not be checked: ffmpeg is missing"],
+		});
 	});
 
 	it("scales and resamples in one pass and reports what it wrote", async () => {
