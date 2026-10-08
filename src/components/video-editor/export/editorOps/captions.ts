@@ -7,6 +7,8 @@ import {
 	type AutoCaptionSettings,
 	type CaptionCue,
 	findClipAtTimelineTime,
+	getClipSourceEndMs,
+	getClipSourceStartMs,
 	getTimelineDurationMs,
 } from "../../types";
 import {
@@ -60,16 +62,29 @@ function toSourceSpan(startMs: number, endMs: number, context: EditorOpContext, 
 	if (clips.length === 0) return { startMs, endMs };
 	const clip = findClipAtTimelineTime(startMs, clips);
 	if (!clip) throw new Error(`${field} starts at ${startMs} ms, which is inside a cut.`);
-	if (endMs > clip.endMs) {
-		throw new Error(`${field} crosses a cut at ${clip.endMs} ms. Split it into one per shot.`);
+	let last = clip;
+	while (endMs > last.endMs) {
+		const next = findClipAtTimelineTime(last.endMs, clips);
+		const continues =
+			next &&
+			next.speed === clip.speed &&
+			Math.abs(getClipSourceStartMs(next) - getClipSourceEndMs(last)) <= 1;
+		if (!next || !continues) {
+			throw new Error(
+				`${field} crosses a cut at ${last.endMs} ms. Split it into one per shot.`,
+			);
+		}
+		last = next;
 	}
-	return captionSpanToSource(clip, { start: startMs, end: endMs });
+	return captionSpanToSource({ ...clip, endMs: last.endMs }, { start: startMs, end: endMs });
 }
 
-function rejectOverlap(cues: CaptionCue[], what: string) {
+function rejectOverlap(cues: CaptionCue[], what: string, onlyId?: string) {
 	const sorted = [...cues].sort((a, b) => a.startMs - b.startMs);
 	for (let index = 1; index < sorted.length; index += 1) {
-		if (sorted[index].startMs < sorted[index - 1].endMs) {
+		const involvesId =
+			onlyId === undefined || sorted[index].id === onlyId || sorted[index - 1].id === onlyId;
+		if (involvesId && sorted[index].startMs < sorted[index - 1].endMs) {
 			throw new Error(
 				`${what} would overlap: "${sorted[index - 1].text}" and "${sorted[index].text}" share time. Captions are one at a time.`,
 			);
@@ -78,6 +93,7 @@ function rejectOverlap(cues: CaptionCue[], what: string) {
 }
 
 function apply(context: EditorOpContext, cues: CaptionCue[]) {
+	context.assertSameRecording();
 	context.timeline.setAutoCaptions(cues);
 	if (cues.length > 0) {
 		context.timeline.setAutoCaptionSettings((current) => ({ ...current, enabled: true }));
@@ -123,26 +139,31 @@ async function cuesFromScenes(context: EditorOpContext): Promise<CaptionCue[]> {
 		.filter((scene) => !scene.failed && typeof scene.title === "string" && scene.title.trim())
 		.filter((scene) => scene.startMs >= 0 && scene.startMs < sourceMs)
 		.sort((a, b) => a.startMs - b.startMs);
-	if (scenes.length === 0) {
+	const cues = scenes
+		.map((scene, index) => {
+			const next = scenes[index + 1];
+			const endMs = Math.min(
+				scene.endMs,
+				sourceMs,
+				next ? next.startMs : Number.POSITIVE_INFINITY,
+				scene.startMs + CAPTION_DURATION_MS,
+			);
+			return { scene, endMs };
+		})
+		.filter(({ scene, endMs }) => endMs > scene.startMs)
+		.map(({ scene, endMs }) =>
+			createCaptionCue({
+				startMs: scene.startMs,
+				endMs,
+				text: Array.from((scene.title ?? "").trim())
+					.slice(0, CAPTION_MAX_CHARS)
+					.join("")
+					.trim(),
+			}),
+		);
+	if (cues.length === 0) {
 		throw new Error("The scene list has no titled scenes inside this recording to caption.");
 	}
-	const cues = scenes.map((scene, index) => {
-		const next = scenes[index + 1];
-		const endMs = Math.min(
-			scene.endMs,
-			sourceMs,
-			next ? next.startMs : Number.POSITIVE_INFINITY,
-			scene.startMs + CAPTION_DURATION_MS,
-		);
-		return createCaptionCue({
-			startMs: scene.startMs,
-			endMs,
-			text: Array.from((scene.title ?? "").trim())
-				.slice(0, CAPTION_MAX_CHARS)
-				.join("")
-				.trim(),
-		});
-	});
 	rejectOverlap(cues, "The scene captions");
 	return cues;
 }
@@ -270,8 +291,8 @@ export const captionsOps: EditorOpMap = {
 				"The new time",
 			);
 			next = retimeCue(next, id, span);
+			rejectOverlap(next, "The captions", id);
 		}
-		rejectOverlap(next, "The captions");
 		context.timeline.setAutoCaptions(next);
 		return { id };
 	},

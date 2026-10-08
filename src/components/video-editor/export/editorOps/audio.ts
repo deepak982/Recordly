@@ -32,15 +32,18 @@ function requireAudioRegion(id: string, context: EditorOpContext) {
 	return region;
 }
 
-async function probeAudioDurationMs(audioPath: string): Promise<number> {
-	const resolved = await resolveMediaElementSource(audioPath);
+function probeAudioDurationMs(audioPath: string): Promise<number> {
 	return new Promise<number>((resolve, reject) => {
 		const audio = new Audio();
+		let settled = false;
+		let revoke = () => undefined as void;
 		const finish = (settle: () => void) => {
+			if (settled) return;
+			settled = true;
 			clearTimeout(timer);
 			audio.removeAttribute("src");
 			audio.load();
-			resolved.revoke();
+			revoke();
 			settle();
 		};
 		const timer = setTimeout(
@@ -71,7 +74,24 @@ async function probeAudioDurationMs(audioPath: string): Promise<number> {
 				),
 			{ once: true },
 		);
-		audio.src = resolved.src;
+		resolveMediaElementSource(audioPath).then(
+			(resolved) => {
+				if (settled) {
+					resolved.revoke();
+					return;
+				}
+				revoke = resolved.revoke;
+				audio.src = resolved.src;
+			},
+			(error) =>
+				finish(() =>
+					reject(
+						new Error(
+							`Could not open ${audioPath}: ${error instanceof Error ? error.message : String(error)}`,
+						),
+					),
+				),
+		);
 	});
 }
 
@@ -90,8 +110,9 @@ export const audioOps: EditorOpMap = {
 			Math.round(context.duration * 1000),
 		);
 		if (totalMs <= 0) throw new Error("There is no recording loaded to add audio to.");
-		const startMs =
-			args.startMs === undefined ? 0 : requireFiniteNumber(args.startMs, "startMs");
+		const startMs = Math.round(
+			args.startMs === undefined ? 0 : requireFiniteNumber(args.startMs, "startMs"),
+		);
 		if (startMs < 0 || startMs >= totalMs) {
 			throw new Error(
 				`startMs must be from 0 up to the end of the recording at ${totalMs} ms.`,
@@ -100,7 +121,7 @@ export const audioOps: EditorOpMap = {
 		const volume = args.volume === undefined ? 1 : requireVolume(args.volume);
 		let requestedMs: number | undefined;
 		if (args.durationMs !== undefined) {
-			requestedMs = requireFiniteNumber(args.durationMs, "durationMs");
+			requestedMs = Math.round(requireFiniteNumber(args.durationMs, "durationMs"));
 			if (requestedMs <= 0) throw new Error("durationMs must be more than 0.");
 		}
 		let trackIndex: number | undefined;
@@ -130,8 +151,8 @@ export const audioOps: EditorOpMap = {
 		}
 		const region: AudioRegion = {
 			id: nextId(context.ids.audio, "audio"),
-			startMs: Math.round(startMs),
-			endMs: Math.round(startMs + placement.durationMs),
+			startMs,
+			endMs: startMs + Math.round(placement.durationMs),
 			audioPath: path,
 			volume,
 			normalize: false,
@@ -173,7 +194,7 @@ export const audioOps: EditorOpMap = {
 		const clips = context.timeline.clipRegions;
 		if (clips.length === 0) {
 			throw new Error(
-				"The recording has no clips yet, and the source sound is muted per clip. Split or trim the recording once, then mute it.",
+				"The timeline has no clips yet. Wait for the recording to finish loading, then try again.",
 			);
 		}
 		let targets = clips;

@@ -1,14 +1,13 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AudioRegion } from "../../types";
 import { audioOps } from "./audio";
 import type { EditorOpContext } from "./types";
 
+const resolveSource = vi.hoisted(() => vi.fn());
+
 vi.mock("@/lib/exporter/localMediaSource", async (importActual) => ({
 	...(await importActual<typeof import("@/lib/exporter/localMediaSource")>()),
-	resolveMediaElementSource: async (resource: string) => ({
-		src: resource,
-		revoke: () => undefined,
-	}),
+	resolveMediaElementSource: resolveSource,
 }));
 
 type Clip = { id: string; startMs: number; endMs: number; speed: number; muted?: boolean };
@@ -70,6 +69,7 @@ function makeContext(
 			annotation: { current: 1 },
 			annotationZIndex: { current: 1 },
 		},
+		assertSameRecording: () => undefined,
 	} as unknown as EditorOpContext;
 	return { state, context };
 }
@@ -104,6 +104,13 @@ const region = (over: Partial<AudioRegion> = {}): AudioRegion => ({
 	volume: 1,
 	trackIndex: 0,
 	...over,
+});
+
+beforeEach(() => {
+	resolveSource.mockImplementation(async (resource: string) => ({
+		src: resource,
+		revoke: () => undefined,
+	}));
 });
 
 afterEach(() => {
@@ -197,6 +204,87 @@ describe("audio.add", () => {
 		expect(state.regions).toEqual([]);
 	});
 
+	it("gives up when the media server never answers, and when it fails", async () => {
+		vi.useFakeTimers();
+		stubAudio(3);
+		resolveSource.mockReturnValueOnce(new Promise(() => undefined));
+		const first = makeContext();
+		const pending = run("audio.add", { path: "/slow.mp3" }, first.context) as Promise<unknown>;
+		const assertion = expect(pending).rejects.toThrow(/Timed out reading/);
+		await vi.advanceTimersByTimeAsync(10_001);
+		await assertion;
+		expect(first.state.regions).toEqual([]);
+		resolveSource.mockRejectedValueOnce(new Error("media server down"));
+		await expect(run("audio.add", { path: "/a.mp3" }, makeContext().context)).rejects.toThrow(
+			/Could not open \/a.mp3: media server down/,
+		);
+	});
+
+	it("releases the player after a failed read", async () => {
+		const removeAttribute = vi.fn();
+		const revoke = vi.fn();
+		resolveSource.mockResolvedValueOnce({ src: "/gone.mp3", revoke });
+		class Failing {
+			private onError: () => void = () => undefined;
+			addEventListener(name: string, handler: () => void) {
+				if (name === "error") this.onError = handler;
+			}
+			removeAttribute = removeAttribute;
+			load() {}
+			set src(_value: string) {
+				queueMicrotask(this.onError);
+			}
+		}
+		vi.stubGlobal("Audio", Failing);
+		await expect(
+			run("audio.add", { path: "/gone.mp3" }, makeContext().context),
+		).rejects.toThrow(/not audio/);
+		expect(removeAttribute).toHaveBeenCalledWith("src");
+		expect(revoke).toHaveBeenCalledTimes(1);
+	});
+
+	it("says there is no recording when its length is unknown", async () => {
+		stubAudio(3);
+		await expect(
+			run("audio.add", { path: "/a.mp3" }, makeContext({ durationSec: 0 }).context),
+		).rejects.toThrow(/no recording loaded/);
+	});
+
+	it("revokes a source that resolves after the read already timed out", async () => {
+		vi.useFakeTimers();
+		stubAudio("never");
+		const revoke = vi.fn();
+		let resolveLate: (value: { src: string; revoke: () => void }) => void = () => undefined;
+		resolveSource.mockReturnValueOnce(
+			new Promise((resolve) => {
+				resolveLate = resolve;
+			}),
+		);
+		const pending = run(
+			"audio.add",
+			{ path: "/slow.mp3" },
+			makeContext().context,
+		) as Promise<unknown>;
+		const assertion = expect(pending).rejects.toThrow(/Timed out reading/);
+		await vi.advanceTimersByTimeAsync(10_001);
+		await assertion;
+		resolveLate({ src: "/slow.mp3", revoke });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(revoke).toHaveBeenCalledTimes(1);
+	});
+
+	it("never writes a region of no length from fractional times", async () => {
+		stubAudio(3);
+		const { state, context } = makeContext();
+		await expect(
+			run("audio.add", { path: "/a.mp3", startMs: 9999.6 }, context),
+		).rejects.toThrow(/startMs must be/);
+		await expect(
+			run("audio.add", { path: "/a.mp3", durationMs: 0.4 }, context),
+		).rejects.toThrow(/durationMs/);
+		expect(state.regions).toEqual([]);
+	});
+
 	it("rejects a zero-length file", async () => {
 		stubAudio(0);
 		const { context } = makeContext();
@@ -286,6 +374,15 @@ describe("audio.source_track", () => {
 		run("audio.source_track", { track: "mic", volume: 0.25 }, context);
 		expect(state.defaults.mic).toEqual({ volume: 0.25, normalize: true });
 		expect(state.defaults.system).toEqual({ volume: 1, normalize: false });
+	});
+
+	it("keeps the clip's own volume when only normalize changes", () => {
+		const { state, context } = makeContext({
+			clips: [{ id: "a", startMs: 0, endMs: 1, speed: 1 }],
+		});
+		run("audio.source_track", { track: "mic", volume: 0.3, clipId: "a" }, context);
+		run("audio.source_track", { track: "mic", normalize: true, clipId: "a" }, context);
+		expect(state.byClip.a.mic).toEqual({ volume: 0.3, normalize: true });
 	});
 
 	it("scopes a change to one clip", () => {

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { projectCaptionCues } from "../../captionTimeline";
 import {
 	type AutoCaptionSettings,
 	type CaptionCue,
@@ -41,6 +42,7 @@ function makeContext(options: { cues?: CaptionCue[]; clips?: Clip[]; durationSec
 				state.selected = id;
 			},
 		},
+		assertSameRecording: () => undefined,
 	} as unknown as EditorOpContext;
 	return { state, context };
 }
@@ -103,6 +105,7 @@ describe("captions.set", () => {
 			{ cues: [{ startMs: 9000, endMs: 10001, text: "x" }] },
 			/past the end/,
 		],
+		["non-text text", { cues: [{ startMs: 0, endMs: 1000, text: 5 }] }, /must be text/],
 		[
 			"a non-finite time",
 			{ cues: [{ startMs: Number.NaN, endMs: 1000, text: "x" }] },
@@ -133,6 +136,66 @@ describe("captions.set", () => {
 		});
 		run("captions.set", { cues: [{ startMs: 1000, endMs: 2000, text: "fast" }] }, context);
 		expect([state.cues[0].startMs, state.cues[0].endMs]).toEqual([2000, 4000]);
+	});
+
+	it("accepts a cue across a split that is not a cut, and refuses one across a speed change", () => {
+		const split = [
+			{ id: "a", startMs: 0, endMs: 2000, speed: 1 },
+			{ id: "b", startMs: 2000, endMs: 4000, speed: 1, sourceStartMs: 2000 },
+		];
+		const { state, context } = makeContext({ clips: split });
+		run("captions.set", { cues: [{ startMs: 1000, endMs: 3000, text: "x" }] }, context);
+		expect([state.cues[0].startMs, state.cues[0].endMs]).toEqual([1000, 3000]);
+		const three = makeContext({
+			clips: [
+				...split,
+				{ id: "c", startMs: 4000, endMs: 6000, speed: 1, sourceStartMs: 4000 },
+			],
+		});
+		run(
+			"captions.set",
+			{ cues: [{ startMs: 1000, endMs: 5000, text: "long" }] },
+			three.context,
+		);
+		expect(three.state.cues[0].endMs).toBe(5000);
+		const faster = makeContext({
+			clips: [split[0], { ...split[1], speed: 2, endMs: 3000 }],
+		});
+		expect(() =>
+			run(
+				"captions.set",
+				{ cues: [{ startMs: 1000, endMs: 2500, text: "x" }] },
+				faster.context,
+			),
+		).toThrow(/crosses a cut at 2000/);
+	});
+
+	it("keeps a caption on its words after a later cut removes time before it", () => {
+		const { state, context } = makeContext({
+			clips: [{ id: "c", startMs: 0, endMs: 10000, speed: 1, sourceStartMs: 0 }],
+		});
+		run("captions.set", { cues: [{ startMs: 6000, endMs: 7000, text: "hello" }] }, context);
+		const afterCut = [
+			{ id: "c", startMs: 0, endMs: 2000, speed: 1, sourceStartMs: 0 },
+			{ id: "d", startMs: 2000, endMs: 6000, speed: 1, sourceStartMs: 6000 },
+		] as never;
+		const [shown] = projectCaptionCues(state.cues, afterCut);
+		expect([shown.startMs, shown.endMs]).toEqual([2000, 3000]);
+		const cutAway = [{ id: "c", startMs: 0, endMs: 5000, speed: 1, sourceStartMs: 0 }] as never;
+		expect(projectCaptionCues(state.cues, cutAway)).toEqual([]);
+	});
+
+	it("rejects a cue that starts in a gap between clips", () => {
+		const { state, context } = makeContext({
+			clips: [
+				{ id: "a", startMs: 0, endMs: 2000, speed: 1 },
+				{ id: "b", startMs: 3000, endMs: 5000, speed: 1, sourceStartMs: 3000 },
+			],
+		});
+		expect(() =>
+			run("captions.set", { cues: [{ startMs: 2500, endMs: 2800, text: "x" }] }, context),
+		).toThrow(/inside a cut/);
+		expect(state.cues).toEqual([]);
 	});
 
 	it("rejects a cue that starts in a cut or crosses one", () => {
@@ -174,6 +237,22 @@ describe("captions.update and captions.remove", () => {
 			run("captions.update", { id: "a", startMs: 500, endMs: 2500 }, context),
 		).toThrow(/overlap/);
 		expect(state.cues).toBe(cues);
+	});
+
+	it("edits the text of a cue even when two other cues already overlap", () => {
+		const overlapping = [
+			{ id: "a", startMs: 0, endMs: 1500, text: "one" },
+			{ id: "b", startMs: 1000, endMs: 3000, text: "two" },
+			{ id: "c", startMs: 5000, endMs: 6000, text: "three" },
+		];
+		const { state, context } = makeContext({ cues: overlapping });
+		run("captions.update", { id: "c", text: "trois" }, context);
+		expect(state.cues.find((cue) => cue.id === "c")?.text).toBe("trois");
+		run("captions.update", { id: "c", startMs: 7000, endMs: 8000 }, context);
+		expect(state.cues.find((cue) => cue.id === "c")?.startMs).toBe(7000);
+		expect(() =>
+			run("captions.update", { id: "c", startMs: 2000, endMs: 5500 }, context),
+		).toThrow(/overlap/);
 	});
 
 	it("removes one cue and clears its selection, or removes all", () => {
@@ -225,6 +304,19 @@ describe("captions.style and captions.animation", () => {
 		[{ fontSize: 73 }, /from 16 to 72/],
 		[{ maxRows: 1.5 }, /whole number/],
 		[{ backgroundOpacity: 1.1 }, /from 0 to 1/],
+		[{ backgroundOpacity: -0.1 }, /from 0 to 1/],
+		[{ bottomOffset: -1 }, /from 0 to 30/],
+		[{ bottomOffset: 31 }, /from 0 to 30/],
+		[{ maxWidth: 39 }, /from 40 to 95/],
+		[{ maxWidth: 96 }, /from 40 to 95/],
+		[{ maxRows: 0 }, /from 1 to 4/],
+		[{ maxRows: 5 }, /from 1 to 4/],
+		[{ boxRadius: 41 }, /from 0 to 40/],
+		[{ boxRadius: -1 }, /from 0 to 40/],
+		[{ inactiveTextColor: "#12" }, /hex colour/],
+		[{ textColor: 5 }, /hex colour/],
+		[{ enabled: "yes" }, /true or false/],
+		[{ fontSize: 40, boxRadius: 99 }, /from 0 to 40/],
 		[{ textColor: "white" }, /hex colour/],
 		[{ fontFamily: "Comic Sans" }, /not a caption style/],
 		[{ fontSize: Number.NaN }, /must be a number/],
@@ -272,6 +364,39 @@ describe("captions.generate from scenes", () => {
 		expect(state.settings.enabled).toBe(true);
 	});
 
+	it("ignores scenes that start before the recording or after its end", async () => {
+		stubApi({
+			getAgentActivity: vi.fn().mockResolvedValue(
+				log([
+					{ startMs: -500, endMs: 1000, failed: false, title: "Before" },
+					{ startMs: 2000, endMs: 3000, failed: false, title: "Inside" },
+					{ startMs: 10000, endMs: 12000, failed: false, title: "After" },
+				]),
+			),
+		});
+		const { state, context } = makeContext();
+		await run("captions.generate", { from: "scenes" }, context);
+		expect(state.cues.map((cue) => cue.text)).toEqual(["Inside"]);
+	});
+
+	it("drops scenes with no length or no end time instead of writing broken cues", async () => {
+		stubApi({
+			getAgentActivity: vi.fn().mockResolvedValue(
+				log([
+					{ startMs: 1000, endMs: 2000, failed: false, title: "Twice" },
+					{ startMs: 1000, endMs: 3000, failed: false, title: "Twice again" },
+					{ startMs: 5000, failed: false, title: "No end" },
+					{ startMs: 6000, endMs: 6000, failed: false, title: "Instant" },
+				]),
+			),
+		});
+		const { state, context } = makeContext();
+		await run("captions.generate", { from: "scenes" }, context);
+		expect(state.cues.map((cue) => [cue.text, cue.startMs, cue.endMs])).toEqual([
+			["Twice again", 1000, 3000],
+		]);
+	});
+
 	it("fails with a reason when there is no scene list or nothing to caption", async () => {
 		const { state, context } = makeContext();
 		stubApi({ getAgentActivity: vi.fn().mockResolvedValue({ success: true, log: null }) });
@@ -313,10 +438,10 @@ describe("captions.generate from audio", () => {
 		);
 	});
 
-	it("rejects a timeout outside its bounds", async () => {
+	it.each([5, 31 * 60 * 1000])("rejects a timeout of %d ms outside its bounds", async (ms) => {
 		const { context } = makeContext();
 		await expect(
-			run("captions.generate", { from: "audio", timeoutMs: 5 }, context),
+			run("captions.generate", { from: "audio", timeoutMs: ms }, context),
 		).rejects.toThrow(/timeoutMs/);
 	});
 
@@ -403,5 +528,22 @@ describe("captions.generate from audio", () => {
 		await expect(run("captions.generate", { from: "scenes" }, context)).rejects.toThrow(
 			/no scene list/,
 		);
+	});
+
+	it("writes nothing when the editor loaded another recording while it ran", () => {
+		const { state, context } = makeContext();
+		const moved = {
+			...context,
+			assertSameRecording: () => {
+				throw new Error("The editor loaded a different recording while this was running.");
+			},
+		} as unknown as EditorOpContext;
+		expect(() =>
+			captionsOps["captions.set"](
+				{ cues: [{ startMs: 0, endMs: 1000, text: "Open payroll" }] },
+				moved,
+			),
+		).toThrow(/different recording/);
+		expect(state.cues).toEqual([]);
 	});
 });
