@@ -300,6 +300,26 @@ export function validateProjectData(candidate: unknown): candidate is EditorProj
 	return true;
 }
 
+function normalizeAudioDuck(value: unknown) {
+	if (!value || typeof value !== "object") return undefined;
+	const duck = value as { level?: unknown; ranges?: unknown };
+	if (!isFiniteNumber(duck.level) || !Array.isArray(duck.ranges)) return undefined;
+	const ranges = duck.ranges
+		.map((range) => range as { startMs?: unknown; endMs?: unknown })
+		.filter(
+			(range) =>
+				isFiniteNumber(range.startMs) &&
+				isFiniteNumber(range.endMs) &&
+				(range.endMs as number) > (range.startMs as number),
+		)
+		.map((range) => ({
+			startMs: Math.max(0, Math.round(range.startMs as number)),
+			endMs: Math.max(0, Math.round(range.endMs as number)),
+		}));
+	if (ranges.length === 0) return undefined;
+	return { level: clamp(duck.level, 0, 1), ranges };
+}
+
 export function normalizeProjectEditor(editor: Partial<ProjectEditorState>): ProjectEditorState {
 	const validAspectRatios = new Set<AspectRatio>(ASPECT_RATIOS);
 	const legacyMotionBlurEnabled = (editor as Partial<{ motionBlurEnabled: boolean }>)
@@ -545,7 +565,8 @@ export function normalizeProjectEditor(editor: Partial<ProjectEditorState>): Pro
 						type:
 							region.type === "image" ||
 							region.type === "figure" ||
-							region.type === "blur"
+							region.type === "blur" ||
+							region.type === "highlight"
 								? region.type
 								: "text",
 						content: typeof region.content === "string" ? region.content : "",
@@ -598,6 +619,10 @@ export function normalizeProjectEditor(editor: Partial<ProjectEditorState>): Pro
 						blurColor:
 							typeof region.blurColor === "string" ? region.blurColor : undefined,
 						space: region.space === "screen" ? "screen" : undefined,
+						highlightDim:
+							typeof region.highlightDim === "number"
+								? region.highlightDim
+								: undefined,
 						trackIndex: isFiniteNumber(region.trackIndex)
 							? Math.max(0, Math.floor(region.trackIndex))
 							: 0,
@@ -632,6 +657,13 @@ export function normalizeProjectEditor(editor: Partial<ProjectEditorState>): Pro
 						trackIndex: isFiniteNumber(region.trackIndex)
 							? Math.max(0, Math.floor(region.trackIndex))
 							: 0,
+						fadeInMs: isFiniteNumber(region.fadeInMs)
+							? Math.max(0, Math.round(region.fadeInMs))
+							: undefined,
+						fadeOutMs: isFiniteNumber(region.fadeOutMs)
+							? Math.max(0, Math.round(region.fadeOutMs))
+							: undefined,
+						duck: normalizeAudioDuck(region.duck),
 					};
 				})
 		: [];

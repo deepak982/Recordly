@@ -6,7 +6,10 @@ import {
 	BLUR_ANNOTATION_STRENGTH,
 	DEFAULT_ANNOTATION_STYLE,
 	DEFAULT_FIGURE_DATA,
+	DEFAULT_HIGHLIGHT_DIM,
 	getTimelineDurationMs,
+	MAX_HIGHLIGHT_DIM,
+	MIN_HIGHLIGHT_DIM,
 } from "../../types";
 import { midpointMs, requirePreviewFlag, withPreview } from "./previewAfterEdit";
 import {
@@ -18,7 +21,8 @@ import {
 	requireObject,
 } from "./types";
 
-const KINDS: AnnotationType[] = ["text", "image", "figure", "blur"];
+const KINDS: AnnotationType[] = ["text", "image", "figure", "blur", "highlight"];
+const ALIGNS = ["left", "center", "right"] as const;
 const ARROWS: ArrowDirection[] = [
 	"up",
 	"down",
@@ -30,15 +34,57 @@ const ARROWS: ArrowDirection[] = [
 	"down-left",
 ];
 const KIND_FIELDS: Record<AnnotationType, string[]> = {
-	text: ["text", "fontSize", "color"],
+	text: ["text", "fontSize", "color", "backgroundColor", "textAlign"],
 	image: ["image"],
 	figure: ["arrowDirection", "color", "strokeWidth"],
 	blur: ["strength", "blurColor"],
+	highlight: ["dim"],
 };
+
+const PLATE_TEXT_PRESETS: Record<string, Record<string, unknown>> = {
+	lower_third: {
+		x: 5,
+		y: 80,
+		width: 50,
+		height: 12,
+		space: "screen",
+		fontSize: 36,
+		color: "#FFFFFF",
+		backgroundColor: "rgba(10, 10, 10, 0.88)",
+		textAlign: "left",
+	},
+	callout: {
+		width: 24,
+		height: 8,
+		space: "frame",
+		fontSize: 26,
+		color: "#111111",
+		backgroundColor: "#FFD60A",
+		textAlign: "center",
+	},
+};
+const PRESET_NAMES = Object.keys(PLATE_TEXT_PRESETS);
+
+function resolvePreset(args: Record<string, unknown>, op: string) {
+	if (args.preset === undefined) return args;
+	if (typeof args.preset !== "string" || !PLATE_TEXT_PRESETS[args.preset]) {
+		throw new Error(
+			`${op}: preset must be exactly one of ${PRESET_NAMES.join(", ")}; got ${JSON.stringify(args.preset)}.`,
+		);
+	}
+	if (args.kind !== undefined && args.kind !== "text") {
+		throw new Error(
+			`${op}: preset "${args.preset}" styles a text annotation, not a ${args.kind}.`,
+		);
+	}
+	const { preset: _preset, ...explicit } = args;
+	const given = Object.fromEntries(Object.entries(explicit).filter(([, v]) => v !== undefined));
+	return { ...PLATE_TEXT_PRESETS[args.preset], ...given, kind: "text" };
+}
 const ALL_KIND_FIELDS = [...new Set(Object.values(KIND_FIELDS).flat())];
 const SPACES: AnnotationSpace[] = ["frame", "screen"];
 const GEOMETRY = ["startMs", "endMs", "x", "y", "width", "height", "trackIndex", "space"];
-const ADD_FIELDS = ["kind", "preview", ...GEOMETRY, ...ALL_KIND_FIELDS];
+const ADD_FIELDS = ["kind", "preset", "preview", ...GEOMETRY, ...ALL_KIND_FIELDS];
 const MIN_RENDERED_MS = 67;
 
 function optionalNumber(value: unknown, field: string) {
@@ -122,6 +168,25 @@ function checkKindFields(region: AnnotationRegion, op: string) {
 			`${op}: a blur cannot use space "screen". It must sit on the zoomed picture to track what it hides, so use space "frame".`,
 		);
 	}
+	if (region.type === "highlight") {
+		if (region.space === "screen") {
+			throw new Error(
+				`${op}: a highlight cannot use space "screen". It points at something in the picture, so it must follow the zoom; use space "frame".`,
+			);
+		}
+		const dim = region.highlightDim;
+		if (dim !== undefined && !(dim >= MIN_HIGHLIGHT_DIM && dim <= MAX_HIGHLIGHT_DIM)) {
+			throw new Error(
+				`${op}: dim must be between ${MIN_HIGHLIGHT_DIM} and ${MAX_HIGHLIGHT_DIM} (the share of the surroundings that is darkened).`,
+			);
+		}
+		const { x, y } = region.position;
+		if (x <= 0 && y <= 0 && x + region.size.width >= 100 && y + region.size.height >= 100) {
+			throw new Error(
+				`${op}: this highlight covers the whole frame, so it would dim nothing. Give it a rectangle smaller than the frame.`,
+			);
+		}
+	}
 	const intensity = region.blurIntensity;
 	if (region.type === "blur" && intensity !== undefined && (intensity < 1 || intensity > 100)) {
 		throw new Error(`${op}: strength must be between 1 and 100.`);
@@ -151,8 +216,21 @@ function applyKindFields(region: AnnotationRegion, args: Record<string, unknown>
 		next.imageContent = image;
 		next.content = image;
 	}
-	if (args.fontSize !== undefined || (args.color !== undefined && region.type === "text")) {
+	if (
+		args.fontSize !== undefined ||
+		args.backgroundColor !== undefined ||
+		args.textAlign !== undefined ||
+		(args.color !== undefined && region.type === "text")
+	) {
 		next.style = { ...next.style };
+		if (args.backgroundColor !== undefined)
+			next.style.backgroundColor = requireString(args.backgroundColor, "backgroundColor");
+		if (args.textAlign !== undefined) {
+			if (!ALIGNS.includes(args.textAlign as (typeof ALIGNS)[number])) {
+				throw new Error(`textAlign must be one of ${ALIGNS.join(", ")}.`);
+			}
+			next.style.textAlign = args.textAlign as (typeof ALIGNS)[number];
+		}
 		if (args.fontSize !== undefined)
 			next.style.fontSize = requireFiniteNumber(args.fontSize, "fontSize");
 		if (args.color !== undefined) next.style.color = requireString(args.color, "color");
@@ -177,7 +255,26 @@ function applyKindFields(region: AnnotationRegion, args: Record<string, unknown>
 		if (args.blurColor !== undefined)
 			next.blurColor = requireString(args.blurColor, "blurColor");
 	}
+	if (region.type === "highlight" && args.dim !== undefined) {
+		next.highlightDim = requireFiniteNumber(args.dim, "dim");
+	}
 	return next;
+}
+
+function checkHighlightOverlap(region: AnnotationRegion, context: EditorOpContext, op: string) {
+	if (region.type !== "highlight") return;
+	const clash = context.timeline.annotationRegions.find(
+		(other) =>
+			other.type === "highlight" &&
+			other.id !== region.id &&
+			other.startMs < region.endMs &&
+			region.startMs < other.endMs,
+	);
+	if (clash) {
+		throw new Error(
+			`${op}: highlight "${clash.id}" already spotlights ${clash.startMs}-${clash.endMs} ms. Two spotlights at once would dim each other's rectangle, so keep them one after another.`,
+		);
+	}
 }
 
 function applyGeometry(region: AnnotationRegion, args: Record<string, unknown>) {
@@ -226,8 +323,9 @@ function annotationMoment(region: AnnotationRegion, context: EditorOpContext) {
 
 export const annotationsOps: EditorOpMap = {
 	"annotate.add": (payload, context) => {
-		const args = requireObject(payload, "annotate.add");
-		rejectUnknown(args, ADD_FIELDS, "annotate.add");
+		const raw = requireObject(payload, "annotate.add");
+		rejectUnknown(raw, ADD_FIELDS, "annotate.add");
+		const args = resolvePreset(raw, "annotate.add");
 		const kind = args.kind as AnnotationType;
 		if (!KINDS.includes(kind)) {
 			throw new Error(`annotate.add: kind must be one of ${KINDS.join(", ")}.`);
@@ -246,7 +344,7 @@ export const annotationsOps: EditorOpMap = {
 			position: { x: 0, y: 0 },
 			size: { width: 0, height: 0 },
 			style:
-				kind === "blur"
+				kind === "blur" || kind === "highlight"
 					? { ...DEFAULT_ANNOTATION_STYLE, borderRadius: 0 }
 					: { ...DEFAULT_ANNOTATION_STYLE },
 			zIndex: 0,
@@ -254,10 +352,12 @@ export const annotationsOps: EditorOpMap = {
 		};
 		if (kind === "figure") base.figureData = { ...DEFAULT_FIGURE_DATA };
 		if (kind === "blur") base.blurIntensity = BLUR_ANNOTATION_STRENGTH;
+		if (kind === "highlight") base.highlightDim = DEFAULT_HIGHLIGHT_DIM;
 		const draft = applyKindFields(applyGeometry(base, args), args);
 		checkFrame(draft, context, "annotate.add");
 		checkRenderedLength(args, draft, "annotate.add");
 		checkKindFields(draft, "annotate.add");
+		checkHighlightOverlap(draft, context, "annotate.add");
 		const region: AnnotationRegion = {
 			...draft,
 			id: nextId(context.ids.annotation, "annotation"),
@@ -301,6 +401,7 @@ export const annotationsOps: EditorOpMap = {
 		checkFrame(region, context, "annotate.update");
 		checkRenderedLength(args, region, "annotate.update");
 		checkKindFields(region, "annotate.update");
+		checkHighlightOverlap(region, context, "annotate.update");
 		context.timeline.setAnnotationRegions((current) =>
 			current.map((candidate) => (candidate.id === region.id ? region : candidate)),
 		);

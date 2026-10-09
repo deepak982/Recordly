@@ -5,6 +5,7 @@ import {
 	BASE_PREVIEW_WIDTH,
 	BLUR_ANNOTATION_STRENGTH,
 	type CropRegion,
+	DEFAULT_HIGHLIGHT_DIM,
 	type Padding,
 } from "@/components/video-editor/types";
 import { computePaddedLayout } from "@/components/video-editor/videoPlayback/layoutUtils";
@@ -495,6 +496,23 @@ export async function renderAnnotations(
 				}
 				break;
 
+			case "highlight": {
+				const left = Math.min(Math.max(Math.round(x), 0), canvasWidth);
+				const top = Math.min(Math.max(Math.round(y), 0), canvasHeight);
+				const right = Math.min(Math.max(Math.round(x + width), left), canvasWidth);
+				const bottom = Math.min(Math.max(Math.round(y + height), top), canvasHeight);
+
+				ctx.save();
+				ctx.fillStyle = "#000000";
+				ctx.globalAlpha = annotation.highlightDim ?? DEFAULT_HIGHLIGHT_DIM;
+				ctx.fillRect(0, 0, canvasWidth, top);
+				ctx.fillRect(0, bottom, canvasWidth, canvasHeight - bottom);
+				ctx.fillRect(0, top, left, bottom - top);
+				ctx.fillRect(right, top, canvasWidth - right, bottom - top);
+				ctx.restore();
+				break;
+			}
+
 			case "blur": {
 				const blurStrength =
 					(annotation.blurIntensity ?? BLUR_ANNOTATION_STRENGTH) * effectiveScaleFactor;
@@ -588,6 +606,7 @@ export async function renderAnnotationToCanvas(
 			);
 			break;
 		case "blur":
+		case "highlight":
 			// Blur annotations must sample already-rendered scene pixels,
 			// so they cannot be rasterized as standalone sprites.
 			return null;

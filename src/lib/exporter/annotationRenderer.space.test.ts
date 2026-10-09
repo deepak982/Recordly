@@ -517,3 +517,112 @@ describe("both renderers read annotation geometry from one place", () => {
 		expect(text).not.toContain("BASE_PREVIEW_HEIGHT");
 	});
 });
+
+function highlightAnnotation(): AnnotationRegion {
+	return {
+		id: "spot",
+		startMs: 0,
+		endMs: 1000,
+		type: "highlight",
+		content: "",
+		position: { x: 40, y: 40 },
+		size: { width: 20, height: 20 },
+		style: { ...DEFAULT_ANNOTATION_STYLE },
+		zIndex: 1,
+		highlightDim: 0.5,
+	};
+}
+
+expect.extend({
+	toBeWithin(received: number, expected: number) {
+		return {
+			pass: Math.abs(received - expected) <= 1,
+			message: () => `expected ${received} to be within 1 of ${expected}`,
+		};
+	},
+});
+
+declare module "vitest" {
+	interface Assertion {
+		toBeWithin(expected: number): void;
+	}
+}
+
+describe("highlight spotlight", () => {
+	const config = lookConfig(1280, 720);
+
+	async function dimmed(dim: number | undefined, transform = NO_ZOOM) {
+		const raster = createRasterCanvas(config.width, config.height);
+		raster.ctx.fillStyle = "#FFFFFF";
+		raster.ctx.fillRect(0, 0, config.width, config.height);
+		await renderAnnotations(
+			raster.ctx,
+			[{ ...highlightAnnotation(), highlightDim: dim }],
+			config.width,
+			config.height,
+			500,
+			getAnnotationScaleFactor(config),
+			undefined,
+			transform,
+			frameRectFor(config),
+		);
+		return raster;
+	}
+
+	it("darkens everything but the rectangle", async () => {
+		const frame = frameRectFor(config);
+		const { pixelAt } = await dimmed(0.5);
+		const inside = [frame.x + frame.width * 0.5, frame.y + frame.height * 0.5];
+		expect(pixelAt(inside[0], inside[1])).toEqual([255, 255, 255, 255]);
+		expect(pixelAt(2, 2)[0]).toBeWithin(127.5);
+		expect(pixelAt(frame.x + frame.width * 0.9, inside[1])[0]).toBeWithin(127.5);
+		expect(pixelAt(inside[0], frame.y + frame.height * 0.9)[0]).toBeWithin(127.5);
+	});
+
+	it("scales darkness with dim and defaults when unset", async () => {
+		expect((await dimmed(0.9)).pixelAt(2, 2)[0]).toBeWithin(25.5);
+		expect((await dimmed(undefined)).pixelAt(2, 2)[0]).toBeWithin(102);
+	});
+
+	it("follows the zoom and never paints outside the canvas", async () => {
+		const { pixelAt } = await dimmed(0.5, { scale: 2, x: -400, y: -200 });
+		const frame = frameRectFor(config);
+		const cx = (frame.x + frame.width * 0.5) * 2 - 400;
+		const cy = (frame.y + frame.height * 0.5) * 2 - 200;
+		expect(pixelAt(cx, cy)).toEqual([255, 255, 255, 255]);
+		expect(pixelAt(cx + frame.width * 0.4, cy)[0]).toBeWithin(127.5);
+	});
+
+	it("dims the whole canvas when the zoom pushes the rectangle out of view", async () => {
+		const { pixelAt } = await dimmed(0.5, { scale: 4, x: -5000, y: -5000 });
+		expect(pixelAt(640, 360)[0]).toBeWithin(127.5);
+	});
+
+	it("is not rasterized as a sprite, so the export path composites it like a blur", async () => {
+		vi.stubGlobal("document", { createElement: createRasterElement });
+		try {
+			expect(await renderAnnotationToCanvas(highlightAnnotation(), 100, 100)).toBeNull();
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it("draws with a blur at the same moment without disturbing either", async () => {
+		const raster = createRasterCanvas(config.width, config.height);
+		await renderAnnotations(
+			raster.ctx,
+			[
+				highlightAnnotation(),
+				{ ...highlightAnnotation(), id: "b", type: "blur", zIndex: 2, blurIntensity: 5 },
+			],
+			config.width,
+			config.height,
+			500,
+			1,
+			undefined,
+			NO_ZOOM,
+			frameRectFor(config),
+		);
+		expect(raster.pixelAt(2, 2)[3]).toBeGreaterThan(0);
+	});
+});

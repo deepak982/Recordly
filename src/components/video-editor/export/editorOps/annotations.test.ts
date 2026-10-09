@@ -352,3 +352,205 @@ describe("annotate space", () => {
 		expect(updated.space).toBe("screen");
 	});
 });
+
+const spot = { kind: "highlight", startMs: 1000, endMs: 3000, x: 10, y: 20, width: 30, height: 10 };
+const update = (payload: unknown, context: EditorOpContext) =>
+	annotationsOps["annotate.update"](payload, context);
+
+describe("annotate.add highlight", () => {
+	it("creates a frame-space highlight with the default dim", () => {
+		const { state, context } = makeContext();
+		add(spot, context);
+		expect(state.regions[0]).toMatchObject({ type: "highlight", highlightDim: 0.6 });
+		expect(state.regions[0].space ?? "frame").toBe("frame");
+	});
+
+	it("accepts dim exactly at both bounds", () => {
+		const { state, context } = makeContext();
+		add({ ...spot, dim: 0.1 }, context);
+		add({ ...spot, startMs: 4000, endMs: 5000, dim: 0.9 }, context);
+		expect(state.regions.map((r) => r.highlightDim)).toEqual([0.1, 0.9]);
+	});
+
+	it.each([0.09, 0, 0.91, 1, -1, Number.NaN])("refuses dim %s", (dim) => {
+		const { state, context } = makeContext();
+		expect(() => add({ ...spot, dim }, context)).toThrow(/dim must be|finite/);
+		expect(state.regions).toHaveLength(0);
+	});
+
+	it("refuses a rectangle covering the whole frame", () => {
+		const { context } = makeContext();
+		expect(() => add({ ...spot, x: 0, y: 0, width: 100, height: 100 }, context)).toThrow(
+			/dim nothing/,
+		);
+	});
+
+	it("allows a rectangle spanning the full width but not the full height", () => {
+		const { state, context } = makeContext();
+		add({ ...spot, x: 0, y: 40, width: 100, height: 20 }, context);
+		expect(state.regions).toHaveLength(1);
+	});
+
+	it("refuses a zero-size rectangle and one partly off the frame", () => {
+		const { context } = makeContext();
+		expect(() => add({ ...spot, width: 0 }, context)).toThrow(/above 0/);
+		expect(() => add({ ...spot, x: 80, width: 30 }, context)).toThrow(/inside the frame/);
+		expect(() => add({ ...spot, y: -1 }, context)).toThrow(/inside the frame/);
+	});
+
+	it("refuses space screen", () => {
+		const { context } = makeContext();
+		expect(() => add({ ...spot, space: "screen" }, context)).toThrow(
+			/cannot use space "screen"/,
+		);
+	});
+
+	it("refuses fields of other kinds and dim on other kinds", () => {
+		const { context } = makeContext();
+		expect(() => add({ ...spot, text: "x" }, context)).toThrow(/does not apply/);
+		expect(() => add({ ...blur, dim: 0.5 }, context)).toThrow(/does not apply/);
+	});
+
+	it("refuses overlapping highlights, allows back-to-back ones", () => {
+		const { state, context } = makeContext();
+		add(spot, context);
+		expect(() => add({ ...spot, startMs: 2999, endMs: 4000 }, context)).toThrow(
+			/already spotlights/,
+		);
+		add({ ...spot, startMs: 3000, endMs: 4000 }, context);
+		expect(state.regions).toHaveLength(2);
+	});
+
+	it("refuses an update that makes two highlights overlap but lets one move itself", () => {
+		const { context } = makeContext();
+		const first = add(spot, context);
+		const second = add({ ...spot, startMs: 4000, endMs: 5000 }, context);
+		expect(() => update({ id: second.id, startMs: 2000 }, context)).toThrow(
+			/already spotlights/,
+		);
+		expect(() => update({ id: first.id, startMs: 1500 }, context)).not.toThrow();
+	});
+
+	it("coexists with a blur at the same moment", () => {
+		const { state, context } = makeContext();
+		add(blur, context);
+		add(spot, context);
+		expect(state.regions.map((r) => r.type)).toEqual(["blur", "highlight"]);
+	});
+});
+
+describe("annotate.add preset", () => {
+	const times = { startMs: 1000, endMs: 3000 };
+
+	it("lower_third fills a screen-space plate from one name", () => {
+		const { state, context } = makeContext();
+		add({ preset: "lower_third", text: "Ada Lovelace", ...times }, context);
+		expect(state.regions[0]).toMatchObject({
+			type: "text",
+			space: "screen",
+			textContent: "Ada Lovelace",
+			position: { x: 5, y: 80 },
+			size: { width: 50, height: 12 },
+			style: { backgroundColor: "rgba(10, 10, 10, 0.88)", textAlign: "left", fontSize: 36 },
+		});
+	});
+
+	it("callout needs a position because it sits next to something", () => {
+		const { context } = makeContext();
+		expect(() => add({ preset: "callout", text: "Click", ...times }, context)).toThrow(/x/);
+		const { state, context: ok } = makeContext();
+		add({ preset: "callout", text: "Click", x: 40, y: 30, ...times }, ok);
+		expect(state.regions[0]).toMatchObject({
+			space: "frame",
+			position: { x: 40, y: 30 },
+			style: { color: "#111111", backgroundColor: "#FFD60A" },
+		});
+	});
+
+	it("explicit fields win over the preset", () => {
+		const { state, context } = makeContext();
+		add(
+			{ preset: "lower_third", text: "Hi", fontSize: 50, y: 70, space: "frame", ...times },
+			context,
+		);
+		expect(state.regions[0]).toMatchObject({
+			space: "frame",
+			position: { x: 5, y: 70 },
+			style: { fontSize: 50, backgroundColor: "rgba(10, 10, 10, 0.88)" },
+		});
+	});
+
+	it("goes through the same validation as hand-authored values", () => {
+		const { context } = makeContext();
+		expect(() =>
+			add({ preset: "lower_third", text: "Hi", fontSize: 0, ...times }, context),
+		).toThrow(/fontSize must be above 0/);
+		expect(() =>
+			add({ preset: "lower_third", text: "Hi", endMs: 99999, startMs: 0 }, context),
+		).toThrow(/past the end/);
+	});
+
+	it("refuses an unknown name, naming the valid ones", () => {
+		const { context } = makeContext();
+		expect(() => add({ preset: "banner", text: "Hi", ...times }, context)).toThrow(
+			/lower_third, callout/,
+		);
+	});
+
+	it("refuses two presets, and a preset on a non-text kind", () => {
+		const { context } = makeContext();
+		expect(() =>
+			add({ preset: ["lower_third", "callout"], text: "Hi", ...times }, context),
+		).toThrow(/exactly one/);
+		expect(() => add({ ...blur, preset: "lower_third" }, context)).toThrow(/styles a text/);
+	});
+
+	it("refuses empty or missing text", () => {
+		const { state, context } = makeContext();
+		expect(() => add({ preset: "lower_third", text: "", ...times }, context)).toThrow(/text/);
+		expect(() => add({ preset: "lower_third", text: "  ", ...times }, context)).toThrow(/text/);
+		expect(() => add({ preset: "lower_third", ...times }, context)).toThrow(/non-empty text/);
+		expect(state.regions).toHaveLength(0);
+	});
+
+	it("is not accepted by annotate.update", () => {
+		const { context } = makeContext();
+		const { id } = add(
+			{ kind: "text", text: "a", x: 0, y: 0, width: 20, height: 20, ...times },
+			context,
+		);
+		expect(() => update({ id, preset: "callout" }, context)).toThrow(/preset/);
+	});
+
+	it("stays legible over white and over black footage", () => {
+		const luminance = (rgb: number[]) => {
+			const [r, g, b] = rgb.map((c) => {
+				const v = c / 255;
+				return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+			});
+			return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+		};
+		const parse = (css: string) => {
+			const m = /rgba?\(([^)]+)\)/.exec(css);
+			if (m) {
+				const [r, g, b, a = 1] = m[1].split(",").map(Number);
+				return { rgb: [r, g, b], alpha: a };
+			}
+			const n = Number.parseInt(css.slice(1), 16);
+			return { rgb: [n >> 16, (n >> 8) & 255, n & 255], alpha: 1 };
+		};
+		for (const preset of ["lower_third", "callout"]) {
+			const { state, context } = makeContext();
+			add({ preset, text: "Hi", x: 10, y: 10, ...times }, context);
+			const style = state.regions[0].style;
+			const text = parse(style.color).rgb;
+			const plate = parse(style.backgroundColor);
+			expect(plate.alpha).toBeGreaterThanOrEqual(0.85);
+			for (const backdrop of [0, 255]) {
+				const shown = plate.rgb.map((c) => c * plate.alpha + backdrop * (1 - plate.alpha));
+				const [hi, lo] = [luminance(text), luminance(shown)].sort((a, b) => b - a);
+				expect((hi + 0.05) / (lo + 0.05)).toBeGreaterThanOrEqual(7);
+			}
+		}
+	});
+});

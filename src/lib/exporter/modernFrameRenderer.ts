@@ -1422,7 +1422,7 @@ export class FrameRenderer {
 	private hasActiveBlurAnnotations(timeMs: number): boolean {
 		return (this.config.annotationRegions ?? []).some(
 			(annotation) =>
-				annotation.type === "blur" &&
+				(annotation.type === "blur" || annotation.type === "highlight") &&
 				timeMs >= annotation.startMs &&
 				timeMs <= annotation.endMs,
 		);
