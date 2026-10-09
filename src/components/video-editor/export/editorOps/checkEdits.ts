@@ -82,6 +82,32 @@ export function contrastRatio(a: Rgba, b: Rgba) {
 const WHITE: Rgba = { r: 255, g: 255, b: 255, a: 1 };
 const BLACK: Rgba = { r: 0, g: 0, b: 0, a: 1 };
 
+function isPlate(annotation: AnnotationRegion) {
+	if (annotation.type !== "text" || !annotation.style?.fillBox) return false;
+	if ((annotation.textContent ?? annotation.content ?? "").trim()) return false;
+	const fill = parseColor(annotation.style.backgroundColor);
+	return fill !== null && fill.a >= PLATE_MIN_ALPHA;
+}
+
+export function cardSpans(annotations: AnnotationRegion[]) {
+	return annotations.filter(isPlate).map(({ startMs, endMs }) => ({ startMs, endMs }));
+}
+
+function plateBehind(annotation: AnnotationRegion, annotations: AnnotationRegion[]) {
+	return annotations.find(
+		(plate) =>
+			plate !== annotation &&
+			isPlate(plate) &&
+			plate.zIndex < annotation.zIndex &&
+			plate.startMs <= annotation.startMs &&
+			plate.endMs >= annotation.endMs &&
+			plate.position.x <= annotation.position.x &&
+			plate.position.y <= annotation.position.y &&
+			plate.position.x + plate.size.width >= annotation.position.x + annotation.size.width &&
+			plate.position.y + plate.size.height >= annotation.position.y + annotation.size.height,
+	);
+}
+
 const CHECKS = [
 	"empty_or_inverted_regions",
 	"zoom_focus_off_frame",
@@ -265,14 +291,17 @@ export function lintEdits(context: EditorOpContext): {
 		}
 		if (
 			annotation.type === "text" &&
-			!(annotation.textContent ?? annotation.content ?? "").trim()
+			!(annotation.textContent ?? annotation.content ?? "").trim() &&
+			!isPlate(annotation)
 		) {
 			add({
 				severity: "warning",
 				kind: "annotation_empty_text",
 				subject,
 				atMs: annotation.startMs,
-				message: `${subject} is a text annotation with no text.`,
+				message: annotation.style?.fillBox
+					? `${subject} is a text annotation with no text and no opaque background colour, so it fills the frame with nothing. Set a backgroundColor to make it a card plate, or remove it.`
+					: `${subject} is a text annotation with no text.`,
 			});
 		}
 		if (annotation.space === "screen") continue;
@@ -315,6 +344,11 @@ export function lintEdits(context: EditorOpContext): {
 
 	for (const annotation of timeline.annotationRegions) {
 		if (annotation.type !== "text" && annotation.type !== "figure") continue;
+		if (
+			annotation.type === "text" &&
+			!(annotation.textContent ?? annotation.content ?? "").trim()
+		)
+			continue;
 		const { position, size } = annotation;
 		if (size.width <= 0 || size.height <= 0) continue;
 		if (
@@ -336,11 +370,16 @@ export function lintEdits(context: EditorOpContext): {
 
 		const plate =
 			annotation.type === "text" ? parseColor(annotation.style?.backgroundColor) : null;
+		const card = plateBehind(annotation, timeline.annotationRegions);
+		const cardFill = card ? parseColor(card.style.backgroundColor) : null;
 		let background: Rgba | null = null;
 		let backgroundName = "";
 		if (plate && plate.a >= PLATE_MIN_ALPHA) {
 			background = plate;
 			backgroundName = `its own background ${annotation.style.backgroundColor}`;
+		} else if (card && cardFill) {
+			background = cardFill;
+			backgroundName = `the card background ${card.style.backgroundColor}`;
 		} else if (annotation.space === "screen") {
 			const left = (position.x / 100) * BASE_PREVIEW_WIDTH;
 			const top = (position.y / 100) * BASE_PREVIEW_HEIGHT;

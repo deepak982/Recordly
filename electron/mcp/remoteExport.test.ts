@@ -534,7 +534,7 @@ describe("scale, fps and posterAtMs", () => {
 			status: "done",
 			warnings: ["14.0 s of frames are a single flat colour with no video content (38.0 s)"],
 		});
-		expect(verify).toHaveBeenCalledWith(out, info.durationMs, undefined);
+		expect(verify).toHaveBeenCalledWith(out, info.durationMs, undefined, undefined);
 	});
 
 	it("says nothing extra when every sampled frame has a picture", async () => {
@@ -765,7 +765,7 @@ describe("fromMs and toMs", () => {
 			warnings: ["2.0 s of frames are black (1.0 s)"],
 		});
 		expect(lastRequest().fromMs).toBe(0);
-		expect(verify).toHaveBeenCalledWith(out, info.durationMs, undefined);
+		expect(verify).toHaveBeenCalledWith(out, info.durationMs, undefined, undefined);
 	});
 
 	it("does not call a range over the whole timeline a fragment", async () => {

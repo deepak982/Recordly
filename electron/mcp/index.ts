@@ -69,6 +69,17 @@ export function setupMcpServer({ isDev, remote }: { isDev: boolean; remote: Remo
 		loadScenes: async (signal) =>
 			(await editor.requestEditor<{ scenes: unknown }>("get_state", undefined, { signal }))
 				.scenes as never,
+		loadCardSpans: async (signal) => {
+			const state = await editor.requestEditor<{ annotations?: unknown }>(
+				"get_state",
+				undefined,
+				{ signal },
+			);
+			const { cardSpans } = await import(
+				"../../src/components/video-editor/export/editorOps/checkEdits"
+			);
+			return cardSpans((state.annotations ?? []) as never);
+		},
 	});
 	const recordings = createRemoteRecordings();
 	const agent = createAgentControl(remote);

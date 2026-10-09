@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
 	BLACK_LUMA_MAX,
+	CARD_MARK_SPREAD_MIN,
 	FLAT_LUMA_SPREAD_MAX,
 	MAX_VERIFY_SAMPLES,
 	verifyExportedFrames,
@@ -28,6 +29,12 @@ const stats = (ylow: number, yhigh: number) =>
 		`frame:0 pts:0\nlavfi.signalstats.YLOW=${ylow}\nlavfi.signalstats.YHIGH=${yhigh}\n`,
 	);
 const REAL = stats(30, 200);
+const withExtremes = (ylow: number, yhigh: number, ymin: number, ymax: number) =>
+	Buffer.from(
+		`lavfi.signalstats.YMIN=${ymin}\nlavfi.signalstats.YLOW=${ylow}\nlavfi.signalstats.YHIGH=${yhigh}\nlavfi.signalstats.YMAX=${ymax}\n`,
+	);
+const CARD_FRAME = withExtremes(16, 16, 16, 235);
+const BLANK_FRAME = withExtremes(16, 16, 16, 18);
 
 function fake(frameAt: (seconds: number) => Buffer | Error) {
 	const calls: string[][] = [];
@@ -150,5 +157,76 @@ describe("verifyExportedFrames", () => {
 		const result = await run(runFfmpeg, { durationMs: 300 });
 		expect(result.checked).toBe(1);
 		expect(calls[0][calls[0].indexOf("-ss") + 1]).toBe("0.150");
+	});
+	describe("card spans", () => {
+		const cardAt = { startMs: 0, endMs: 10_000 };
+		const early = (s: number) => s < 10;
+
+		it("accepts text on a plain plate inside a card span, and reports nothing", async () => {
+			const { runFfmpeg } = fake((s) => (early(s) ? CARD_FRAME : REAL));
+			const result = await run(runFfmpeg, { cardSpans: [cardAt] });
+			expect(result).toEqual({ checked: 8, emptyAtMs: [], warnings: [] });
+		});
+
+		it("still reports the same frames when no span is given", async () => {
+			const { runFfmpeg } = fake((s) => (early(s) ? CARD_FRAME : REAL));
+			const result = await run(runFfmpeg);
+			expect(result.emptyAtMs.length).toBeGreaterThan(0);
+			expect(result.warnings[0]).toMatch(/completely black/);
+		});
+
+		it("still reports a plain frame outside the span", async () => {
+			const { runFfmpeg } = fake((s) => (early(s) ? CARD_FRAME : s > 70 ? CARD_FRAME : REAL));
+			const result = await run(runFfmpeg, { cardSpans: [cardAt] });
+			expect(result.emptyAtMs.every((ms) => ms > 70_000)).toBe(true);
+			expect(result.emptyAtMs.length).toBeGreaterThan(0);
+		});
+
+		it("still reports a genuinely blank frame inside a card span", async () => {
+			const { runFfmpeg } = fake((s) => (early(s) ? BLANK_FRAME : REAL));
+			const result = await run(runFfmpeg, { cardSpans: [cardAt] });
+			expect(result.emptyAtMs.length).toBeGreaterThan(0);
+			expect(result.warnings[0]).toMatch(/completely black/);
+		});
+
+		it("needs the marks to be real: spread just under the minimum stays blank, at it passes", async () => {
+			const under = withExtremes(16, 16, 16, 16 + CARD_MARK_SPREAD_MIN - 1);
+			const at = withExtremes(16, 16, 16, 16 + CARD_MARK_SPREAD_MIN);
+			expect(
+				(
+					await run(fake(() => under).runFfmpeg, {
+						cardSpans: [{ startMs: 0, endMs: 80_000 }],
+					})
+				).emptyAtMs,
+			).toHaveLength(8);
+			expect(
+				(
+					await run(fake(() => at).runFfmpeg, {
+						cardSpans: [{ startMs: 0, endMs: 80_000 }],
+					})
+				).emptyAtMs,
+			).toEqual([]);
+		});
+
+		it("ignores spans when ffmpeg gave no min/max, so old output is judged as before", async () => {
+			const { runFfmpeg } = fake(() => stats(16, 16));
+			const result = await run(runFfmpeg, { cardSpans: [{ startMs: 0, endMs: 80_000 }] });
+			expect(result.emptyAtMs).toHaveLength(8);
+		});
+
+		it("treats the span end as exclusive", async () => {
+			const { runFfmpeg } = fake(() => CARD_FRAME);
+			const over = { durationMs: 1000, samples: 1 };
+			const result = await run(runFfmpeg, {
+				...over,
+				cardSpans: [{ startMs: 0, endMs: 500 }],
+			});
+			expect(result.emptyAtMs).toEqual([500]);
+			const inside = await run(runFfmpeg, {
+				...over,
+				cardSpans: [{ startMs: 0, endMs: 501 }],
+			});
+			expect(inside.emptyAtMs).toEqual([]);
+		});
 	});
 });

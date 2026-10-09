@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+	cardSpans,
 	checkEditsOps,
 	contrastRatio,
 	lintEdits,
@@ -478,6 +479,131 @@ describe("check_edits", () => {
 			);
 			expect(result.problems.every((p) => p.severity === "warning")).toBe(true);
 			expect(result.checked).toContain("low_contrast_annotation");
+		});
+	});
+	describe("title and end cards", () => {
+		const plate = (patch: Record<string, unknown> = {}, style: Record<string, unknown> = {}) =>
+			annotation({
+				id: "plate",
+				content: "",
+				zIndex: 1,
+				space: "screen",
+				position: { x: 0, y: 0 },
+				size: { width: 100, height: 100 },
+				style: { fillBox: true, backgroundColor: "#000000", color: "#ffffff", ...style },
+				...patch,
+			});
+		const heading = (color = "#ffffff", patch: Record<string, unknown> = {}) =>
+			annotation({
+				id: "head",
+				content: "Welcome",
+				zIndex: 2,
+				space: "screen",
+				position: { x: 10, y: 38 },
+				size: { width: 80, height: 18 },
+				style: { color },
+				...patch,
+			});
+		const problems = (regions: unknown[]) =>
+			lintEdits(make({ annotationRegions: regions })).problems.map(
+				(p) => `${p.kind}:${p.subject}`,
+			);
+
+		it("is quiet for a correct card: plate, white heading, white subtitle", () => {
+			const sub = heading("#ffffff", { id: "sub", position: { x: 15, y: 57 } });
+			expect(problems([plate(), heading(), sub])).toEqual([]);
+		});
+
+		it("still warns for a heading black on its own black plate, naming the card background", () => {
+			const found = lintEdits(
+				make({ annotationRegions: [plate(), heading("#000000")] }),
+			).problems;
+			expect(found).toHaveLength(1);
+			expect(found[0]).toMatchObject({
+				kind: "low_contrast_annotation",
+				subject: "annotation head",
+			});
+			expect(found[0].message).toContain("the card background #000000");
+			expect(found[0].message).not.toContain("cannot sample");
+		});
+
+		it("uses the real plate colour: white heading on a white plate warns, black passes", () => {
+			const white = { backgroundColor: "#ffffff" };
+			expect(problems([plate({}, white), heading("#ffffff")])).toEqual([
+				"low_contrast_annotation:annotation head",
+			]);
+			expect(problems([plate({}, white), heading("#000000")])).toEqual([]);
+		});
+
+		it("treats a fillBox plate with no background colour as an empty annotation, with its own message", () => {
+			const bare = plate({}, { backgroundColor: undefined });
+			const found = lintEdits(make({ annotationRegions: [bare] })).problems;
+			expect(found.map((p) => p.kind)).toEqual(["annotation_empty_text"]);
+			expect(found[0].message).toContain("no opaque background colour");
+			expect(problems([plate({}, { backgroundColor: "transparent" })])).toEqual([
+				"annotation_empty_text:annotation plate",
+			]);
+			expect(problems([plate({}, { backgroundColor: "rgba(0,0,0,0.2)" })])).toEqual([
+				"annotation_empty_text:annotation plate",
+			]);
+		});
+
+		it("still warns for a plain empty-text annotation that is not a plate", () => {
+			expect(problems([annotation({ content: "" })])).toEqual([
+				"annotation_empty_text:annotation a1",
+			]);
+			expect(problems([plate({}, { fillBox: false })])).toEqual([
+				"annotation_empty_text:annotation plate",
+			]);
+		});
+
+		it("does not let a plate vouch for text that is outside it in time or space", () => {
+			const short = plate({ startMs: 1000, endMs: 2000 });
+			expect(problems([short, heading("#000000")])).toEqual([
+				"low_contrast_annotation:annotation head",
+			]);
+			const corner = plate({ size: { width: 50, height: 50 } });
+			expect(problems([corner, heading("#ffffff")])).toEqual([
+				"low_contrast_annotation:annotation head",
+			]);
+		});
+
+		it("does not let a plate drawn above the text vouch for it", () => {
+			expect(problems([plate({ zIndex: 5 }), heading("#ffffff")])).toEqual([
+				"low_contrast_annotation:annotation head",
+			]);
+		});
+
+		it("flags only the ordinary overlay when a card sits beside one", () => {
+			const overlay = annotation({
+				id: "late",
+				startMs: 5000,
+				endMs: 6000,
+				style: { color: "#fff" },
+			});
+			expect(problems([plate(), heading(), overlay])).toEqual([
+				"low_contrast_annotation:annotation late",
+			]);
+		});
+
+		it("checks two cards each against its own plate", () => {
+			const second = [
+				plate({ id: "plate2", startMs: 6000, endMs: 8000 }, { backgroundColor: "#ffffff" }),
+				heading("#ffffff", { id: "head2", startMs: 6000, endMs: 8000 }),
+			];
+			expect(problems([plate(), heading(), ...second])).toEqual([
+				"low_contrast_annotation:annotation head2",
+			]);
+		});
+
+		it("reports the span of every plate and nothing for no cards", () => {
+			const regions = [plate(), heading(), plate({ id: "p2", startMs: 6000, endMs: 8000 })];
+			expect(cardSpans(regions as never)).toEqual([
+				{ startMs: 1000, endMs: 3000 },
+				{ startMs: 6000, endMs: 8000 },
+			]);
+			expect(cardSpans([])).toEqual([]);
+			expect(cardSpans([annotation({ content: "" })] as never)).toEqual([]);
 		});
 	});
 });

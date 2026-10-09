@@ -980,6 +980,27 @@ export function buildRecordlyMcpServer(
 					.min(0)
 					.optional()
 					.describe("op set_scene_duration: the scene"),
+				atMs: z
+					.number()
+					.min(0)
+					.optional()
+					.describe(
+						"op freeze: where to hold. op transition: the cut, snapped within 250 ms",
+					),
+				betweenClips: z
+					.number()
+					.int()
+					.min(1)
+					.optional()
+					.describe(
+						"op transition: index of the clip the cut runs into, instead of atMs",
+					),
+				kind: z
+					.enum(["dip"])
+					.optional()
+					.describe(
+						"op transition: dip through black; a crossfade is refused, the export never holds two clips at once",
+					),
 				ms: z.number().min(0).optional().describe("op set_scene_duration"),
 				targetMs: z.number().min(0).optional().describe("op fit"),
 				path: z

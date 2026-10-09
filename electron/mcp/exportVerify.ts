@@ -9,6 +9,7 @@ export const MAX_VERIFY_SAMPLES = 32;
 export const EDGE_SKIP_MS = 200;
 export const BLACK_LUMA_MAX = 20;
 export const FLAT_LUMA_SPREAD_MAX = 3;
+export const CARD_MARK_SPREAD_MIN = 40;
 const PROBE_TIMEOUT_MS = 20_000;
 const FRAME_TIMEOUT_MS = 20_000;
 const DURATION = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/;
@@ -21,7 +22,11 @@ export type ExportVerification = {
 
 type FrameKind = "black" | "flat" | "content";
 
-export function classifyLuma(stats: { ylow: number; yhigh: number }): FrameKind {
+export type CardSpan = { startMs: number; endMs: number };
+
+type LumaStats = { ylow: number; yhigh: number; ymin?: number; ymax?: number };
+
+export function classifyLuma(stats: LumaStats): FrameKind {
 	if (stats.yhigh <= BLACK_LUMA_MAX) return "black";
 	if (stats.yhigh - stats.ylow <= FLAT_LUMA_SPREAD_MAX) return "flat";
 	return "content";
@@ -34,7 +39,12 @@ function parseStats(output: string) {
 	};
 	const ylow = read("YLOW");
 	const yhigh = read("YHIGH");
-	return Number.isFinite(ylow) && Number.isFinite(yhigh) ? { ylow, yhigh } : null;
+	if (!Number.isFinite(ylow) || !Number.isFinite(yhigh)) return null;
+	const ymin = read("YMIN");
+	const ymax = read("YMAX");
+	return Number.isFinite(ymin) && Number.isFinite(ymax)
+		? { ylow, yhigh, ymin, ymax }
+		: { ylow, yhigh };
 }
 
 function sampleTimes(durationMs: number, samples: number) {
@@ -81,6 +91,7 @@ export async function verifyExportedFrames(
 		runFfmpeg: RunFfmpeg;
 		durationMs?: number;
 		samples?: number;
+		cardSpans?: CardSpan[];
 		signal?: AbortSignal;
 	},
 ): Promise<ExportVerification> {
@@ -174,7 +185,16 @@ export async function verifyExportedFrames(
 			continue;
 		}
 		result.checked++;
-		const kind = classifyLuma(stats);
+		let kind = classifyLuma(stats);
+		if (
+			kind !== "content" &&
+			stats.ymin !== undefined &&
+			stats.ymax !== undefined &&
+			stats.ymax - stats.ymin >= CARD_MARK_SPREAD_MIN &&
+			opts.cardSpans?.some((span) => atMs >= span.startMs && atMs < span.endMs)
+		) {
+			kind = "content";
+		}
 		if (kind !== "content") {
 			kinds[kind].push(atMs);
 			result.emptyAtMs.push(atMs);

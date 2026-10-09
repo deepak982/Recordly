@@ -338,10 +338,15 @@ export function buildPostArgs(
 
 const VERIFY_MAX_BUFFER = 16 * 1024 * 1024;
 
+export type CardSpan = { startMs: number; endMs: number };
+
+export type LoadCardSpans = (signal?: AbortSignal) => Promise<CardSpan[]>;
+
 export type VerifyFrames = (
 	filePath: string,
 	durationMs: number | undefined,
 	signal?: AbortSignal,
+	cardSpans?: CardSpan[],
 ) => Promise<{ warnings: string[] }>;
 
 const runFfmpegForStdout: RunFfmpeg = (binary, args, { timeoutMs, signal }) =>
@@ -363,12 +368,13 @@ const runFfmpegForStdout: RunFfmpeg = (binary, args, { timeoutMs, signal }) =>
 		);
 	});
 
-const defaultVerifyFrames: VerifyFrames = (filePath, durationMs, signal) =>
+const defaultVerifyFrames: VerifyFrames = (filePath, durationMs, signal, cardSpans) =>
 	verifyExportedFrames(filePath, {
 		binary: getFfmpegBinaryPath(),
 		runFfmpeg: runFfmpegForStdout,
 		durationMs,
 		signal,
+		cardSpans,
 	});
 
 const defaultRunFfmpeg = (args: string[]) =>
@@ -502,6 +508,7 @@ export function createRemoteExport({
 	probeVideo = defaultProbe,
 	verifyFrames = defaultVerifyFrames,
 	loadScenes,
+	loadCardSpans,
 }: {
 	ipc?: Pick<IpcMain, "on">;
 	recordingsDir?: () => Promise<string>;
@@ -509,6 +516,7 @@ export function createRemoteExport({
 	probeVideo?: ProbeVideo;
 	verifyFrames?: VerifyFrames;
 	loadScenes?: LoadScenes;
+	loadCardSpans?: LoadCardSpans;
 } = {}) {
 	const readyEditors = new Map<WebContents, string>();
 	const watchedEditors = new WeakSet<WebContents>();
@@ -722,8 +730,22 @@ export function createRemoteExport({
 					probeNote: `The file was written but could not be read back: ${(error as Error).message}`,
 				};
 			}
+			let spans: CardSpan[] | undefined;
+			if (loadCardSpans) {
+				try {
+					const fromMs = target.range?.fromMs ?? 0;
+					spans = (await loadCardSpans(signal))
+						.map((span) => ({
+							startMs: span.startMs - fromMs,
+							endMs: span.endMs - fromMs,
+						}))
+						.filter((span) => span.endMs > 0);
+				} catch {
+					spans = undefined;
+				}
+			}
 			try {
-				const checked = await verifyFrames(filePath, info.durationMs, signal);
+				const checked = await verifyFrames(filePath, info.durationMs, signal, spans);
 				return checked.warnings.length > 0 ? { ...info, warnings: checked.warnings } : info;
 			} catch (error) {
 				return {
