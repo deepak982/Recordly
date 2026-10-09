@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { checkEditsOps, lintEdits } from "./checkEdits";
+import {
+	checkEditsOps,
+	contrastRatio,
+	lintEdits,
+	MIN_CONTRAST_RATIO,
+	parseColor,
+} from "./checkEdits";
 import type { EditorOpContext } from "./types";
 
 const whole = [{ id: "c1", startMs: 0, endMs: 10_000, sourceStartMs: 0, speed: 1 }];
@@ -15,6 +21,7 @@ function annotation(patch: Record<string, unknown> = {}) {
 		endMs: 3000,
 		type: "text",
 		content: "Title",
+		style: { color: "#ff0000" },
 		position: { x: 5, y: 5 },
 		size: { width: 20, height: 10 },
 		space: "frame",
@@ -283,6 +290,194 @@ describe("check_edits", () => {
 				}),
 			).problems;
 			expect(problem).toMatchObject({ severity: "warning", kind: "region_past_end" });
+		});
+	});
+
+	describe("low contrast annotation", () => {
+		const low = (context: EditorOpContext) =>
+			lintEdits(context).problems.filter((p) => p.kind === "low_contrast_annotation");
+		const text = (color: string | undefined, patch: Record<string, unknown> = {}) =>
+			annotation({ style: color === undefined ? undefined : { color }, ...patch });
+		const screenOut = {
+			space: "screen",
+			position: { x: 0, y: 0 },
+			size: { width: 10, height: 10 },
+		};
+		const withWallpaper = (wallpaper: string, regions: unknown[], timeline = {}) =>
+			make({ annotationRegions: regions, ...timeline }, { wallpaper, padding: 60 });
+		const grey = (v: number) => `#${v.toString(16).padStart(2, "0").repeat(3)}`;
+
+		it("computes WCAG ratios", () => {
+			const white = parseColor("#fff");
+			const black = parseColor("black");
+			expect(contrastRatio(white!, black!)).toBeCloseTo(21, 5);
+			expect(contrastRatio(white!, white!)).toBe(1);
+		});
+
+		it("parses short hex, long hex, names and rgb, and rejects the rest", () => {
+			expect(parseColor("#f00")).toEqual({ r: 255, g: 0, b: 0, a: 1 });
+			expect(parseColor("#0000FF")).toEqual({ r: 0, g: 0, b: 255, a: 1 });
+			expect(parseColor("Red")).toEqual({ r: 255, g: 0, b: 0, a: 1 });
+			expect(parseColor("rgba(1,2,3,0.5)")).toEqual({ r: 1, g: 2, b: 3, a: 0.5 });
+			for (const bad of [
+				"",
+				"nonsense",
+				"#12",
+				"#12345678",
+				"rgb(300,0,0)",
+				"linear-gradient(red,blue)",
+				5,
+				undefined,
+			]) {
+				expect(parseColor(bad)).toBeNull();
+			}
+		});
+
+		it("warns on white text over an unknown picture, at the annotation midpoint", () => {
+			const [problem] = low(make({ annotationRegions: [text("#FFFFFF")] }));
+			expect(problem).toMatchObject({ severity: "warning", atMs: 2000 });
+			expect(problem.message).toContain("render_preview at 2000 ms");
+			expect(problem.message).toContain("cannot sample");
+		});
+
+		it("warns on black text over an unknown picture", () => {
+			expect(low(make({ annotationRegions: [text("#000")] }))[0].message).toContain(
+				"is dark",
+			);
+		});
+
+		it("warns on near-white and near-black but not mid-grey, red or blue", () => {
+			expect(low(make({ annotationRegions: [text("#eeeeee")] }))).toHaveLength(1);
+			expect(low(make({ annotationRegions: [text("#111111")] }))).toHaveLength(1);
+			for (const ok of ["#808080", "#ff0000", "#2563EB", "grey"]) {
+				expect(low(make({ annotationRegions: [text(ok)] }))).toEqual([]);
+			}
+		});
+
+		it("treats a missing colour as the default white", () => {
+			expect(low(make({ annotationRegions: [text(undefined)] }))).toHaveLength(1);
+		});
+
+		it("skips an unparseable colour without crashing", () => {
+			expect(low(make({ annotationRegions: [text("var(--x)")] }))).toEqual([]);
+		});
+
+		it("checks figures by figureData.color, defaulting to blue", () => {
+			const figure = (figureData?: unknown) => annotation({ type: "figure", figureData });
+			expect(low(make({ annotationRegions: [figure({ color: "#ffffff" })] }))).toHaveLength(
+				1,
+			);
+			expect(low(make({ annotationRegions: [figure()] }))).toEqual([]);
+		});
+
+		it("never fires for a blur or an image", () => {
+			const style = { color: "#ffffff" };
+			for (const type of ["blur", "image"]) {
+				expect(low(make({ annotationRegions: [annotation({ type, style })] }))).toEqual([]);
+			}
+		});
+
+		it("is quiet with no annotations", () => {
+			expect(low(make())).toEqual([]);
+		});
+
+		it("is quiet when no look is set (no wallpaper) and the colour is fine", () => {
+			expect(
+				low(make({ annotationRegions: [text("#ff0000", { space: "screen" })] })),
+			).toEqual([]);
+		});
+
+		it("skips an annotation that starts after the timeline ends or is off-frame", () => {
+			const late = text("#fff", { startMs: 20_000, endMs: 21_000 });
+			const off = text("#fff", { position: { x: 100, y: 0 } });
+			expect(low(make({ annotationRegions: [late, off] }))).toEqual([]);
+		});
+
+		it("compares a screen-space annotation outside the picture with a solid wallpaper", () => {
+			const [problem] = low(withWallpaper("#FFFFFF", [text("#ffffff", screenOut)]));
+			expect(problem.message).toContain("the wallpaper #FFFFFF");
+			expect(problem.message).toContain("1.0:1");
+			expect(low(withWallpaper("#000000", [text("#ffffff", screenOut)]))).toEqual([]);
+			expect(low(withWallpaper("#FFFFFF", [text("#000000", screenOut)]))).toEqual([]);
+		});
+
+		it("flags black on a black wallpaper and mid-grey on mid-grey", () => {
+			expect(low(withWallpaper("#000", [text("#000", screenOut)]))).toHaveLength(1);
+			expect(low(withWallpaper("#808080", [text("#808080", screenOut)]))).toHaveLength(1);
+		});
+
+		it("passes a colour exactly at the threshold and warns one step under it", () => {
+			const bg = parseColor("#ffffff")!;
+			let lo = 0;
+			let hi = 255;
+			while (hi - lo > 1) {
+				const mid = (lo + hi) >> 1;
+				if (contrastRatio({ r: mid, g: mid, b: mid, a: 1 }, bg) >= MIN_CONTRAST_RATIO)
+					lo = mid;
+				else hi = mid;
+			}
+			expect(low(withWallpaper("#ffffff", [text(grey(lo), screenOut)]))).toEqual([]);
+			expect(low(withWallpaper("#ffffff", [text(grey(hi), screenOut)]))).toHaveLength(1);
+		});
+
+		it("treats a frame-space annotation as over the picture, not the wallpaper", () => {
+			const frame = {
+				space: "frame",
+				position: { x: 0, y: 0 },
+				size: { width: 10, height: 10 },
+			};
+			expect(low(withWallpaper("#000000", [text("#ffffff", frame)]))).toHaveLength(1);
+		});
+
+		it("falls back to the unknown rule for an image wallpaper", () => {
+			const image = "/wallpapers/tahoe-light.jpg";
+			expect(low(withWallpaper(image, [text("#ffffff", screenOut)]))[0].message).toContain(
+				"cannot sample",
+			);
+			expect(low(withWallpaper(image, [text("#ff0000", screenOut)]))).toEqual([]);
+		});
+
+		it("does not trust the wallpaper while a zoom is running", () => {
+			const result = low(
+				withWallpaper("#000000", [text("#ffffff", screenOut)], { zoomRegions: [zoom()] }),
+			);
+			expect(result[0].message).toContain("cannot sample");
+		});
+
+		it("does not trust the wallpaper when the annotation overlaps the picture", () => {
+			const overlapping = {
+				space: "screen",
+				position: { x: 40, y: 40 },
+				size: { width: 20, height: 20 },
+			};
+			expect(
+				low(withWallpaper("#000000", [text("#ffffff", overlapping)]))[0].message,
+			).toContain("cannot sample");
+		});
+
+		it("uses an opaque backing plate as the background, and ignores a transparent one", () => {
+			const plated = text("#ffffff", {
+				style: { color: "#ffffff", backgroundColor: "#000000" },
+			});
+			expect(low(make({ annotationRegions: [plated] }))).toEqual([]);
+			const same = text("#ffffff", {
+				style: { color: "#ffffff", backgroundColor: "#ffffff" },
+			});
+			expect(low(make({ annotationRegions: [same] }))[0].message).toContain(
+				"its own background",
+			);
+			const clear = text("#ffffff", {
+				style: { color: "#ffffff", backgroundColor: "transparent" },
+			});
+			expect(low(make({ annotationRegions: [clear] }))).toHaveLength(1);
+		});
+
+		it("never reports an error and is listed in checked", () => {
+			const result = lintEdits(
+				make({ annotationRegions: [text("#fff"), text("#000", { id: "a2" })] }),
+			);
+			expect(result.problems.every((p) => p.severity === "warning")).toBe(true);
+			expect(result.checked).toContain("low_contrast_annotation");
 		});
 	});
 });

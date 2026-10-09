@@ -1,5 +1,11 @@
 import { projectCaptionCues } from "../../captionTimeline";
-import { type AnnotationRegion, getTimelineDurationMs, ZOOM_DEPTH_SCALES } from "../../types";
+import {
+	type AnnotationRegion,
+	DEFAULT_ANNOTATION_STYLE,
+	DEFAULT_FIGURE_DATA,
+	getTimelineDurationMs,
+	ZOOM_DEPTH_SCALES,
+} from "../../types";
 import {
 	BASE_PREVIEW_HEIGHT,
 	BASE_PREVIEW_WIDTH,
@@ -21,6 +27,60 @@ export const MIN_PICTURE_AREA_WARN = 0.5;
 export const MIN_SOURCE_AREA_WARN = 0.25;
 const EDGE_TOLERANCE_PX = 1;
 const CAPTION_COVERAGE_TOLERANCE_MS = 2;
+export const MIN_CONTRAST_RATIO = 3;
+export const MIN_CONTRAST_RATIO_UNKNOWN_BACKGROUND = 1.5;
+const PLATE_MIN_ALPHA = 0.5;
+
+const NAMED_COLORS: Record<string, string> = {
+	white: "#ffffff",
+	black: "#000000",
+	red: "#ff0000",
+	green: "#008000",
+	blue: "#0000ff",
+	yellow: "#ffff00",
+	orange: "#ffa500",
+	purple: "#800080",
+	gray: "#808080",
+	grey: "#808080",
+};
+
+type Rgba = { r: number; g: number; b: number; a: number };
+
+export function parseColor(value: unknown): Rgba | null {
+	if (typeof value !== "string") return null;
+	let text = value.trim().toLowerCase();
+	if (text === "transparent") return { r: 0, g: 0, b: 0, a: 0 };
+	text = NAMED_COLORS[text] ?? text;
+	const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/.exec(text)?.[1];
+	if (hex) {
+		const full = hex.length === 3 ? [...hex].map((c) => c + c).join("") : hex;
+		const n = Number.parseInt(full, 16);
+		return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255, a: 1 };
+	}
+	const rgb =
+		/^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*(?:,\s*([\d.]+)\s*)?\)$/.exec(text);
+	if (!rgb) return null;
+	const [r, g, b] = [rgb[1], rgb[2], rgb[3]].map(Number);
+	const a = rgb[4] === undefined ? 1 : Number(rgb[4]);
+	if (r > 255 || g > 255 || b > 255 || !(a >= 0 && a <= 1)) return null;
+	return { r, g, b, a };
+}
+
+function luminance({ r, g, b }: Rgba) {
+	const [lr, lg, lb] = [r, g, b].map((channel) => {
+		const c = channel / 255;
+		return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+	});
+	return 0.2126 * lr + 0.7152 * lg + 0.0722 * lb;
+}
+
+export function contrastRatio(a: Rgba, b: Rgba) {
+	const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+	return (hi + 0.05) / (lo + 0.05);
+}
+
+const WHITE: Rgba = { r: 255, g: 255, b: 255, a: 1 };
+const BLACK: Rgba = { r: 0, g: 0, b: 0, a: 1 };
 
 const CHECKS = [
 	"empty_or_inverted_regions",
@@ -30,6 +90,7 @@ const CHECKS = [
 	"blur_over_zoom",
 	"look_picture_size",
 	"look_crop",
+	"low_contrast_annotation",
 	"caption_validity",
 ];
 
@@ -250,6 +311,77 @@ export function lintEdits(context: EditorOpContext): {
 				message: `Blur ${blur.id} overlaps zoom ${zoom.id}. Check at ${atMs} ms that it still covers what it hides while the camera moves.`,
 			});
 		}
+	}
+
+	for (const annotation of timeline.annotationRegions) {
+		if (annotation.type !== "text" && annotation.type !== "figure") continue;
+		const { position, size } = annotation;
+		if (size.width <= 0 || size.height <= 0) continue;
+		if (
+			position.x >= 100 ||
+			position.y >= 100 ||
+			position.x + size.width <= 0 ||
+			position.y + size.height <= 0
+		)
+			continue;
+		if (annotation.startMs >= totalMs || annotation.endMs <= annotation.startMs) continue;
+		const subject = `annotation ${annotation.id}`;
+		const atMs = Math.round((annotation.startMs + Math.min(annotation.endMs, totalMs)) / 2);
+		const rawColor =
+			annotation.type === "figure"
+				? (annotation.figureData?.color ?? DEFAULT_FIGURE_DATA.color)
+				: (annotation.style?.color ?? DEFAULT_ANNOTATION_STYLE.color);
+		const color = parseColor(rawColor);
+		if (!color) continue;
+
+		const plate =
+			annotation.type === "text" ? parseColor(annotation.style?.backgroundColor) : null;
+		let background: Rgba | null = null;
+		let backgroundName = "";
+		if (plate && plate.a >= PLATE_MIN_ALPHA) {
+			background = plate;
+			backgroundName = `its own background ${annotation.style.backgroundColor}`;
+		} else if (annotation.space === "screen") {
+			const left = (position.x / 100) * BASE_PREVIEW_WIDTH;
+			const top = (position.y / 100) * BASE_PREVIEW_HEIGHT;
+			const right = left + (size.width / 100) * BASE_PREVIEW_WIDTH;
+			const bottom = top + (size.height / 100) * BASE_PREVIEW_HEIGHT;
+			const outsidePicture =
+				right <= mask.x ||
+				left >= mask.x + mask.width ||
+				bottom <= mask.y ||
+				top >= mask.y + mask.height;
+			const zoomed = timeline.zoomRegions.some((zoom) => overlap(annotation, zoom) !== null);
+			const wallpaper = parseColor(appearance.wallpaper);
+			if (outsidePicture && !zoomed && wallpaper && wallpaper.a === 1) {
+				background = wallpaper;
+				backgroundName = `the wallpaper ${appearance.wallpaper}`;
+			}
+		}
+
+		if (background) {
+			const ratio = contrastRatio(color, background);
+			if (ratio >= MIN_CONTRAST_RATIO) continue;
+			add({
+				severity: "warning",
+				kind: "low_contrast_annotation",
+				subject,
+				atMs,
+				message: `${subject} is ${rawColor} on ${backgroundName}, a contrast of ${ratio.toFixed(1)}:1 where ${MIN_CONTRAST_RATIO}:1 is needed, so it is likely invisible. Use a contrasting colour or give it a backing plate, then render_preview at ${atMs} ms to confirm.`,
+			});
+			continue;
+		}
+
+		const nearWhite = contrastRatio(color, WHITE) < MIN_CONTRAST_RATIO_UNKNOWN_BACKGROUND;
+		const nearBlack = contrastRatio(color, BLACK) < MIN_CONTRAST_RATIO_UNKNOWN_BACKGROUND;
+		if (!nearWhite && !nearBlack) continue;
+		add({
+			severity: "warning",
+			kind: "low_contrast_annotation",
+			subject,
+			atMs,
+			message: `${subject} is ${rawColor}, which is likely invisible if the picture behind it is ${nearWhite ? "light" : "dark"}. check_edits cannot sample the recording, so this is a guess. Use a contrasting colour or give it a backing plate, then render_preview at ${atMs} ms to confirm.`,
+		});
 	}
 
 	const clips = timeline.clipRegions;
