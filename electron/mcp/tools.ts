@@ -992,11 +992,12 @@ export function buildRecordlyMcpServer(
 				"durations and easings, cursor style, size, smoothing and click effects, and the " +
 				"camera and cursor springs — pass only the fields you want and the rest are left " +
 				"alone, and an unknown field is refused rather than ignored. **padding and borderRadius " +
-				"are PERCENTAGES, not pixels**: padding is a percent of the frame, so 4 is a normal inset " +
-				"while 28 shrinks the picture to a sliver of wallpaper — start at 0-6 and look at " +
-				"render_preview before going higher. borderRadius is a percent of the shorter side (max " +
-				"50), shadowIntensity is a 0-1 multiplier, and backgroundBlur is a blur radius in pixels " +
-				"at a 640px-wide reference, scaled to the export size. Whatever " +
+				"are PERCENTAGES, not pixels**, and padding is damped: 0-100 becomes an inset of 0-20% " +
+				"per side, so 4 is subtle and even 100 still leaves the picture at 60% of the frame. " +
+				"Padding therefore cannot make the video vanish — if the picture is missing, the cause is " +
+				"elsewhere. borderRadius is a percent of the shorter side (max 50), shadowIntensity is a " +
+				"0-1 multiplier, and backgroundBlur is a blur radius in pixels at a 640px-wide reference, " +
+				"scaled to the export size. Whatever " +
 				"get_editor_state reports for the look can be sent straight back: padding takes " +
 				"linked (equal sides up to 100 when linked, top and bottom up to 250 when not), crop " +
 				"is also accepted as cropRegion, and the webcam's sourcePath, visibleRanges and " +
@@ -1547,6 +1548,29 @@ export function buildRecordlyMcpServer(
 				],
 			};
 		},
+	);
+
+	server.registerTool(
+		"check_edits",
+		{
+			description:
+				"Look for mistakes in the current edit without rendering anything. It is instant and " +
+				"free, so run it after a batch of edits and before any preview or export. It catches " +
+				"what costs the most to find late: a title or logo in the default frame space that an " +
+				"active zoom will crop out of view, a crop or padding that leaves too little picture, " +
+				"a blur sitting over a moving zoom, geometry off the frame, an empty or inverted " +
+				"region, and a caption that was legal when written but was made illegal by a later " +
+				"trim or split — the cut rule only runs when a caption is written, so nothing else " +
+				"re-checks it. Every problem carries the moment to look at, so pass its atMs to " +
+				"render_preview to see it. severity error means certainly wrong; warning means worth " +
+				"a look. The reply also lists the checks that ran, so you can tell nothing-wrong from " +
+				"not-checked. It reads the state only and changes nothing.",
+			inputSchema: z.object({}),
+		},
+		async (_args, ctx) =>
+			textResult(
+				await editor.requestEditor("check_edits", {}, { signal: ctx.mcpReq.signal }),
+			),
 	);
 
 	server.registerTool(
