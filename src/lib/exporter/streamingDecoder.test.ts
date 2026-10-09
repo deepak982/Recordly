@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ClipRegion } from "@/components/video-editor/types";
 import {
 	buildVideoDecodeFailure,
 	getDecodedFrameStartupOffsetUs,
@@ -462,6 +463,66 @@ describe("StreamingVideoDecoder decode failures", () => {
 			(Math.round(((reordered ? secondSource : firstSource) * 30) / 1000) * 1_000_000) / 30,
 		);
 		expect(decoder.getEffectiveDuration(undefined, undefined, clips)).toBe(1.2);
+	});
+
+	it("emits a blank clip as gap frames and still guards real clips", async () => {
+		mockDemuxerRead.mockImplementation(
+			() =>
+				new ReadableStream({
+					start(controller) {
+						for (let i = 0; i < 120; i++)
+							controller.enqueue({ timestamp: (i * 1_000_000) / 30 });
+						controller.close();
+					},
+				}),
+		);
+		class TestDecoder {
+			state = "unconfigured";
+			decodeQueueSize = 0;
+			constructor(private callbacks: { output: (frame: VideoFrame) => void }) {}
+			configure() {
+				this.state = "configured";
+			}
+			decode(chunk: EncodedVideoChunk) {
+				this.callbacks.output({
+					timestamp: chunk.timestamp,
+					close: vi.fn(),
+				} as unknown as VideoFrame);
+			}
+			async flush() {}
+			close() {
+				this.state = "closed";
+			}
+		}
+		vi.stubGlobal("VideoDecoder", TestDecoder);
+		const decoder = new StreamingVideoDecoder();
+		await decoder.loadMetadata("/tmp/blank-card.mp4");
+		const clips: ClipRegion[] = [
+			{ id: "card", startMs: 0, endMs: 400, speed: 1, blank: true },
+			{ id: "a", startMs: 400, endMs: 800, sourceStartMs: 0, speed: 1 },
+		];
+		const frames: Array<{ gap: boolean }> = [];
+		await decoder.decodeAll(
+			30,
+			undefined,
+			undefined,
+			async (frame) => {
+				frames.push({ gap: frame === null });
+			},
+			clips,
+		);
+		expect(frames).toHaveLength(24);
+		for (let i = 0; i < frames.length; i++) expect(frames[i].gap).toBe(i < 12);
+		expect(decoder.getEffectiveDuration(undefined, undefined, clips)).toBe(0.8);
+
+		const unblanked: ClipRegion[] = [
+			{ id: "card", startMs: 0, endMs: 400, sourceStartMs: 4_100, speed: 1 },
+			clips[1],
+		];
+		await expect(
+			decoder.decodeAll(30, undefined, undefined, async () => undefined, unblanked),
+		).rejects.toThrow("Missing decoded clip frame");
+		decoder.destroy();
 	});
 });
 

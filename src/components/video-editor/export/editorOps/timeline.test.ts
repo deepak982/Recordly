@@ -19,6 +19,9 @@ function makeContext(clips: ClipRegion[], duration = 20) {
 		zooms: [{ id: "z", startMs: 15000, endMs: 16000 }] as Region[],
 		annotations: [{ id: "n", startMs: 15000, endMs: 16000 }] as Region[],
 		audios: [{ id: "u", startMs: 15000, endMs: 18000 }] as Region[],
+		captions: [
+			{ id: "c", startMs: 15000, endMs: 16000, words: [{ startMs: 15000, endMs: 16000 }] },
+		] as Array<Region & { words?: Region[] }>,
 		selected: null as string | null,
 		writes: 0,
 	};
@@ -49,6 +52,9 @@ function makeContext(clips: ClipRegion[], duration = 20) {
 			},
 			setAudioRegions: (next: unknown) => {
 				state.audios = apply(state.audios, next);
+			},
+			setAutoCaptions: (next: unknown) => {
+				state.captions = apply(state.captions, next);
 			},
 		},
 		history: { undo: () => undefined, redo: () => undefined },
@@ -741,5 +747,98 @@ describe("timeline.set_scene_duration", () => {
 			);
 			expect(state.clips.map((c) => c.id)).toEqual(["a"]);
 		});
+	});
+});
+
+describe("timeline.freeze", () => {
+	const freeze = (payload: unknown, context: EditorOpContext) =>
+		timelineOps["timeline.freeze"](payload, context) as Result & { frozenSourceMs: number };
+
+	it("holds the frame inside a cut and pushes the rest of the edit later", () => {
+		const { state, context } = makeContext([clip("a", 0, 20000, { sourceStartMs: 0 })]);
+		const result = freeze({ atMs: 8000, ms: 2000 }, context);
+		expect(result.durationMs).toBe(22000);
+		expect(state.clips.map((c) => [c.startMs, c.endMs])).toEqual([
+			[0, 8000],
+			[8000, 10000],
+			[10000, 22000],
+		]);
+		expect(state.clips[1].muted).toBe(true);
+		expect(getClipSourceStartMs(state.clips[1])).toBe(7999);
+		expect(getClipSourceEndMs(state.clips[1])).toBe(8000);
+		expect(getClipSourceStartMs(state.clips[2])).toBe(8000);
+		expect(state.zooms).toEqual([{ id: "z", startMs: 17000, endMs: 18000 }]);
+		expect(state.audios).toEqual([{ id: "u", startMs: 17000, endMs: 20000 }]);
+		expect(state.captions).toEqual([
+			{ id: "c", startMs: 17000, endMs: 18000, words: [{ startMs: 17000, endMs: 18000 }] },
+		]);
+	});
+
+	it("holds the last frame at the exact end from inside the decoded footage", () => {
+		const { state, context } = makeContext([clip("a", 0, 20000, { sourceStartMs: 0 })]);
+		const result = freeze({ atMs: 20000, ms: 3000 }, context);
+		expect(result.durationMs).toBe(23000);
+		expect(result.frozenSourceMs).toBe(19949);
+		expect(getClipSourceEndMs(state.clips[1])).toBe(19950);
+		expect(state.clips.map((c) => [c.startMs, c.endMs])).toEqual([
+			[0, 20000],
+			[20000, 23000],
+		]);
+	});
+
+	it("holds the first frame at 0 ms", () => {
+		const { state, context } = makeContext([clip("a", 0, 20000, { sourceStartMs: 0 })]);
+		freeze({ atMs: 0, ms: 500 }, context);
+		expect(state.clips.map((c) => [c.startMs, c.endMs])).toEqual([
+			[0, 500],
+			[500, 20500],
+		]);
+		expect(getClipSourceStartMs(state.clips[0])).toBe(0);
+	});
+
+	it("holds the frame the viewer is on inside a speed region", () => {
+		const { state, context } = makeContext([
+			clip("a", 0, 4000, { sourceStartMs: 0, speed: 2 }),
+			clip("b", 4000, 8000, { sourceStartMs: 8000, speed: 1 }),
+		]);
+		freeze({ atMs: 2000, ms: 1000 }, context);
+		expect(getClipSourceStartMs(state.clips[1])).toBe(3999);
+		expect(state.clips[1].speed).toBe(0.001);
+		expect(state.clips.map((c) => [c.startMs, c.endMs])).toEqual([
+			[0, 2000],
+			[2000, 3000],
+			[3000, 5000],
+			[5000, 9000],
+		]);
+	});
+
+	it("stacks a freeze on a freeze", () => {
+		const { state, context } = makeContext([clip("a", 0, 20000, { sourceStartMs: 0 })]);
+		freeze({ atMs: 20000, ms: 1000 }, context);
+		const second = freeze({ atMs: 21000, ms: 1000 }, context);
+		expect(second.durationMs).toBe(22000);
+		expect(state.clips).toHaveLength(3);
+	});
+
+	it.each([
+		["ms of 0", { atMs: 1000, ms: 0 }, /ms must be a whole number of milliseconds from 1/],
+		["negative ms", { atMs: 1000, ms: -500 }, /ms must be a whole number of milliseconds/],
+		["absurd ms", { atMs: 1000, ms: 86_400_000 }, /from 1 to 600000/],
+		["fractional ms", { atMs: 1000, ms: 12.5 }, /whole number of milliseconds/],
+		["missing ms", { atMs: 1000 }, /ms must be a number/],
+		["atMs past the edit", { atMs: 999_999, ms: 500 }, /outside the edit/],
+		["negative atMs", { atMs: -1, ms: 500 }, /outside the edit/],
+		["an unknown field", { atMs: 0, ms: 500, hold: 1 }, /unknown field hold/],
+	])("refuses %s and changes nothing", (_label, payload, message) => {
+		const { state, context } = makeContext([clip("a", 0, 20000, { sourceStartMs: 0 })]);
+		expect(() => freeze(payload, context)).toThrow(message);
+		expect(state.clips).toHaveLength(1);
+		expect(state.writes).toBe(0);
+		expect(state.zooms).toEqual([{ id: "z", startMs: 15000, endMs: 16000 }]);
+	});
+
+	it("refuses a freeze before the recording has loaded", () => {
+		const { context } = makeContext([]);
+		expect(() => freeze({ atMs: 0, ms: 500 }, context)).toThrow(/no clips yet/);
 	});
 });

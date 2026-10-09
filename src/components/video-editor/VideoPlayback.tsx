@@ -2741,6 +2741,8 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 										pointerEvents: "none",
 										transform: `matrix(${layerTransform.scale}, 0, 0, ${layerTransform.scale}, ${layerTransform.x}, ${layerTransform.y})`,
 										transformOrigin: "top left",
+										// A card on a blank clip must survive the overlay's gap hiding.
+										visibility: space === "screen" ? "visible" : undefined,
 									}}
 								>
 									<div

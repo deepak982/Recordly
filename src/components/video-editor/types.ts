@@ -480,6 +480,8 @@ export interface AnnotationTextStyle {
 	textDecoration: "none" | "underline";
 	textAlign: "left" | "center" | "right";
 	borderRadius: number;
+	/** Paint backgroundColor over the whole box instead of a pill per line. */
+	fillBox?: boolean;
 }
 
 function getDefaultAnnotationFontFamily() {

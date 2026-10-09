@@ -626,3 +626,54 @@ describe("highlight spotlight", () => {
 		expect(raster.pixelAt(2, 2)[3]).toBeGreaterThan(0);
 	});
 });
+
+describe("fillBox backs a card with one solid plate", () => {
+	const plated = (fillBox: boolean): AnnotationRegion => ({
+		id: "card-title",
+		startMs: 0,
+		endMs: 2000,
+		type: "text",
+		content: "Entries",
+		textContent: "Entries",
+		position: { x: 0, y: 0 },
+		size: { width: 100, height: 100 },
+		style: {
+			...DEFAULT_ANNOTATION_STYLE,
+			fontSize: 64,
+			color: "#FFFFFF",
+			backgroundColor: "#000000",
+			...(fillBox ? { fillBox: true } : {}),
+		},
+		zIndex: 1,
+		space: "screen",
+	});
+
+	const paint = async (fillBox: boolean) => {
+		const raster = createRasterCanvas(TILE_WIDTH, TILE_HEIGHT);
+		raster.ctx.fillStyle = PICTURE;
+		raster.ctx.fillRect(0, 0, TILE_WIDTH, TILE_HEIGHT);
+		await renderAnnotations(
+			raster.ctx,
+			[plated(fillBox)],
+			TILE_WIDTH,
+			TILE_HEIGHT,
+			1000,
+			SCENE_SCALE_FACTOR,
+			undefined,
+			undefined,
+			MASK_RECT,
+		);
+		return raster;
+	};
+
+	it("fills the whole annotation box, so a card hides the frame behind it", async () => {
+		const { pixelAt } = await paint(true);
+		expect(pixelAt(4, 4)).toEqual([0, 0, 0, 255]);
+		expect(pixelAt(TILE_WIDTH - 4, TILE_HEIGHT - 4)).toEqual([0, 0, 0, 255]);
+	});
+
+	it("leaves the corners of the box alone without it, which is why a card needs it", async () => {
+		const { pixelAt } = await paint(false);
+		expect(pixelAt(4, 4)).toEqual(toRgb(PICTURE).concat(255));
+	});
+});

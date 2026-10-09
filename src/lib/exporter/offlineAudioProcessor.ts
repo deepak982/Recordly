@@ -162,12 +162,14 @@ export class OfflineAudioProcessor extends AudioMediaProcessor {
 
 		// Build timeline slices (non-trimmed segments with speed info)
 		const slices = clipRegions
-			? clipRegions.filter((clip) => !isBlankClip(clip)).map((clip) => ({
-					sourceStartMs: getClipSourceStartMs(clip),
-					sourceEndMs: getClipSourceEndMs(clip),
-					speed: clip.speed,
-					outputStartMs: clip.startMs,
-				}))
+			? clipRegions
+					.filter((clip) => !isBlankClip(clip))
+					.map((clip) => ({
+						sourceStartMs: getClipSourceStartMs(clip),
+						sourceEndMs: getClipSourceEndMs(clip),
+						speed: clip.speed,
+						outputStartMs: clip.startMs,
+					}))
 			: this.buildTimelineSlices(sourceDurationMs, trimRegions, speedRegions);
 
 		let outputDurationMs = 0;

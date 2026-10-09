@@ -341,10 +341,21 @@ function renderText(
 
 	const startY = textY - ((lines.length - 1) * lineHeight) / 2;
 
+	const fillsWholeBox =
+		style.fillBox === true &&
+		Boolean(style.backgroundColor) &&
+		style.backgroundColor !== "transparent";
+	if (fillsWholeBox && style.backgroundColor) {
+		ctx.fillStyle = style.backgroundColor;
+		ctx.beginPath();
+		ctx.roundRect(x, y, width, height, (style.borderRadius ?? 0) * scaleFactor);
+		ctx.fill();
+	}
+
 	lines.forEach((line, index) => {
 		const currentY = startY + index * lineHeight;
 
-		if (style.backgroundColor && style.backgroundColor !== "transparent") {
+		if (!fillsWholeBox && style.backgroundColor && style.backgroundColor !== "transparent") {
 			const metrics = ctx.measureText(line);
 			const verticalPadding = scaledFontSize * 0.1;
 			const horizontalPadding = scaledFontSize * 0.2;

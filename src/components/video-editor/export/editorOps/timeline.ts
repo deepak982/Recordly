@@ -12,19 +12,25 @@ import {
 } from "../../agentEdits/planAgentEdits";
 import { appendImportedClip } from "../../clipImport";
 import {
+	insertClipRegion,
 	packClipSequence,
 	reorderClipSequence,
 	rippleRegionAnchors,
 	rippleRegions,
+	shiftAnchorsForInsert,
+	shiftCaptionCuesForInsert,
+	shiftRegionsForInsert,
 } from "../../clipSequence";
 import { changeClipSpan } from "../../clipSpanChange";
 import { planClipSplit } from "../../clipSplit";
 import {
 	type ClipRegion,
+	FREEZE_SOURCE_MS,
 	getClipSourceEndMs,
 	getClipSourceStartMs,
 	getTimelineDurationMs,
 	mapSourceTimeToTimelineTime,
+	mapTimelineTimeToSourceTime,
 	sortClipRegions,
 } from "../../types";
 import {
@@ -50,6 +56,75 @@ export const HOLD_FLOOR_MS = HOLD_KEEP_MS - WAIT_KEEP_TAIL_MS;
 
 const NO_CLIPS =
 	"The timeline has no clips yet. Wait for the recording to finish loading, then try again.";
+
+/** Ten minutes. Longer is a typo, and it would be rendered frame by frame. */
+export const MAX_INSERT_MS = 600_000;
+
+/** Back the held frame off the very end of the media, which decodes short. */
+const FREEZE_END_MARGIN_MS = 50;
+
+export function requireInsertMs(value: unknown, field: string): number {
+	const ms = requireFiniteNumber(value, field);
+	if (!Number.isInteger(ms) || ms <= 0 || ms > MAX_INSERT_MS) {
+		throw new Error(
+			`${field} must be a whole number of milliseconds from 1 to ${MAX_INSERT_MS}; it is new time added to the timeline.`,
+		);
+	}
+	return ms;
+}
+
+/**
+ * A held frame reads a one-millisecond source span, which the decoder resamples
+ * into every output frame of the hold. The margin keeps that span clear of the
+ * media's final frame interval, which decodes short and would starve the hold.
+ */
+export function freezeClip(
+	context: EditorOpContext,
+	clips: ClipRegion[],
+	atMs: number,
+	ms: number,
+): ClipRegion {
+	const sourceMs = mapTimelineTimeToSourceTime(atMs, clips);
+	const holdEndMs = Math.max(
+		FREEZE_SOURCE_MS,
+		Math.min(sourceMs, Math.round(context.duration * 1000) - FREEZE_END_MARGIN_MS),
+	);
+	const holdStartMs = Math.max(0, holdEndMs - FREEZE_SOURCE_MS);
+	const span = holdEndMs - holdStartMs;
+	if (span <= 0) {
+		throw new Error("This recording is too short to hold a frame from. Nothing was changed.");
+	}
+	return {
+		id: nextId(context.ids.clip, "clip"),
+		startMs: atMs,
+		endMs: atMs + ms,
+		sourceStartMs: holdStartMs,
+		speed: span / ms,
+		muted: true,
+	};
+}
+
+/** Inserting time is a pure translation, so every later effect simply moves. */
+export function applyTimelineInsert(
+	context: EditorOpContext,
+	base: ClipRegion[],
+	atMs: number,
+	inserted: ClipRegion,
+) {
+	const { timeline } = context;
+	const ms = inserted.endMs - inserted.startMs;
+	const next = insertClipRegion(base, atMs, inserted);
+	timeline.setClipRegions(next);
+	timeline.setZoomRegions((current) => shiftRegionsForInsert(current, atMs, ms));
+	timeline.setAnnotationRegions((current) => shiftRegionsForInsert(current, atMs, ms));
+	timeline.setAudioRegions((current) => shiftAnchorsForInsert(current, atMs, ms));
+	timeline.setAutoCaptions((current) => shiftCaptionCuesForInsert(current, atMs, ms));
+	return {
+		changed: true,
+		durationMs: getTimelineDurationMs(next, Math.round(context.duration * 1000)),
+		clipCount: next.length,
+	};
+}
 
 function loadClips(context: EditorOpContext) {
 	const clips = sortClipRegions(context.timeline.clipRegions);
@@ -587,6 +662,21 @@ export const timelineOps: EditorOpMap = {
 				scene,
 			),
 			sceneMs: ms,
+		};
+	},
+
+	"timeline.freeze": (payload, context) => {
+		const args = requireObject(payload, "timeline.freeze");
+		rejectUnknown(args, ["atMs", "ms"], "timeline.freeze");
+		const { clips, totalMs } = loadClips(context);
+		const atMs = requireTimelineTime(args.atMs, "atMs", totalMs);
+		const ms = requireInsertMs(args.ms, "ms");
+		const held = freezeClip(context, clips, atMs, ms);
+		const split = splitAt(clips, atMs, idFactory(context));
+		return {
+			...applyTimelineInsert(context, split, atMs, held),
+			frozenSourceMs: getClipSourceStartMs(held),
+			holdMs: ms,
 		};
 	},
 
