@@ -239,6 +239,7 @@ describe("buildRecordlyMcpServer", () => {
 		const { call } = setup();
 		const { result } = await call("tools/list");
 		expect(result.tools.map((tool: { name: string }) => tool.name).sort()).toEqual([
+			"add_card",
 			"annotate",
 			"arm_recording",
 			"cancel_recording",
@@ -951,6 +952,7 @@ describe("buildRecordlyMcpServer", () => {
 		const { call } = setup("idle", { platform: "linux", wayland: true });
 		const { result } = await call("tools/list");
 		expect(result.tools.map((tool: { name: string }) => tool.name).sort()).toEqual([
+			"add_card",
 			"annotate",
 			"arm_recording",
 			"cancel_recording",

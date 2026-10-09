@@ -1,6 +1,7 @@
 import { annotationsOps } from "./annotations";
 import { audioOps } from "./audio";
 import { captionsOps } from "./captions";
+import { cardsOps } from "./cards";
 import { checkEditsOps } from "./checkEdits";
 import { historyOps } from "./history";
 import { lookOps } from "./look";
@@ -8,14 +9,17 @@ import { polishOps } from "./polish";
 import { previewOps } from "./preview";
 import { projectOps } from "./project";
 import { timelineOps } from "./timeline";
+import { transitionOps } from "./transitions";
 import type { EditorOpContext, EditorOpMap } from "./types";
 import { zoomOps } from "./zoom";
 
 const ops: EditorOpMap = {
 	...timelineOps,
+	...transitionOps,
 	...zoomOps,
 	...annotationsOps,
 	...captionsOps,
+	...cardsOps,
 	...audioOps,
 	...lookOps,
 	...previewOps,

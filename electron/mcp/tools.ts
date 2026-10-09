@@ -936,12 +936,19 @@ export function buildRecordlyMcpServer(
 				"and the error names every lever it tried and by how much it fell short. op join adds another " +
 				"recording to the end (or at index), as ONE continuous video: the two share a single " +
 				"media source, so the cursor does not jump and nothing needs re-scaling. You rarely " +
-				"need it — recording a whole screen keeps two apps in one take — so use it for " +
-				"genuinely separate takes or two different displays. It joins straight, with no " +
+				"need it: recording a whole screen keeps two apps in one take. It joins straight, " +
 				"crossfade, and on a large recording it can outlive the wait: it then returns " +
 				'status "still-running" rather than an error — do NOT call it again or the recording ' +
 				"is added twice; poll get_status until editor.running is null. Times are milliseconds " +
-				"in the edited timeline. Reversible with history undo.",
+				"in the edited timeline. op freeze holds the frame at atMs for ms, which is what gives " +
+				"an end card something to sit on instead of stopping on a live screen — a freeze at " +
+				"the very end holds a frame from up to 50 ms earlier, because the last frame of the " +
+				"media cannot be read exactly. op transition dips through black across a cut: pass " +
+				"atMs on the cut (it snaps within 250 ms) or betweenClips, and ms 100-2000, or 0 to " +
+				"remove it. A crossfade is refused rather than quietly downgraded: the export " +
+				"decodes one frame at a time and never has both clips at once, so the two can never " +
+				"overlap. A dip takes its time from the clips it joins, so the video does not get " +
+				"longer. Reversible with history undo.",
 			inputSchema: z.object({
 				op: z.enum([
 					"trim",
@@ -952,6 +959,8 @@ export function buildRecordlyMcpServer(
 					"set_scene_duration",
 					"fit",
 					"join",
+					"freeze",
+					"transition",
 				]),
 				startMs: z.number().min(0).optional(),
 				endMs: z.number().min(0).optional(),
@@ -1684,6 +1693,51 @@ export function buildRecordlyMcpServer(
 	);
 
 	server.registerTool(
+		"add_card",
+		{
+			description:
+				"Put a title or end card on the video. It is new time: the timeline grows by " +
+				"durationMs, and the card sits on a held frame behind an opaque fill rather than on " +
+				"empty space, so it composites everywhere the rest of the video does. op title and " +
+				"op end differ only in the title's size and in where they default to — title at the " +
+				"start, end at the end — and position overrides that, so op end with position start " +
+				"is a legal chapter card. background is a hex colour and anything else is refused " +
+				"rather than quietly defaulted; a logo must be an absolute path to an image that " +
+				"reads, checked before anything changes. One history undo takes back the card, its " +
+				"text and the region shifts together.",
+			inputSchema: z.object({
+				op: z.enum(["title", "end"]),
+				text: z.string().min(1).max(200).describe("The card's heading"),
+				subtitle: z
+					.string()
+					.max(200)
+					.optional()
+					.describe("A second line; blank simply omits it"),
+				background: z
+					.string()
+					.min(1)
+					.optional()
+					.describe('Hex only, e.g. "#000000"; defaults to black'),
+				logo: z.string().min(1).optional().describe("Absolute path to an image"),
+				durationMs: z
+					.number()
+					.int()
+					.min(1)
+					.max(600_000)
+					.describe("How long the card holds; it is added to the video's length"),
+				position: z
+					.enum(["start", "end"])
+					.optional()
+					.describe("Defaults to start for a title and end for an end card"),
+			}),
+		},
+		async ({ op, ...rest }, ctx) =>
+			textResult(
+				await editor.requestEditor(`card.${op}`, rest, { signal: ctx.mcpReq.signal }),
+			),
+	);
+
+	server.registerTool(
 		"polish_recording",
 		{
 			description:
@@ -1820,6 +1874,24 @@ export function buildRecordlyMcpServer(
 					.min(17)
 					.optional()
 					.describe("A frame every this many ms; the total must come to 2 to 6"),
+				aspect: z
+					.string()
+					.min(1)
+					.optional()
+					.describe('Letterbox as the export would, e.g. "16:9"; not with padTo'),
+				padTo: z
+					.string()
+					.min(1)
+					.optional()
+					.describe(
+						'Letterbox to exactly this size, e.g. "2880x1600"; not with aspect or scale',
+					),
+				scale: z
+					.number()
+					.min(0.05)
+					.max(1)
+					.optional()
+					.describe("Shrink as the export would, 0.05-1; not with padTo"),
 			}),
 		},
 		async (args, ctx) => {
