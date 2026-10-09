@@ -12,6 +12,7 @@ import type { RemoteEditor } from "./remoteEditor";
 import type { RemoteExport } from "./remoteExport";
 import type { RemoteRecordings } from "./remoteRecordings";
 import type { RemoteReview } from "./reviewRecording";
+import type { Thumbnail } from "./thumbnail";
 
 const CONTROL_SWITCH = "'Let agents use the mouse and keyboard' in Recordly Settings → Advanced";
 const CONTROL_OFF = `Mouse and keyboard control is off. Ask the user to turn on ${CONTROL_SWITCH}, then try again.`;
@@ -557,6 +558,7 @@ export function buildRecordlyMcpServer(
 		recordings,
 		files,
 		capture,
+		thumbnail,
 	}: {
 		agent: AgentControl;
 		isControlEnabled: () => boolean;
@@ -567,6 +569,7 @@ export function buildRecordlyMcpServer(
 		recordings: RemoteRecordings;
 		files: OpenFileTools;
 		capture: CaptureControls;
+		thumbnail: Thumbnail;
 	},
 ) {
 	const mac = platform === "darwin";
@@ -859,6 +862,10 @@ export function buildRecordlyMcpServer(
 					.min(0)
 					.optional()
 					.describe("Render only up to this edited time. Needs fromMs"),
+				chapters: z
+					.boolean()
+					.optional()
+					.describe("Write one chapter per rehearsed scene; mp4 only"),
 			}),
 		},
 		async (args, ctx) => {
@@ -1154,14 +1161,52 @@ export function buildRecordlyMcpServer(
 				"path and trims it to the room available; volume is 0–1. op mute_source silences what " +
 				"the recording captured, for one clip or all of them, and source_track picks which " +
 				"captured track (mixed, system, mic) to use. There is no text-to-speech: record or " +
-				"generate the audio elsewhere and pass the file. Reversible with history undo.",
+				"generate the audio elsewhere and pass the file. op fade fades a region in and out, " +
+				"and op duck lowers it over the ranges you give or over the caption spans — it does " +
+				"NOT listen to the recording, so it ducks exactly where you say. Fades and ducks are " +
+				"applied in the exported file but not in the editor's own playback, and the " +
+				"recording's own track can be muted but not faded or ducked. Reversible with " +
+				"history undo.",
 			inputSchema: z.object({
-				op: z.enum(["add", "remove", "volume", "mute_source", "source_track"]),
+				op: z.enum([
+					"add",
+					"remove",
+					"volume",
+					"mute_source",
+					"source_track",
+					"fade",
+					"duck",
+				]),
 				path: z
 					.string()
 					.min(1)
 					.optional()
 					.describe("op add: absolute path to an audio file"),
+				inMs: z
+					.number()
+					.min(0)
+					.optional()
+					.describe("op fade: fade in over this many ms; 0 clears it"),
+				outMs: z
+					.number()
+					.min(0)
+					.optional()
+					.describe("op fade: fade out over this many ms; 0 clears it"),
+				level: z
+					.number()
+					.min(0)
+					.max(1)
+					.optional()
+					.describe("op duck: the multiplier while ducked, 0 silent to 1 no duck"),
+				ranges: z
+					.union([
+						z.literal("captions"),
+						z.array(z.object({ startMs: z.number().min(0), endMs: z.number().min(0) })),
+					])
+					.optional()
+					.describe(
+						'op duck: "captions" for the caption spans, or explicit edited-time spans',
+					),
 				startMs: z.number().min(0).optional().describe("op add; defaults to 0"),
 				durationMs: z.number().positive().optional().describe("op add"),
 				volume: z.number().min(0).max(1).optional(),
@@ -1198,7 +1243,12 @@ export function buildRecordlyMcpServer(
 				"real app shows real names, email addresses and figures, and nothing else here hides " +
 				"them. Geometry is percent of the frame (0–100, origin top-left) and times are " +
 				"milliseconds in the EDITED timeline, after cuts. Needs the editor open. Reversible " +
-				"with history undo. space decides what the geometry is measured against: frame (the " +
+				"with history undo. kind highlight is a spotlight: it dims everything outside its box " +
+				"so you can point at one control without moving the frame, and it must stay in frame " +
+				"space to follow what it points at. preset lower_third or callout gives styled text " +
+				"on a plate, which is what keeps it readable — plain white text over a light app is " +
+				"invisible, so prefer a preset or a backgroundColor over guessing a colour. " +
+				"space decides what the geometry is measured against: frame (the " +
 				"default) sits on the recorded picture and moves with the zoom, which is what a blur " +
 				"must do to keep covering what it hides; screen pins it to the output frame so a title " +
 				"or a logo stays put and an active zoom cannot crop it. A blur cannot use screen. " +
@@ -1207,9 +1257,30 @@ export function buildRecordlyMcpServer(
 				op: z.enum(["add", "update", "remove", "clear"]),
 				id: z.string().min(1).optional().describe("Required for update and remove"),
 				kind: z
-					.enum(["text", "image", "figure", "blur"])
+					.enum(["text", "image", "figure", "blur", "highlight"])
 					.optional()
-					.describe("Required for add; figure is an arrow. Cannot be changed later"),
+					.describe(
+						"Required for add unless preset is given; figure is an arrow, highlight dims " +
+							"everything outside its box. Cannot be changed later",
+					),
+				preset: z
+					.enum(["lower_third", "callout"])
+					.optional()
+					.describe(
+						"op add: a styled text plate, legible over any footage. Fields you pass win over it",
+					),
+				dim: z
+					.number()
+					.min(0.1)
+					.max(0.9)
+					.optional()
+					.describe("kind highlight: how dark the surroundings go, 0.1-0.9, default 0.6"),
+				backgroundColor: z
+					.string()
+					.min(1)
+					.optional()
+					.describe("kind text: a plate behind the text, which is what keeps it legible"),
+				textAlign: z.enum(["left", "center", "right"]).optional().describe("kind text"),
 				startMs: z.number().min(0).optional(),
 				endMs: z.number().min(0).optional(),
 				x: z
@@ -1613,6 +1684,43 @@ export function buildRecordlyMcpServer(
 	);
 
 	server.registerTool(
+		"polish_recording",
+		{
+			description:
+				"Apply the house look in one call instead of twenty. op-free: style picks the frame " +
+				"(clean, dark or none) and captions decides whether to caption from the scene " +
+				"titles — omit it to caption only when there are none, true to replace what is " +
+				"there, false for none. Recordly already cuts dead time, speeds up idle stretches " +
+				"and zooms on clicks when a fresh recording loads, so this does NOT redo that: it " +
+				"reports what was already there and adds the look, scene captions, and an idle " +
+				"speed-up only on a timeline nothing has touched yet, which is the case for a " +
+				"reopened project. The reply lists every step as applied, already present, skipped " +
+				"or failed with the reason, so nothing is claimed that did not happen, and it ends " +
+				"with the problems check_edits would report. A step that fails does not stop the " +
+				"others and nothing is rolled back. Idle speed-ups are hard steps, not ramps. " +
+				"**history.undo reverts only the timeline edits, NOT the look**, which the editor " +
+				"does not track — to go back, send the previous look values from get_editor_state " +
+				"and undo the timeline edits one at a time.",
+			inputSchema: z.object({
+				style: z
+					.enum(["clean", "dark", "none"])
+					.optional()
+					.describe("The frame to apply; defaults to clean"),
+				captions: z
+					.boolean()
+					.optional()
+					.describe(
+						"Omit to caption only when there are none, true to replace them, false for none",
+					),
+			}),
+		},
+		async (args, ctx) =>
+			textResult(
+				await editor.requestEditor("polish_recording", args, { signal: ctx.mcpReq.signal }),
+			),
+	);
+
+	server.registerTool(
 		"edit_project",
 		{
 			description:
@@ -1660,7 +1768,8 @@ export function buildRecordlyMcpServer(
 				"what costs the most to find late: a title or logo in the default frame space that an " +
 				"active zoom will crop out of view, a crop or padding that leaves too little picture, " +
 				"a blur sitting over a moving zoom, geometry off the frame, an empty or inverted " +
-				"region, and a caption that was legal when written but was made illegal by a later " +
+				"region, an overlay whose colour is likely invisible against what is behind it, and " +
+				"a caption that was legal when written but was made illegal by a later " +
 				"trim or split — the cut rule only runs when a caption is written, so nothing else " +
 				"re-checks it. Every problem carries the moment to look at, so pass its atMs to " +
 				"render_preview to see it. severity error means certainly wrong; warning means worth " +
@@ -1725,6 +1834,28 @@ export function buildRecordlyMcpServer(
 				],
 			};
 		},
+	);
+
+	server.registerTool(
+		"thumbnail",
+		{
+			description:
+				"Write one composited frame to an image file — the still for the email, the deck or " +
+				"the pull request that goes with the video. It is the export renderer's own " +
+				"composite, not the recorded screen, and it works before any export exists. The " +
+				"image is at most 1280px wide, so it is a preview-size still rather than full " +
+				"export resolution. A time inside a cut or past the end is refused, and an existing " +
+				"file is kept unless you pass overwrite.",
+			inputSchema: z.object({
+				atMs: z.number().min(0).describe("The edited time to capture"),
+				outputPath: z
+					.string()
+					.min(1)
+					.describe("Absolute path ending in .png, .jpg or .jpeg"),
+				overwrite: z.boolean().optional().describe("Replace an existing file"),
+			}),
+		},
+		async (args, ctx) => textResult(await thumbnail(args, ctx.mcpReq.signal)),
 	);
 
 	server.registerTool(
