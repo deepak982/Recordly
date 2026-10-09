@@ -14,6 +14,8 @@ function makeContext(
 		clips?: Clip[];
 		tracks?: TrackSettings;
 		durationSec?: number;
+		captions?: { id: string; startMs: number; endMs: number; text: string }[];
+		loading?: boolean;
 	} = {},
 ) {
 	const state = {
@@ -35,6 +37,10 @@ function makeContext(
 			get audioRegions() {
 				return state.regions;
 			},
+			get autoCaptions() {
+				return options.captions ?? [];
+			},
+			sourceAudioLoading: options.loading ?? false,
 			get selectedAudioId() {
 				return state.selected;
 			},
@@ -464,5 +470,160 @@ describe("audio.source_track", () => {
 		expect(() => run("audio.remove", { id: "x" }, makeContext().context)).toThrow(
 			/no audio regions; add one with audio\.add/,
 		);
+	});
+});
+
+const speech = [
+	{ id: "c1", startMs: 1000, endMs: 2000, text: "a" },
+	{ id: "c2", startMs: 2050, endMs: 3000, text: "b" },
+];
+
+describe("audio.fade", () => {
+	const music = () => region({ id: "m", startMs: 0, endMs: 4000 });
+
+	it("stores fade in and out on the region and keeps the one not given", async () => {
+		const { state, context } = makeContext({ regions: [music()] });
+		await run("audio.fade", { id: "m", inMs: 500 }, context);
+		const result = await run("audio.fade", { id: "m", outMs: 1000 }, context);
+		expect(state.regions[0]).toMatchObject({ fadeInMs: 500, fadeOutMs: 1000 });
+		expect(result).toMatchObject({ overlapping: false });
+	});
+
+	it("accepts a fade exactly the region's length and 0 to clear", async () => {
+		const { state, context } = makeContext({ regions: [music()] });
+		await run("audio.fade", { id: "m", inMs: 4000 }, context);
+		expect(state.regions[0]).toMatchObject({ fadeInMs: 4000 });
+		await run("audio.fade", { id: "m", inMs: 0 }, context);
+		expect(state.regions[0]).toMatchObject({ fadeInMs: 0 });
+	});
+
+	it("reports an in and out that overlap in a short region", async () => {
+		const { context } = makeContext({ regions: [music()] });
+		const result = await run("audio.fade", { id: "m", inMs: 3000, outMs: 3000 }, context);
+		expect(result).toMatchObject({ overlapping: true });
+	});
+
+	it.each([
+		["longer than the region", { id: "m", inMs: 4001 }, /only 4000 ms long/],
+		["negative", { id: "m", outMs: -1 }, /0 or more/],
+		["not a number", { id: "m", inMs: "x" }, /inMs/],
+		["no durations", { id: "m" }, /inMs, outMs/],
+		["a region that does not exist", { id: "zz", inMs: 10 }, /no audio region/],
+	])("refuses a fade %s and changes nothing", async (_name, payload, message) => {
+		const { state, context } = makeContext({ regions: [music()] });
+		expect(() => run("audio.fade", payload, context)).toThrow(message);
+		expect(state.regions[0]).not.toHaveProperty("fadeInMs");
+	});
+
+	it("explains that the recording's own track cannot be faded", async () => {
+		const { context } = makeContext({
+			regions: [music()],
+			clips: [{ id: "clip1", startMs: 0, endMs: 10000, speed: 1 }],
+		});
+		expect(() => run("audio.fade", { id: "clip1", inMs: 10 }, context)).toThrow(
+			/own sound cannot be faded/,
+		);
+	});
+});
+
+describe("audio.duck", () => {
+	const music = (over: Partial<AudioRegion> = {}) =>
+		region({ id: "m", startMs: 500, endMs: 6000, ...over });
+
+	it("ducks over the given ranges, clipped to the region and merged when they touch", async () => {
+		const { state, context } = makeContext({ regions: [music()] });
+		await run(
+			"audio.duck",
+			{
+				id: "m",
+				level: 0.3,
+				ranges: [
+					{ startMs: 0, endMs: 1000 },
+					{ startMs: 1050, endMs: 2000 },
+					{ startMs: 9000, endMs: 9500 },
+				],
+			},
+			context,
+		);
+		expect((state.regions[0] as never as { duck: unknown }).duck).toEqual({
+			level: 0.3,
+			ranges: [{ startMs: 500, endMs: 2000 }],
+		});
+	});
+
+	it("ducks under captions, and only the named region", async () => {
+		const other = region({ id: "o", startMs: 0, endMs: 6000, trackIndex: 1 });
+		const { state, context } = makeContext({
+			regions: [music(), other],
+			captions: speech,
+			clips: [{ id: "k", startMs: 0, endMs: 10000, speed: 1 }],
+		});
+		const result = (await run(
+			"audio.duck",
+			{ id: "m", level: 0, ranges: "captions" },
+			context,
+		)) as {
+			ranges: unknown[];
+		};
+		expect(result.ranges).toEqual([{ startMs: 1000, endMs: 3000 }]);
+		expect(state.regions[1]).not.toHaveProperty("duck");
+	});
+
+	it("accepts both bounds and level 1 removes the duck", async () => {
+		const { state, context } = makeContext({ regions: [music()] });
+		const ranges = [{ startMs: 1000, endMs: 2000 }];
+		await run("audio.duck", { id: "m", level: 0, ranges }, context);
+		expect((state.regions[0] as never as { duck: { level: number } }).duck.level).toBe(0);
+		await run("audio.duck", { id: "m", level: 1, ranges: [] }, context);
+		expect((state.regions[0] as never as { duck: unknown }).duck).toBeUndefined();
+	});
+
+	it.each([
+		[
+			"a level below 0",
+			{ id: "m", level: -0.1, ranges: [{ startMs: 1, endMs: 2 }] },
+			/level must be/,
+		],
+		[
+			"a level above 1",
+			{ id: "m", level: 1.1, ranges: [{ startMs: 1, endMs: 2 }] },
+			/level must be/,
+		],
+		[
+			"no music region",
+			{ id: "nope", level: 0.5, ranges: [{ startMs: 1, endMs: 2 }] },
+			/no audio region/,
+		],
+		["no captions found", { id: "m", level: 0.5, ranges: "captions" }, /no captions/],
+		[
+			"ranges outside the region",
+			{ id: "m", level: 0.5, ranges: [{ startMs: 8000, endMs: 9000 }] },
+			/nothing would be ducked/,
+		],
+		[
+			"a reversed range",
+			{ id: "m", level: 0.5, ranges: [{ startMs: 2000, endMs: 1000 }] },
+			/startMs < endMs/,
+		],
+		["no ranges argument", { id: "m", level: 0.5 }, /ranges must be/],
+	])("refuses %s and changes nothing", async (_name, payload, message) => {
+		const { state, context } = makeContext({ regions: [music()] });
+		expect(() => run("audio.duck", payload, context)).toThrow(message);
+		expect(state.regions[0]).not.toHaveProperty("duck");
+	});
+
+	it("says when the recording's sound is loading or absent, and still applies the duck", async () => {
+		const ranges = [{ startMs: 1000, endMs: 2000 }];
+		const loading = makeContext({ regions: [music()], tracks: {}, loading: true });
+		const a = (await run("audio.duck", { id: "m", level: 0.5, ranges }, loading.context)) as {
+			note: string;
+		};
+		expect(a.note).toMatch(/still loading/);
+		const none = makeContext({ regions: [music()], tracks: {} });
+		const b = (await run("audio.duck", { id: "m", level: 0.5, ranges }, none.context)) as {
+			note: string;
+		};
+		expect(b.note).toMatch(/no sound of its own/);
+		expect(none.state.regions[0]).toHaveProperty("duck");
 	});
 });

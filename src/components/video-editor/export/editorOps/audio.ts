@@ -1,5 +1,8 @@
+import type { AudioDuckRange, AudioEnvelope } from "@/lib/exporter/audioEnvelope";
+import { DUCK_RAMP_MS } from "@/lib/exporter/audioEnvelope";
 import { isAbsoluteLocalPath } from "@/lib/exporter/localMediaSource";
 import type { SourceAudioTrackSetting } from "../../audio/audioTypes";
+import { projectCaptionCues } from "../../captionTimeline";
 import { resolveAudioPlacement } from "../../timeline/hooks/utils/timelineAudioPlacement";
 import { type AudioRegion, getTimelineDurationMs } from "../../types";
 import {
@@ -203,6 +206,122 @@ export const audioOps: EditorOpMap = {
 			current.map((region) => (region.id === id ? { ...region, volume } : region)),
 		);
 		return { id, volume };
+	},
+
+	"audio.fade": (payload, context) => {
+		const args = requireObject(payload, "audio.fade");
+		const id = requireId(args.id, "id");
+		if (args.inMs === undefined && args.outMs === undefined) {
+			throw new Error("Give inMs, outMs, or both. 0 removes that fade.");
+		}
+		const target = context.timeline.audioRegions.find((value) => value.id === id);
+		if (!target && context.timeline.clipRegions.some((clip) => clip.id === id)) {
+			throw new Error(
+				`"${id}" is a clip of the recording, and the recording's own sound cannot be faded, only added audio can. Fade an audio region instead.`,
+			);
+		}
+		const audio = requireAudioRegion(id, context);
+		const lengthMs = audio.endMs - audio.startMs;
+		const read = (value: unknown, field: string) => {
+			const ms = Math.round(requireFiniteNumber(value, field));
+			if (ms < 0) throw new Error(`${field} must be 0 or more.`);
+			if (ms > lengthMs) {
+				throw new Error(
+					`${field} is ${ms} ms but audio region ${id} is only ${lengthMs} ms long. Use ${lengthMs} ms or less.`,
+				);
+			}
+			return ms;
+		};
+		const fadeInMs = args.inMs === undefined ? undefined : read(args.inMs, "inMs");
+		const fadeOutMs = args.outMs === undefined ? undefined : read(args.outMs, "outMs");
+		const next = {
+			fadeInMs: fadeInMs ?? (audio as AudioEnvelope).fadeInMs ?? 0,
+			fadeOutMs: fadeOutMs ?? (audio as AudioEnvelope).fadeOutMs ?? 0,
+		};
+		context.timeline.setAudioRegions((current) =>
+			current.map((region) => (region.id === id ? { ...region, ...next } : region)),
+		);
+		return {
+			id,
+			...next,
+			overlapping: next.fadeInMs + next.fadeOutMs > lengthMs,
+			note: "Applied in the exported file. The editor preview does not play fades.",
+		};
+	},
+
+	"audio.duck": (payload, context) => {
+		const args = requireObject(payload, "audio.duck");
+		const id = requireId(args.id, "id");
+		const level = requireFiniteNumber(args.level, "level");
+		if (level < 0 || level > 1) {
+			throw new Error(
+				"level must be from 0 (silent while ducked) to 1 (no ducking, removes the duck).",
+			);
+		}
+		const audio = requireAudioRegion(id, context);
+		let ranges: AudioDuckRange[];
+		if (args.ranges === "captions") {
+			ranges = projectCaptionCues(
+				context.timeline.autoCaptions,
+				context.timeline.clipRegions,
+			).map((fragment) => ({
+				startMs: Math.round(fragment.startMs),
+				endMs: Math.round(fragment.endMs),
+			}));
+			if (ranges.length === 0) {
+				throw new Error(
+					"There are no captions to duck under. Add captions first, or pass ranges as a list of {startMs, endMs}.",
+				);
+			}
+		} else if (Array.isArray(args.ranges)) {
+			ranges = args.ranges.map((value: unknown, index: number) => {
+				const item = requireObject(value, `ranges[${index}]`);
+				const startMs = Math.round(
+					requireFiniteNumber(item.startMs, `ranges[${index}].startMs`),
+				);
+				const endMs = Math.round(requireFiniteNumber(item.endMs, `ranges[${index}].endMs`));
+				if (startMs < 0 || endMs <= startMs) {
+					throw new Error(`ranges[${index}] must have 0 <= startMs < endMs.`);
+				}
+				return { startMs, endMs };
+			});
+		} else {
+			throw new Error(
+				'ranges must be "captions" or a list of {startMs, endMs} in timeline ms.',
+			);
+		}
+		const clipped = ranges
+			.map((range) => ({
+				startMs: Math.max(range.startMs, audio.startMs),
+				endMs: Math.min(range.endMs, audio.endMs),
+			}))
+			.filter((range) => range.endMs > range.startMs)
+			.sort((a, b) => a.startMs - b.startMs);
+		if (level < 1 && clipped.length === 0) {
+			throw new Error(
+				`None of the ranges fall inside audio region ${id} (${audio.startMs}-${audio.endMs} ms), so nothing would be ducked.`,
+			);
+		}
+		const merged: AudioDuckRange[] = [];
+		for (const range of clipped) {
+			const last = merged[merged.length - 1];
+			if (last && range.startMs <= last.endMs + DUCK_RAMP_MS) {
+				last.endMs = Math.max(last.endMs, range.endMs);
+			} else merged.push({ ...range });
+		}
+		const duck = level < 1 ? { level, ranges: merged } : undefined;
+		context.timeline.setAudioRegions((current) =>
+			current.map((region) => (region.id === id ? { ...region, duck } : region)),
+		);
+		const sourceAudio = Object.keys(context.timeline.defaultSourceAudioTrackSettings ?? {});
+		let note =
+			"Lowers this region over exactly these ranges; it does not listen to the recording. Applied in the exported file, not in the editor preview.";
+		if (sourceAudio.length === 0) {
+			note += context.timeline.sourceAudioLoading
+				? " The recording's own sound is still loading, so whether it has speech is not yet known."
+				: " The recording has no sound of its own, so there is nothing for the music to compete with.";
+		}
+		return { id, level, ranges: duck ? merged : [], note };
 	},
 
 	"audio.mute_source": (payload, context) => {
