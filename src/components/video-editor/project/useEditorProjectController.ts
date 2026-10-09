@@ -13,6 +13,7 @@ import type { useProjectState } from "../state/useProjectState";
 import type { useTimelineState } from "../state/useTimelineState";
 import type { VideoPlaybackRef } from "../VideoPlayback";
 import { useInitialEditorSource } from "./useInitialEditorSource";
+import { usePristineRecordingGate } from "./usePristineRecordingGate";
 import type { useProjectLibraryController } from "./useProjectLibraryController";
 import { useProjectLifecycle } from "./useProjectLifecycle";
 import { useProjectOpenActions } from "./useProjectOpenActions";
@@ -138,6 +139,13 @@ export function useEditorProjectController(input: Input) {
 		[lifecycle.currentProjectSnapshot, input.project.lastSavedSnapshot],
 	);
 
+	const isPristineRecording = usePristineRecordingGate({
+		sourcePath: snapshot.currentSourcePath,
+		snapshot: lifecycle.currentProjectSnapshot,
+		isPipelineBusy: () =>
+			input.project.loading || input.pendingFreshRecordingAgentEditsPathRef.current !== null,
+	});
+
 	useInitialEditorSource({
 		project: input.project,
 		appearance: input.appearance,
@@ -192,6 +200,7 @@ export function useEditorProjectController(input: Input) {
 		currentPersistedEditorState: snapshot.currentPersistedEditorState,
 		projectDisplayName: snapshot.projectDisplayName,
 		hasUnsavedChanges,
+		isPristineRecording,
 		projectSaveDialogInputRef: input.projectSaveDialogInputRef,
 		projectNameInputRef: input.projectNameInputRef,
 		openProjectSaveDialog: lifecycle.openProjectSaveDialog,

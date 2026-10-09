@@ -1448,18 +1448,29 @@ export function buildRecordlyMcpServer(
 			description:
 				"Move a recording to Recordly's own trash, which can be undone with " +
 				"restore_recording. Use this instead of deleting the file yourself. It only accepts a " +
-				"recording inside the library folder.",
+				"recording inside the library folder. **It refuses, naming them, when saved projects " +
+				"use that recording**, because a project can hold hours of edits that restoring the " +
+				"video would not bring back. force moves it anyway and keeps the projects, which show " +
+				"a missing-video error until the recording is restored. The reply lists the projects " +
+				"it found and any project file it could not read.",
 			inputSchema: z.object({
 				path: z.string().min(1).describe("Absolute path to the recording"),
+				force: z
+					.boolean()
+					.optional()
+					.describe("Delete even though projects use it; the projects are kept"),
 			}),
 		},
-		async ({ path }) => textResult(await recordings.deleteRecording(path)),
+		async ({ path, force }) => textResult(await recordings.deleteRecording(path, { force })),
 	);
 
 	server.registerTool(
 		"restore_recording",
 		{
-			description: "Put a recording deleted with delete_recording back in the library.",
+			description:
+				"Put a recording deleted with delete_recording back in the library. The reply names " +
+				"the projects that open again, or says none do — which means they were deleted " +
+				"separately and this does not bring them back.",
 			inputSchema: z.object({
 				path: z.string().min(1).describe("Absolute path to the recording"),
 			}),

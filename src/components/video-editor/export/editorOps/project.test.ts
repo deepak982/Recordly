@@ -231,6 +231,29 @@ describe("project.open", () => {
 		expect(project.applyLoaded).not.toHaveBeenCalled();
 	});
 
+	it.each([
+		[
+			"missing",
+			"Project video file not found: /rec/a.mp4",
+			/video file not found: \/rec\/a\.mp4\. The editor was not changed/,
+		],
+		[
+			"empty",
+			"Project video file is empty (0 bytes): /rec/a.mp4",
+			/is empty \(0 bytes\).*editor was not changed/,
+		],
+		[
+			"not-a-file",
+			"Project video is not a file: /rec/a.mp4",
+			/not a file.*editor was not changed/,
+		],
+	])("keeps a %s project video distinct and leaves the editor alone", async (reason, message, expected) => {
+		api.openProjectFileAtPath.mockResolvedValue({ success: false, reason, message });
+		const { context, project } = makeContext();
+		await expect(run("project.open", { name: "Demo" }, context)).rejects.toThrow(expected);
+		expect(project.applyLoaded).not.toHaveBeenCalled();
+	});
+
 	it("refuses a file that parses but is not a project", async () => {
 		api.openProjectFileAtPath.mockResolvedValue({ success: true, project: { hello: 1 } });
 		const { context, project } = makeContext();

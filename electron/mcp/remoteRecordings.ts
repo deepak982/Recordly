@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import path from "node:path";
 import { BrowserWindow } from "electron";
 
@@ -23,6 +24,11 @@ export type RemoteRecordingsWiring = {
 export type RemoteRecordingsDeps = RemoteRecordingsWiring & {
 	list: () => Promise<{ path: string; name: string; bytes: number; createdAt: number }[]>;
 	setRemoved: (paths: string[], removed: boolean) => Promise<void>;
+	exists: (videoPath: string) => Promise<boolean>;
+	projectsReferencing: (videoPath: string) => Promise<{
+		referencing: { name: string; path: string }[];
+		unchecked: { name: string; path: string }[];
+	}>;
 	validate: (videoPath: string) => Promise<Validation>;
 	/** Returns true only when this was the take still being captured, telemetry and all. */
 	activate: (videoPath: string) => Promise<{ usedLiveCapture: boolean }>;
@@ -74,6 +80,22 @@ const defaultDeps = (): Omit<RemoteRecordingsDeps, keyof RemoteRecordingsWiring>
 	list: async () => (await import("../ipc/recording/library")).listRecordings(),
 	setRemoved: async (paths, removed) =>
 		(await import("../ipc/recording/library")).setRecordingsRemoved(paths, removed),
+	exists: (videoPath) =>
+		fs.stat(videoPath).then(
+			(stat) => stat.isFile(),
+			() => false,
+		),
+	projectsReferencing: async (videoPath) => {
+		const [
+			{ listProjectLibraryEntries, normalizeVideoSourcePath },
+			{ findProjectsReferencing },
+		] = await Promise.all([
+			import("../ipc/project/manager"),
+			import("../ipc/project/recordingReferences"),
+		]);
+		const { entries } = await listProjectLibraryEntries();
+		return findProjectsReferencing(videoPath, entries, normalizeVideoSourcePath);
+	},
 	validate: async (videoPath) =>
 		(await import("../ipc/recording/diagnostics")).validateRecordedVideo(videoPath),
 	activate: defaultActivate,
@@ -219,20 +241,53 @@ export function createRemoteRecordings(
 		listRecordings,
 		openEditor,
 
-		async deleteRecording(filePath: string) {
+		async deleteRecording(filePath: string, { force }: { force?: boolean } = {}) {
 			const target = requireAbsolute(filePath, "path");
+			if (force !== undefined && typeof force !== "boolean") {
+				throw new Error("delete_recording: force must be true or false.");
+			}
+			const name = path.basename(target);
+			if (!(await deps.exists(target))) {
+				throw new Error(
+					`There is no recording at ${target}. It may already be in Recordly's trash (restore_recording brings it back) or never existed.`,
+				);
+			}
+			const { referencing, unchecked } = await deps.projectsReferencing(target);
+			const names = referencing.map((project) => `"${project.name}"`).join(", ");
+			const uncheckedNote = unchecked.length
+				? ` ${unchecked.length} project file(s) could not be read, so they were not checked: ${unchecked.map((project) => `"${project.name}"`).join(", ")}.`
+				: "";
+			if (referencing.length && !force) {
+				throw new Error(
+					`Not deleted: ${referencing.length} saved project(s) use ${name}: ${names}. Their edits would be left pointing at a missing video and could not be opened. Nothing was changed. Pass force: true to delete the recording anyway; the projects are kept and open again once restore_recording brings the video back.${uncheckedNote}`,
+				);
+			}
 			await deps.setRemoved([target], true);
 			return {
 				path: target,
 				removed: true,
-				note: "Moved to Recordly's trash, not deleted for good. restore_recording brings it back until the next removal or until Recordly quits; after that it is in the system Trash.",
+				projects: referencing,
+				unchecked,
+				note: `${
+					referencing.length
+						? `Moved to Recordly's trash with force. ${referencing.length} project(s) still point at it and show a missing-video error until it is restored: ${names}. They were not deleted. `
+						: "Moved to Recordly's trash. No saved project uses it. "
+				}restore_recording brings the recording back until the next removal or until Recordly quits; after that it is in the system Trash, and projects that use it stay unopenable until you relink or restore the file from there.${uncheckedNote}`,
 			};
 		},
 
 		async restoreRecording(filePath: string) {
 			const target = requireAbsolute(filePath, "path");
 			await deps.setRemoved([target], false);
-			return { path: target, removed: false };
+			const { referencing } = await deps.projectsReferencing(target);
+			return {
+				path: target,
+				removed: false,
+				projects: referencing,
+				note: referencing.length
+					? `Restored. ${referencing.length} saved project(s) use it again and open normally: ${referencing.map((project) => `"${project.name}"`).join(", ")}.`
+					: "Restored. No saved project uses it, so any projects that did were deleted separately and are not brought back by this.",
+			};
 		},
 	};
 }

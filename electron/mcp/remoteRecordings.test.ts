@@ -41,6 +41,8 @@ function setup(overrides = {}) {
 			{ path: "/r/new.mp4", name: "new.mp4", bytes: 20, createdAt: 2000 },
 		]),
 		setRemoved: vi.fn(async () => undefined),
+		exists: vi.fn(async () => true),
+		projectsReferencing: vi.fn(async () => ({ referencing: [], unchecked: [] })),
 		validate: vi.fn(async () => ({ fileSizeBytes: 5000, durationSeconds: 90 })),
 		activate: vi.fn(async () => ({ usedLiveCapture: false })),
 		isCapturing: vi.fn(async () => false),
@@ -282,12 +284,70 @@ describe("list and delete", () => {
 		expect(list[0]).toMatchObject({ sizeBytes: 20, modifiedAt: new Date(2000).toISOString() });
 	});
 
-	it("delete goes through the reversible trash and says so", async () => {
+	const demo = { name: "Demo", path: "/p/Demo.recordly" };
+	const untitled = { name: "Untitled Project 3", path: "/p/Untitled Project 3.recordly" };
+
+	it("delete with no project using it goes through the reversible trash and says so", async () => {
 		const { deps, recordings } = setup();
 		const result = await recordings.deleteRecording("/r/old.mp4");
 		expect(deps.setRemoved).toHaveBeenCalledWith(["/r/old.mp4"], true);
-		expect(result.note).toMatch(/not deleted for good/);
-		await recordings.restoreRecording("/r/old.mp4");
-		expect(deps.setRemoved).toHaveBeenLastCalledWith(["/r/old.mp4"], false);
+		expect(result.projects).toEqual([]);
+		expect(result.note).toMatch(/No saved project uses it/);
+		expect(result.note).toMatch(/restore_recording brings the recording back/);
+	});
+
+	it("refuses to delete a recording a project uses, names the projects and changes nothing", async () => {
+		const { deps, recordings } = setup({
+			projectsReferencing: vi.fn(async () => ({
+				referencing: [demo, untitled],
+				unchecked: [],
+			})),
+		});
+		await expect(recordings.deleteRecording("/r/old.mp4")).rejects.toThrow(
+			/2 saved project\(s\) use old\.mp4: "Demo", "Untitled Project 3".*force: true/,
+		);
+		expect(deps.setRemoved).not.toHaveBeenCalled();
+	});
+
+	it("force deletes the recording, keeps the projects and names them in the reply", async () => {
+		const { deps, recordings } = setup({
+			projectsReferencing: vi.fn(async () => ({ referencing: [demo], unchecked: [] })),
+		});
+		const result = await recordings.deleteRecording("/r/old.mp4", { force: true });
+		expect(deps.setRemoved).toHaveBeenCalledWith(["/r/old.mp4"], true);
+		expect(result.projects).toEqual([demo]);
+		expect(result.note).toMatch(/"Demo".*not deleted/);
+	});
+
+	it("names unreadable project files instead of ignoring them", async () => {
+		const bad = { name: "Broken", path: "/p/Broken.recordly" };
+		const { recordings } = setup({
+			projectsReferencing: vi.fn(async () => ({ referencing: [], unchecked: [bad] })),
+		});
+		const result = await recordings.deleteRecording("/r/old.mp4");
+		expect(result.note).toMatch(/could not be read.*"Broken"/);
+	});
+
+	it("rejects a non-boolean force and a recording that is not there, before any change", async () => {
+		const { deps, recordings } = setup({ exists: vi.fn(async () => false) });
+		await expect(
+			recordings.deleteRecording("/r/old.mp4", { force: "yes" as unknown as boolean }),
+		).rejects.toThrow(/force must be true or false/);
+		await expect(recordings.deleteRecording("/r/old.mp4")).rejects.toThrow(
+			/no recording at \/r\/old\.mp4.*already be in Recordly's trash/,
+		);
+		expect(deps.projectsReferencing).not.toHaveBeenCalled();
+		expect(deps.setRemoved).not.toHaveBeenCalled();
+	});
+
+	it("restore names the projects that work again, or says none do", async () => {
+		const withProject = setup({
+			projectsReferencing: vi.fn(async () => ({ referencing: [demo], unchecked: [] })),
+		});
+		const restored = await withProject.recordings.restoreRecording("/r/old.mp4");
+		expect(withProject.deps.setRemoved).toHaveBeenLastCalledWith(["/r/old.mp4"], false);
+		expect(restored.note).toMatch(/open normally: "Demo"/);
+		const bare = await setup().recordings.restoreRecording("/r/old.mp4");
+		expect(bare.note).toMatch(/No saved project uses it.*deleted separately/);
 	});
 });

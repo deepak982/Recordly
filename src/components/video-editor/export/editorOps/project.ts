@@ -176,8 +176,9 @@ export const projectOps: EditorOpMap = {
 			`the project file ${path} to be read`,
 		);
 		if (!loaded.success || !loaded.project) {
+			const reason = loaded.message ?? loaded.error ?? `Could not open ${path}.`;
 			throw new Error(
-				`${loaded.message ?? loaded.error ?? `Could not open ${path}.`} The editor was not changed.`,
+				`${reason}${/[.!?]$/.test(reason) ? "" : "."} The editor was not changed.`,
 			);
 		}
 		if (!validateProjectData(loaded.project)) {
