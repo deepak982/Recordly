@@ -31,6 +31,10 @@ const TOTAL_BUDGET_MS = 120_000;
 const END_FRAME_BACKOFF_MS = 40;
 const FALLBACK_PREVIEW_WIDTH = 1920;
 const FALLBACK_PREVIEW_HEIGHT = 1080;
+const IDLE_TEARDOWN_MS = 60_000;
+const SEEK_EPSILON_S = 0.001;
+
+const NO_PROGRESS = () => undefined;
 
 export type PreviewFrame = { atMs: number; sourceMs: number };
 
@@ -182,7 +186,64 @@ function previewPixelSize() {
 	return { width: FALLBACK_PREVIEW_WIDTH, height: FALLBACK_PREVIEW_HEIGHT, measured: false };
 }
 
+type WarmRenderer = {
+	config: Record<string, unknown>;
+	cursorArtwork: string | null;
+	canvas: () => HTMLCanvasElement;
+	destroy: () => void;
+	draw: (video: HTMLVideoElement, frame: PreviewFrame, seekMs: number) => Promise<void>;
+};
+
 let rendering = false;
+let teardownPending = false;
+let idleTimer: ReturnType<typeof setTimeout> | undefined;
+let warmVideo: { sourcePath: string; element: HTMLVideoElement } | null = null;
+let warmRenderer: WarmRenderer | null = null;
+
+export function sameRendererConfig(left: Record<string, unknown>, right: Record<string, unknown>) {
+	for (const key of new Set([...Object.keys(left), ...Object.keys(right)])) {
+		if (left[key] !== right[key]) return false;
+	}
+	return true;
+}
+
+function dropRenderer() {
+	const held = warmRenderer;
+	warmRenderer = null;
+	if (held) release(() => held.destroy());
+}
+
+function dropVideo() {
+	const held = warmVideo;
+	warmVideo = null;
+	if (held) {
+		release(() => {
+			held.element.removeAttribute("src");
+			held.element.load();
+		});
+	}
+}
+
+export function teardownPreviewCache() {
+	clearTimeout(idleTimer);
+	idleTimer = undefined;
+	if (rendering) {
+		teardownPending = true;
+		return false;
+	}
+	teardownPending = false;
+	dropRenderer();
+	dropVideo();
+	return true;
+}
+
+function armIdleTeardown() {
+	clearTimeout(idleTimer);
+	idleTimer = setTimeout(() => {
+		idleTimer = undefined;
+		teardownPreviewCache();
+	}, IDLE_TEARDOWN_MS);
+}
 
 export function previewSheetGeometry(drawnCount: number, planCols: number) {
 	const cols = Math.max(1, drawnCount < planCols ? drawnCount : planCols);
@@ -215,20 +276,30 @@ export async function renderPreview(payload: unknown, context: EditorOpContext) 
 		throw new Error("A preview is already rendering. Wait for it to finish, then try again.");
 	}
 	rendering = true;
-	let video: HTMLVideoElement | null = null;
-	let renderer: Awaited<ReturnType<typeof createRenderer>> | null = null;
+	const reused: string[] = [];
+	let settled = false;
 	try {
-		video = document.createElement("video");
-		const url = await withTimeout(
-			resolveVideoUrl(videoSourcePath),
-			LOAD_TIMEOUT_MS,
-			"a playable URL for the recording",
-		);
-		video.muted = true;
-		video.preload = "auto";
-		const loaded = settleVideo(video, "loadeddata", "the recording to open for decoding");
-		video.src = url;
-		await loaded;
+		if (warmVideo && warmVideo.sourcePath !== videoSourcePath) {
+			dropRenderer();
+			dropVideo();
+		}
+		let video = warmVideo?.element ?? null;
+		if (video) reused.push("decoded video");
+		else {
+			const element = document.createElement("video");
+			const url = await withTimeout(
+				resolveVideoUrl(videoSourcePath),
+				LOAD_TIMEOUT_MS,
+				"a playable URL for the recording",
+			);
+			element.muted = true;
+			element.preload = "auto";
+			const loaded = settleVideo(element, "loadeddata", "the recording to open for decoding");
+			element.src = url;
+			await loaded;
+			video = element;
+			warmVideo = { sourcePath: videoSourcePath, element };
+		}
 		context.assertSameRecording();
 		if (!(video.videoWidth > 0 && video.videoHeight > 0)) {
 			throw new Error("The recording reports no picture size, so it cannot be composited.");
@@ -244,7 +315,7 @@ export async function renderPreview(payload: unknown, context: EditorOpContext) 
 		const scale = Math.min(1, cap / native.width);
 		const tileWidth = even(native.width * scale);
 		const tileHeight = even(native.height * scale);
-		renderer = await createRenderer({
+		const config = buildRendererConfig({
 			context,
 			tileWidth,
 			tileHeight,
@@ -252,6 +323,11 @@ export async function renderPreview(payload: unknown, context: EditorOpContext) 
 			previewWidth: previewSize.width,
 			previewHeight: previewSize.height,
 		});
+		if (warmRenderer && !sameRendererConfig(warmRenderer.config, config)) dropRenderer();
+		if (warmRenderer) reused.push("export renderer");
+		else warmRenderer = await openRenderer(config);
+		const renderer = warmRenderer;
+		const layers = describeLayers(context, renderer.cursorArtwork);
 		const sheet = document.createElement("canvas");
 		sheet.width = plan.cols * tileWidth + (plan.cols - 1) * TILE_GAP;
 		sheet.height = plan.rows * tileHeight + (plan.rows - 1) * TILE_GAP;
@@ -268,14 +344,17 @@ export async function renderPreview(payload: unknown, context: EditorOpContext) 
 			}
 			context.assertSameRecording();
 			const seekMs = Math.min(frame.sourceMs, lastSeekMs);
-			const seeked = settleVideo(
-				video,
-				"seeked",
-				`the recording to seek to ${Math.round(seekMs)} ms`,
-			);
-			video.currentTime = seekMs / 1000;
-			await seeked;
-			await renderer.draw(frame, seekMs);
+			const targetSeconds = seekMs / 1000;
+			if (Math.abs(video.currentTime - targetSeconds) > SEEK_EPSILON_S) {
+				const seeked = settleVideo(
+					video,
+					"seeked",
+					`the recording to seek to ${Math.round(seekMs)} ms`,
+				);
+				video.currentTime = targetSeconds;
+				await seeked;
+			}
+			await renderer.draw(video, frame, seekMs);
 			sheetCtx.drawImage(
 				renderer.canvas(),
 				(index % plan.cols) * (tileWidth + TILE_GAP),
@@ -296,6 +375,7 @@ export async function renderPreview(payload: unknown, context: EditorOpContext) 
 		const dataUrl = used.toDataURL("image/jpeg", JPEG_QUALITY);
 		const comma = dataUrl.indexOf(",");
 		if (comma < 0) throw new Error("The preview canvas returned no image.");
+		settled = true;
 		return {
 			image: {
 				data: dataUrl.slice(comma + 1),
@@ -307,8 +387,9 @@ export async function renderPreview(payload: unknown, context: EditorOpContext) 
 			rows,
 			frames: drawn,
 			...(plan.skippedAtMs.length > 0 && { skippedAtMs: plan.skippedAtMs }),
-			rendered: renderer.rendered,
-			notRendered: renderer.notRendered,
+			rendered: layers.rendered,
+			notRendered: layers.notRendered,
+			reused,
 			note: [
 				`This is the export pipeline's own composite at ${tileWidth}x${tileHeight} per frame, not the recorded screen.`,
 				`It uses the recording's native aspect ratio and the legacy export renderer, so an export set to another aspect ratio or to the modern pipeline can frame things differently.`,
@@ -322,11 +403,8 @@ export async function renderPreview(payload: unknown, context: EditorOpContext) 
 		};
 	} finally {
 		rendering = false;
-		release(() => renderer?.destroy());
-		release(() => {
-			video?.removeAttribute("src");
-			video?.load();
-		});
+		if (settled && !teardownPending) armIdleTeardown();
+		else teardownPreviewCache();
 	}
 }
 
@@ -338,8 +416,31 @@ function release(step: () => void) {
 	}
 }
 
-async function createRenderer({
-	context,
+export function describeLayers(
+	{ timeline, appearance }: EditorOpContext,
+	cursorArtwork: string | null,
+) {
+	const rendered = ["clips and speed", "look", "zooms", "webcam"];
+	const notRendered: string[] = [];
+	if (cursorArtwork) {
+		notRendered.push(
+			`cursor: its artwork could not be loaded here (${cursorArtwork}), so no cursor is drawn even though the export draws one`,
+		);
+	} else if (!appearance.showCursor) {
+		notRendered.push("cursor: it is turned off for this export");
+	} else if ((timeline.cursorTelemetry ?? []).length === 0) {
+		notRendered.push("cursor: this recording carries no cursor telemetry");
+	} else rendered.push("cursor");
+	if (timeline.annotationRegions.length > 0) rendered.push("annotations");
+	if (timeline.autoCaptions.length > 0) {
+		if (timeline.autoCaptionSettings?.enabled) rendered.push("captions");
+		else notRendered.push("captions: they are turned off in the caption settings");
+	}
+	return { rendered, notRendered };
+}
+
+function buildRendererConfig({
+	context: { timeline, appearance },
 	tileWidth,
 	tileHeight,
 	video,
@@ -352,33 +453,8 @@ async function createRenderer({
 	video: HTMLVideoElement;
 	previewWidth: number;
 	previewHeight: number;
-}) {
-	const { timeline, appearance } = context;
-	const rendered = ["clips and speed", "look", "zooms", "webcam"];
-	const notRendered: string[] = [];
-	const { preloadCursorAssets } = await import("../../videoPlayback/cursorRenderer");
-	let cursorAssets = true;
-	try {
-		await withTimeout(preloadCursorAssets(), INIT_TIMEOUT_MS, "the cursor artwork to load");
-	} catch (error) {
-		cursorAssets = false;
-		notRendered.push(
-			`cursor: its artwork could not be loaded here (${error instanceof Error ? error.message : String(error)}), so no cursor is drawn even though the export draws one`,
-		);
-	}
-	if (cursorAssets) {
-		if (!appearance.showCursor) notRendered.push("cursor: it is turned off for this export");
-		else if ((timeline.cursorTelemetry ?? []).length === 0) {
-			notRendered.push("cursor: this recording carries no cursor telemetry");
-		} else rendered.push("cursor");
-	}
-	if (timeline.annotationRegions.length > 0) rendered.push("annotations");
-	if (timeline.autoCaptions.length > 0) {
-		if (timeline.autoCaptionSettings?.enabled) rendered.push("captions");
-		else notRendered.push("captions: they are turned off in the caption settings");
-	}
-	const { FrameRenderer } = await import("@/lib/exporter/frameRenderer");
-	const renderer = new FrameRenderer({
+}): Record<string, unknown> {
+	return {
 		...buildExportRenderOptions({
 			appearance,
 			timeline,
@@ -389,25 +465,39 @@ async function createRenderer({
 			previewWidth,
 			previewHeight,
 			shadowIntensity: appearance.shadowIntensity,
-			onProgress: () => undefined,
+			onProgress: NO_PROGRESS,
 		}),
 		timelineEffects: true,
 		width: tileWidth,
 		height: tileHeight,
 		videoWidth: video.videoWidth,
 		videoHeight: video.videoHeight,
-	});
+	};
+}
+
+async function openRenderer(config: Record<string, unknown>): Promise<WarmRenderer> {
+	const { preloadCursorAssets } = await import("../../videoPlayback/cursorRenderer");
+	let cursorArtwork: string | null = null;
+	try {
+		await withTimeout(preloadCursorAssets(), INIT_TIMEOUT_MS, "the cursor artwork to load");
+	} catch (error) {
+		cursorArtwork = error instanceof Error ? error.message : String(error);
+	}
+	const { FrameRenderer } = await import("@/lib/exporter/frameRenderer");
+	const renderer = new FrameRenderer(
+		config as unknown as ConstructorParameters<typeof FrameRenderer>[0],
+	);
 	await withTimeout(
 		renderer.initialize(),
 		INIT_TIMEOUT_MS,
 		"the export renderer to start up (it needs a GPU context)",
 	);
 	return {
-		rendered,
-		notRendered,
+		config,
+		cursorArtwork,
 		canvas: () => renderer.getCanvas(),
 		destroy: () => renderer.destroy(),
-		draw: async (frame: PreviewFrame, seekMs: number) => {
+		draw: async (video: HTMLVideoElement, frame: PreviewFrame, seekMs: number) => {
 			const videoFrame = new VideoFrame(video, { timestamp: seekMs * 1000 });
 			try {
 				await withTimeout(

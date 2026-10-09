@@ -8,6 +8,7 @@ const recorder = vi.hoisted(() => ({
 	destroyed: 0,
 	cursorAssetsFail: false,
 	initFails: false,
+	renderFails: false,
 }));
 
 vi.mock("@/lib/exporter/frameRenderer", () => ({
@@ -25,6 +26,7 @@ vi.mock("@/lib/exporter/frameRenderer", () => ({
 			_durationUs: undefined,
 			timelineTimestamp: number,
 		) {
+			if (recorder.renderFails) throw new Error("the composite failed");
 			recorder.renders.push([timestamp, cursorTimestamp, timelineTimestamp]);
 		}
 		getCanvas() {
@@ -53,6 +55,8 @@ import {
 	planPreview,
 	previewSheetGeometry,
 	renderPreview,
+	sameRendererConfig,
+	teardownPreviewCache,
 } from "./preview";
 
 type Listener = () => void;
@@ -120,22 +124,31 @@ const original = {
 	VideoFrame: (globalThis as { VideoFrame?: unknown }).VideoFrame,
 };
 
-let video: ReturnType<typeof fakeVideo>;
+let videos: ReturnType<typeof fakeVideo>[];
 let canvases: ReturnType<typeof fakeCanvas>[];
 let overlay: { clientWidth: number; clientHeight: number } | null;
 
+const video = () => videos[videos.length - 1];
+
 beforeEach(() => {
+	teardownPreviewCache();
+	vi.useFakeTimers({ shouldAdvanceTime: true });
 	recorder.configs = [];
 	recorder.renders = [];
 	recorder.destroyed = 0;
 	recorder.cursorAssetsFail = false;
 	recorder.initFails = false;
-	video = fakeVideo();
+	recorder.renderFails = false;
+	videos = [];
 	canvases = [];
 	overlay = { clientWidth: 1280, clientHeight: 720 };
 	(globalThis as { document?: unknown }).document = {
 		createElement: (tag: string) => {
-			if (tag === "video") return video;
+			if (tag === "video") {
+				const element = fakeVideo();
+				videos.push(element);
+				return element;
+			}
 			const canvas = fakeCanvas();
 			canvases.push(canvas);
 			return canvas;
@@ -152,6 +165,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	teardownPreviewCache();
+	vi.useRealTimers();
 	(globalThis as { document?: unknown }).document = original.document;
 	(globalThis as { VideoFrame?: unknown }).VideoFrame = original.VideoFrame;
 });
@@ -196,6 +211,17 @@ function makeContext(over: Record<string, unknown> = {}) {
 		...over,
 		timeline,
 		appearance,
+	} as unknown as EditorOpContext;
+}
+
+function editContext(
+	base: EditorOpContext,
+	edit: { timeline?: Record<string, unknown>; appearance?: Record<string, unknown> },
+) {
+	return {
+		...base,
+		timeline: { ...base.timeline, ...edit.timeline },
+		appearance: { ...base.appearance, ...edit.appearance },
 	} as unknown as EditorOpContext;
 }
 
@@ -319,8 +345,9 @@ describe("render_preview", () => {
 		});
 		expect(result.rendered).toContain("cursor");
 		expect(result.notRendered).toEqual([]);
-		expect(recorder.destroyed).toBe(1);
-		expect(video.cleared).toBe(true);
+		expect(result.reused).toEqual([]);
+		expect(recorder.destroyed).toBe(0);
+		expect(video().cleared).toBe(false);
 	});
 
 	it("names the cursor as not rendered when the recording has no telemetry", async () => {
@@ -352,7 +379,7 @@ describe("render_preview", () => {
 			frames: unknown[];
 		};
 		expect(result.frames).toHaveLength(3);
-		expect(video.seeks).toEqual([0, 5, 9.96]);
+		expect(video().seeks).toEqual([5, 9.96]);
 		expect([result.cols, result.rows]).toEqual([2, 2]);
 		const sheet = canvases[canvases.length - 1];
 		expect(sheet.drawn).toHaveLength(3);
@@ -368,7 +395,7 @@ describe("render_preview", () => {
 	it("releases the renderer and the video when the renderer cannot start", async () => {
 		recorder.initFails = true;
 		await expect(renderPreview({}, makeContext())).rejects.toThrow(/no GPU context/);
-		expect(video.cleared).toBe(true);
+		expect(video().cleared).toBe(true);
 	});
 
 	it("refuses a second preview while one is still rendering", async () => {
@@ -391,7 +418,7 @@ describe("render_preview", () => {
 				}),
 			),
 		).rejects.toThrow(/different recording/);
-		expect(video.cleared).toBe(true);
+		expect(video().cleared).toBe(true);
 	});
 });
 
@@ -411,5 +438,159 @@ describe("previewSheetGeometry", () => {
 
 	it("never returns a zero-sized sheet", () => {
 		expect(previewSheetGeometry(0, 3)).toEqual({ cols: 1, rows: 1 });
+	});
+});
+
+describe("sameRendererConfig", () => {
+	it("matches two configs built from the same state", () => {
+		const regions: unknown[] = [];
+		expect(
+			sameRendererConfig(
+				{ width: 1280, zoomRegions: regions },
+				{ width: 1280, zoomRegions: regions },
+			),
+		).toBe(true);
+	});
+
+	it("rejects a changed scalar, a changed array identity, and a missing key", () => {
+		expect(sameRendererConfig({ padding: 0 }, { padding: 40 })).toBe(false);
+		expect(sameRendererConfig({ zoomRegions: [] }, { zoomRegions: [] })).toBe(false);
+		expect(sameRendererConfig({ padding: 0 }, { padding: 0, borderRadius: 8 })).toBe(false);
+	});
+});
+
+describe("render_preview warm cache", () => {
+	it("keeps the video and the renderer warm for the next preview", async () => {
+		const context = makeContext();
+		await renderPreview({ atMs: 100 }, context);
+		const first = videos.length;
+		const second = (await renderPreview({ atMs: 200 }, context)) as { reused: string[] };
+		expect(second.reused).toEqual(["decoded video", "export renderer"]);
+		expect(videos).toHaveLength(first);
+		expect(recorder.configs).toHaveLength(1);
+		expect(recorder.destroyed).toBe(0);
+	});
+
+	it("rebuilds the renderer when the look changes but keeps the decoded video", async () => {
+		const context = makeContext();
+		await renderPreview({ atMs: 100 }, context);
+		const opened = videos.length;
+		const next = (await renderPreview(
+			{ atMs: 200 },
+			editContext(context, { appearance: { padding: 64 } }),
+		)) as { reused: string[] };
+		expect(next.reused).toEqual(["decoded video"]);
+		expect(videos).toHaveLength(opened);
+		expect(recorder.configs).toHaveLength(2);
+		expect(recorder.configs[1]).toMatchObject({ padding: 64 });
+		expect(recorder.destroyed).toBe(1);
+	});
+
+	it("rebuilds the renderer when a zoom is added, so an edit cannot show the old frame", async () => {
+		const context = makeContext();
+		await renderPreview({ atMs: 100 }, context);
+		const edited = (await renderPreview(
+			{ atMs: 100 },
+			editContext(context, {
+				timeline: { zoomRegions: [{ id: "zoom-1", startMs: 0, endMs: 500, depth: 3 }] },
+			}),
+		)) as { reused: string[] };
+		expect(edited.reused).toEqual(["decoded video"]);
+		expect(recorder.configs).toHaveLength(2);
+		expect(recorder.configs[1]).toMatchObject({ zoomRegions: [{ id: "zoom-1" }] });
+	});
+
+	it("drops both when the editor loads a different recording", async () => {
+		const context = makeContext();
+		await renderPreview({ atMs: 100 }, context);
+		const first = video();
+		const next = (await renderPreview({ atMs: 100 }, {
+			...context,
+			videoSourcePath: "/tmp/other.mp4",
+		} as unknown as EditorOpContext)) as { reused: string[] };
+		expect(next.reused).toEqual([]);
+		expect(first.cleared).toBe(true);
+		expect(videos).toHaveLength(2);
+		expect(recorder.destroyed).toBe(1);
+		expect(recorder.configs).toHaveLength(2);
+	});
+
+	it("rebuilds the renderer after a cut, because clips are part of what it was built from", async () => {
+		const context = makeContext();
+		await renderPreview({ atMs: 100 }, context);
+		const opened = videos.length;
+		const next = (await renderPreview(
+			{ atMs: 100 },
+			editContext(context, {
+				timeline: { clipRegions: [clip({ startMs: 0, endMs: 4000 })] },
+			}),
+		)) as { reused: string[] };
+		expect(next.reused).toEqual(["decoded video"]);
+		expect(videos).toHaveLength(opened);
+		expect(recorder.configs).toHaveLength(2);
+	});
+
+	it("rebuilds the renderer when the editor preview is resized", async () => {
+		const context = makeContext();
+		await renderPreview({ atMs: 100 }, context);
+		overlay = { clientWidth: 960, clientHeight: 540 };
+		const next = (await renderPreview({ atMs: 100 }, context)) as { reused: string[] };
+		expect(next.reused).toEqual(["decoded video"]);
+		expect(recorder.configs[1]).toMatchObject({ previewWidth: 960, previewHeight: 540 });
+	});
+
+	it("does not seek when the warm video already sits on the wanted frame", async () => {
+		const context = makeContext();
+		await renderPreview({ atMs: 400 }, context);
+		const seeks = video().seeks.length;
+		await renderPreview({ atMs: 400 }, context);
+		expect(video().seeks).toHaveLength(seeks);
+		expect(recorder.renders).toHaveLength(2);
+	});
+
+	it("releases the renderer and the video once it has been idle", async () => {
+		await renderPreview({ atMs: 100 }, makeContext());
+		expect(recorder.destroyed).toBe(0);
+		await vi.advanceTimersByTimeAsync(59_000);
+		expect(recorder.destroyed).toBe(0);
+		await vi.advanceTimersByTimeAsync(2_000);
+		expect(recorder.destroyed).toBe(1);
+		expect(video().cleared).toBe(true);
+		const cold = (await renderPreview({ atMs: 100 }, makeContext())) as { reused: string[] };
+		expect(cold.reused).toEqual([]);
+	});
+
+	it("does not let a run of previews keep the renderer alive past the last one", async () => {
+		const context = makeContext();
+		await renderPreview({ atMs: 100 }, context);
+		await vi.advanceTimersByTimeAsync(40_000);
+		await renderPreview({ atMs: 200 }, context);
+		await vi.advanceTimersByTimeAsync(40_000);
+		expect(recorder.destroyed).toBe(0);
+		await vi.advanceTimersByTimeAsync(21_000);
+		expect(recorder.destroyed).toBe(1);
+	});
+
+	it("drops everything when a render throws, instead of leaving it warm", async () => {
+		const context = makeContext();
+		await renderPreview({ atMs: 100 }, context);
+		recorder.renderFails = true;
+		await expect(renderPreview({ atMs: 200 }, context)).rejects.toThrow(/composite/);
+		expect(recorder.destroyed).toBe(1);
+		expect(video().cleared).toBe(true);
+		recorder.renderFails = false;
+		const cold = (await renderPreview({ atMs: 100 }, context)) as { reused: string[] };
+		expect(cold.reused).toEqual([]);
+	});
+
+	it("defers an explicit teardown asked for while a render is in flight", async () => {
+		const context = makeContext();
+		const inFlight = renderPreview({ atMs: 100 }, context);
+		expect(teardownPreviewCache()).toBe(false);
+		await inFlight;
+		expect(recorder.destroyed).toBe(1);
+		expect(video().cleared).toBe(true);
+		await vi.advanceTimersByTimeAsync(70_000);
+		expect(recorder.destroyed).toBe(1);
 	});
 });
