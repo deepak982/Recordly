@@ -46,6 +46,9 @@ function setup(overrides = {}) {
 		validate: vi.fn(async () => ({ fileSizeBytes: 5000, durationSeconds: 90 })),
 		activate: vi.fn(async () => ({ usedLiveCapture: false })),
 		isCapturing: vi.fn(async () => false),
+		isUnfinishedCaptureTarget: vi.fn(async () => false),
+		switchTimeoutMs: 60,
+		switchPollMs: 5,
 		currentRecordingPath: vi.fn(async () => null as string | null),
 		...overrides,
 	};
@@ -125,6 +128,52 @@ describe("recoverRecording", () => {
 	});
 });
 
+describe("recovering an interrupted capture", () => {
+	const unplayable = () =>
+		vi.fn(async () => {
+			throw new Error("Recorded output does not contain a readable video stream");
+		});
+
+	it("finalizes the capture that was in progress, then validates it", async () => {
+		const validate = vi
+			.fn()
+			.mockRejectedValueOnce(new Error("moov atom not found"))
+			.mockResolvedValueOnce({ fileSizeBytes: 9000, durationSeconds: 12 });
+		const { deps, recordings } = setup({
+			validate,
+			isUnfinishedCaptureTarget: vi.fn(async () => true),
+			activate: vi.fn(async () => ({ usedLiveCapture: true })),
+		});
+		const result = await recordings.recoverRecording("/r/take.mp4");
+		expect(deps.activate).toHaveBeenCalledWith("/r/take.mp4");
+		expect(result).toMatchObject({ durationSeconds: 12, telemetrySaved: true });
+	});
+
+	it("says the file is still unplayable when finalizing did not help", async () => {
+		const { recordings } = setup({
+			validate: unplayable(),
+			isUnfinishedCaptureTarget: vi.fn(async () => true),
+		});
+		await expect(recordings.recoverRecording("/r/take.mp4")).rejects.toThrow(
+			/interrupted, and finalizing it did not produce a playable file/,
+		);
+	});
+
+	it("does not touch the session for an unplayable file that was not the live capture", async () => {
+		const { deps, recordings } = setup({ validate: unplayable() });
+		await expect(recordings.recoverRecording("/r/take.mp4")).rejects.toThrow(
+			/cannot play \/r\/take\.mp4/,
+		);
+		expect(deps.activate).not.toHaveBeenCalled();
+	});
+
+	it("refuses while a capture is still running", async () => {
+		const { deps, recordings } = setup({ isCapturing: vi.fn(async () => true) });
+		await expect(recordings.recoverRecording("/r/take.mp4")).rejects.toThrow(/stop_recording/);
+		expect(deps.activate).not.toHaveBeenCalled();
+	});
+});
+
 describe("openEditor", () => {
 	it("recovers the newest recording, opens the window and waits for the editor", async () => {
 		const { deps, recordings } = setup();
@@ -187,14 +236,55 @@ describe("openEditor", () => {
 		expect(result.note).toMatch(/within 45 s/);
 	});
 
-	it("says so when the editor answers with a different recording", async () => {
+	it("waits until the editor shows the requested recording, not just until it answers", async () => {
+		const answers = ["/r/old.mp4", "/r/old.mp4", "/r/take.mp4"];
+		const waitForEditorState = vi.fn(async () => ({
+			videoPath: answers.shift() ?? "/r/take.mp4",
+		}));
 		const { recordings } = setup({
-			currentRecordingPath: vi.fn(async () => "/r/take.mp4"),
+			currentRecordingPath: vi.fn(async () => "/r/old.mp4"),
+			waitForEditorState,
+		});
+		const result = await recordings.openEditor({ path: "/r/take.mp4" });
+		expect(waitForEditorState.mock.calls.length).toBeGreaterThanOrEqual(3);
+		expect(result).toMatchObject({
+			path: "/r/take.mp4",
+			editorReady: true,
+			showing: "/r/take.mp4",
+		});
+		expect(result.note).toMatch(/loaded/);
+	});
+
+	it("says the switch did not happen, and not to repeat the call, when the editor never switches", async () => {
+		const { recordings } = setup({
 			waitForEditorState: vi.fn(async () => ({ videoPath: "/r/other.mp4" })),
 		});
-		const result = await recordings.openEditor();
+		const result = await recordings.openEditor({ path: "/r/take.mp4" });
 		expect(result).toMatchObject({ editorReady: true, showing: "/r/other.mp4" });
-		expect(result.note).toMatch(/not \/r\/take\.mp4/);
+		expect(result.note).toMatch(/still showing \/r\/other\.mp4, not \/r\/take\.mp4/);
+		expect(result.note).toMatch(/will not change that/);
+		expect(result.note).not.toMatch(/Call open_editor again/);
+	});
+
+	it("re-sends the current recording once when an open but empty editor never picked it up", async () => {
+		let ready = false;
+		const waitForEditorState = vi.fn(async () => {
+			if (!ready) throw new Error("There is no recording loaded in the editor.");
+			return { videoPath: "/r/take.mp4" };
+		});
+		const activate = vi.fn(async () => {
+			ready = true;
+			return { usedLiveCapture: false };
+		});
+		const { recordings } = setup({
+			currentRecordingPath: vi.fn(async () => "/r/take.mp4"),
+			waitForEditorState,
+			activate,
+		});
+		const result = await recordings.openEditor();
+		expect(activate).toHaveBeenCalledTimes(1);
+		expect(activate).toHaveBeenCalledWith("/r/take.mp4");
+		expect(result).toMatchObject({ editorReady: true, showing: "/r/take.mp4" });
 	});
 
 	it("is a plain focus the second time around", async () => {

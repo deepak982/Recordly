@@ -33,8 +33,24 @@ export type RemoteRecordingsDeps = RemoteRecordingsWiring & {
 	/** Returns true only when this was the take still being captured, telemetry and all. */
 	activate: (videoPath: string) => Promise<{ usedLiveCapture: boolean }>;
 	isCapturing: () => Promise<boolean>;
+	isUnfinishedCaptureTarget: (videoPath: string) => Promise<boolean>;
+	switchTimeoutMs?: number;
+	switchPollMs?: number;
 	currentRecordingPath: () => Promise<string | null>;
 };
+
+const SWITCH_TIMEOUT_MS = 15_000;
+const SWITCH_POLL_MS = 250;
+
+type CaptureState = typeof import("../ipc/state");
+
+function liveCaptureTarget(state: CaptureState) {
+	const diagnostics = state.lastNativeCaptureDiagnostics;
+	return (
+		state.nativeCaptureTargetPath ??
+		(diagnostics?.backend === "mac-screencapturekit" ? diagnostics.outputPath : null)
+	);
+}
 
 async function defaultActivate(videoPath: string) {
 	const [state, mac, session, manager, utils] = await Promise.all([
@@ -46,10 +62,7 @@ async function defaultActivate(videoPath: string) {
 	]);
 	// recoverNativeMacCaptureOutput finalizes whatever the capture state points at, with this same
 	// precedence, so it may only run when that is this exact file.
-	const diagnostics = state.lastNativeCaptureDiagnostics;
-	const captureTarget =
-		state.nativeCaptureTargetPath ??
-		(diagnostics?.backend === "mac-screencapturekit" ? diagnostics.outputPath : null);
+	const captureTarget = liveCaptureTarget(state);
 	if (
 		process.platform === "darwin" &&
 		captureTarget &&
@@ -107,6 +120,11 @@ const defaultDeps = (): Omit<RemoteRecordingsDeps, keyof RemoteRecordingsWiring>
 			state.ffmpegScreenRecordingActive
 		);
 	},
+	isUnfinishedCaptureTarget: async (videoPath) => {
+		if (process.platform !== "darwin") return false;
+		const target = liveCaptureTarget(await import("../ipc/state"));
+		return Boolean(target) && path.resolve(target as string) === videoPath;
+	},
 	currentRecordingPath: async () => {
 		const state = await import("../ipc/state");
 		return state.currentRecordingSession?.videoPath ?? state.currentVideoPath ?? null;
@@ -143,17 +161,35 @@ export function createRemoteRecordings(
 				"An export is running. Wait for it to finish before recovering: switching the recording now would pull the video out from under the export.",
 			);
 		}
-		let validation: Validation;
+		const validateOrExplain = async () => {
+			try {
+				return await deps.validate(videoPath);
+			} catch (error) {
+				const message =
+					(error as NodeJS.ErrnoException).code === "ENOENT"
+						? `There is no file at ${videoPath}.`
+						: `Recordly cannot play ${videoPath}: ${(error as Error).message}`;
+				throw new Error(message);
+			}
+		};
+		let validation: Validation | null = null;
+		let unfinished = false;
 		try {
-			validation = await deps.validate(videoPath);
+			validation = await validateOrExplain();
 		} catch (error) {
-			const message =
-				(error as NodeJS.ErrnoException).code === "ENOENT"
-					? `There is no file at ${videoPath}.`
-					: `Recordly cannot play ${videoPath}: ${(error as Error).message}`;
-			throw new Error(message);
+			unfinished = await deps.isUnfinishedCaptureTarget(videoPath);
+			if (!unfinished) throw error;
 		}
 		const { usedLiveCapture } = await deps.activate(videoPath);
+		if (!validation) {
+			try {
+				validation = await validateOrExplain();
+			} catch (error) {
+				throw new Error(
+					`${(error as Error).message} This was the capture still in progress when it was interrupted, and finalizing it did not produce a playable file.`,
+				);
+			}
+		}
 		return {
 			path: videoPath,
 			sizeBytes: validation.fileSizeBytes,
@@ -215,25 +251,49 @@ export function createRemoteRecordings(
 			windowCreated: created,
 			...(recovered ? { recoveredNote: recovered.note } : {}),
 		};
-		try {
-			const state = await deps.waitForEditorState({ signal });
-			const showing = path.resolve(state.videoPath);
+		const timeoutMs = deps.switchTimeoutMs ?? SWITCH_TIMEOUT_MS;
+		const pollMs = deps.switchPollMs ?? SWITCH_POLL_MS;
+		const deadline = Date.now() + timeoutMs;
+		let showing: string | null = null;
+		let lastError: Error | null = null;
+		let resent = recovered !== null;
+		for (;;) {
+			try {
+				showing = path.resolve((await deps.waitForEditorState({ signal })).videoPath);
+				lastError = null;
+				if (showing === target) break;
+			} catch (error) {
+				if (signal?.aborted) throw error;
+				lastError = error as Error;
+			}
+			if (!resent) {
+				resent = true;
+				await deps.activate(target);
+			}
+			if (Date.now() >= deadline) break;
+			await new Promise((resolve) => setTimeout(resolve, pollMs));
+		}
+		if (showing === target) {
 			return {
 				...opened,
 				editorReady: true,
 				showing,
-				note:
-					showing === target
-						? "The editor is open with this recording loaded, so get_editor_state and the edit tools will answer."
-						: `The editor is open and answering, but it is showing ${showing}, not ${target}. Call open_editor again with the path you want.`,
-			};
-		} catch (error) {
-			return {
-				...opened,
-				editorReady: false,
-				note: `Recordly opened the editor window, but the editor never reported a loaded recording: ${(error as Error).message} Only the window is guaranteed. Call get_editor_state again once ${path.basename(target)} has finished loading.`,
+				note: "The editor is open with this recording loaded, so get_editor_state and the edit tools will answer.",
 			};
 		}
+		if (showing) {
+			return {
+				...opened,
+				editorReady: true,
+				showing,
+				note: `The editor is open and answering, but after ${Math.round(timeoutMs / 1000)} seconds it is still showing ${showing}, not ${target}. Calling open_editor again will not change that. Do not edit: every edit tool would act on the wrong recording. Ask the user to close the editor window and call open_editor again; if it still shows the wrong file, the recording may be unplayable, so try review_recording or recover_recording on it.`,
+			};
+		}
+		return {
+			...opened,
+			editorReady: false,
+			note: `Recordly opened the editor window, but the editor never reported a loaded recording: ${lastError?.message ?? "no answer"} Only the window is guaranteed. Call get_editor_state again once ${path.basename(target)} has finished loading.`,
+		};
 	}
 
 	return {

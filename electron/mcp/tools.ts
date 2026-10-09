@@ -1399,9 +1399,12 @@ export function buildRecordlyMcpServer(
 				"window at all, and until now the only way in was to record a throwaway clip — which " +
 				"then left the wrong recording loaded. Pass a path, or omit it for the current " +
 				"recording, or the newest one. It opens or focuses the window and waits for the " +
-				"editor to report a recording fully loaded. editorReady false means only the window " +
-				"is guaranteed, and showing names the recording the editor actually answered with, " +
-				"which may not be the one you asked for. Refused, changing nothing, for a relative " +
+				"editor to report the recording you asked for, polling for up to 15 seconds rather " +
+				"than believing the first answer, since an editor already open on another take " +
+				"replies instantly with that one. **Only trust the reply when showing equals the " +
+				"path you asked for** — if it does not, the note says what to do, and editing anyway " +
+				"would act on the wrong recording. editorReady false means only the window " +
+				"is guaranteed. Refused, changing nothing, for a relative " +
 				"path, a file that is not a decodable video, no recordings at all, or while a " +
 				"recording or export is running.",
 			inputSchema: z.object({
