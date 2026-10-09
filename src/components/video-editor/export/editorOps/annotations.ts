@@ -305,7 +305,13 @@ export const annotationsOps: EditorOpMap = {
 			current.map((candidate) => (candidate.id === region.id ? region : candidate)),
 		);
 		return withPreview(
-			{ id: region.id, kind: region.type, startMs: region.startMs, endMs: region.endMs },
+			{
+				id: region.id,
+				kind: region.type,
+				space: region.space ?? "frame",
+				startMs: region.startMs,
+				endMs: region.endMs,
+			},
 			preview,
 			context,
 			{

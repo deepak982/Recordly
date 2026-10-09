@@ -328,4 +328,27 @@ describe("annotate space", () => {
 		);
 		expect(state.regions[0].space).toBeUndefined();
 	});
+
+	it("says which space an updated annotation ended up in", () => {
+		const { context } = makeContext();
+		const added = annotationsOps["annotate.add"](
+			{
+				kind: "text",
+				text: "Title",
+				startMs: 0,
+				endMs: 1000,
+				x: 10,
+				y: 10,
+				width: 40,
+				height: 10,
+				space: "screen",
+			},
+			context,
+		) as { id: string; space: string };
+		expect(added.space).toBe("screen");
+		const updated = annotationsOps["annotate.update"]({ id: added.id, x: 20 }, context) as {
+			space: string;
+		};
+		expect(updated.space).toBe("screen");
+	});
 });
