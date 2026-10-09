@@ -137,13 +137,42 @@ describe("add_card", () => {
 		expect(state.annotations).toHaveLength(2);
 	});
 
-	it("falls back to a blank clip when there is no footage to hold", async () => {
+	it("refuses a card with no footage to hold, since blank time carries no words", async () => {
 		const { state, context } = makeContext([]);
-		const result = await add("title", { text: "Intro", durationMs: 1500 }, context);
-		expect(result.durationMs).toBe(1500);
-		expect(state.clips).toHaveLength(1);
-		expect(isBlankClip(state.clips[0])).toBe(true);
-		expect(state.annotations).toHaveLength(2);
+		await expect(add("title", { text: "Intro", durationMs: 1500 }, context)).rejects.toThrow(
+			/no clips yet/,
+		);
+		expect(state.clips).toEqual([]);
+		expect(state.annotations).toEqual([]);
+	});
+
+	it("holds a real frame under a title card, so the words have something to sit on", async () => {
+		const { state, context } = makeContext([clip("a", 0, 20000)]);
+		await add("title", { text: "Entries", durationMs: 2000 }, context);
+		expect(isBlankClip(state.clips[0])).toBe(false);
+		expect(isStillClip(state.clips[0])).toBe(true);
+		expect(getClipSourceStartMs(state.clips[0])).toBe(0);
+		expect(state.clips[0].muted).toBe(true);
+	});
+
+	it.each([
+		["without a logo", undefined],
+		["with a logo", "/tmp/logo.png"],
+	])("gives the heading a box two lines deep, clear of its neighbours %s", async (_l, logo) => {
+		const { state, context } = makeContext([clip("a", 0, 20000)]);
+		await add(
+			"title",
+			{ text: "Payroll, end to end", subtitle: "every month", durationMs: 2000, logo },
+			context,
+		);
+		const box = (match: (annotation: AnnotationRegion) => boolean) => {
+			const found = state.annotations.find(match)!;
+			return { top: found.position.y, bottom: found.position.y + found.size.height };
+		};
+		const heading = box((a) => a.content === "Payroll, end to end");
+		expect(heading.bottom - heading.top).toBeGreaterThanOrEqual(26);
+		expect(heading.bottom).toBeLessThanOrEqual(box((a) => a.content === "every month").top);
+		if (logo) expect(box((a) => a.type === "image").bottom).toBeLessThanOrEqual(heading.top);
 	});
 
 	it("accepts an explicit position that contradicts the kind", async () => {

@@ -1,12 +1,11 @@
 import { getRenderableAssetUrl, isAbsoluteLocalAssetPath } from "@/lib/assetPath";
 import {
 	type AnnotationRegion,
-	type ClipRegion,
 	DEFAULT_ANNOTATION_STYLE,
 	getTimelineDurationMs,
 	sortClipRegions,
 } from "../../types";
-import { applyTimelineInsert, freezeClip, requireInsertMs } from "./timeline";
+import { applyTimelineInsert, freezeClip, NO_CLIPS, requireInsertMs } from "./timeline";
 import {
 	type EditorOpContext,
 	type EditorOpMap,
@@ -98,26 +97,12 @@ function cardAnnotation(
 	};
 }
 
-/** A card holds a frame under an opaque fill, so it needs no gap-frame path. */
-function cardClip(
-	context: EditorOpContext,
-	clips: ClipRegion[],
-	atMs: number,
-	durationMs: number,
-): ClipRegion {
-	if (clips.length > 0) return freezeClip(context, clips, atMs, durationMs);
-	return {
-		id: nextId(context.ids.clip, "clip"),
-		startMs: atMs,
-		endMs: atMs + durationMs,
-		speed: 1,
-		blank: true,
-		muted: true,
-	};
-}
-
 async function addCard(payload: unknown, context: EditorOpContext, kind: CardKind) {
 	const op = `card.${kind}`;
+	const clips = sortClipRegions(context.timeline.clipRegions);
+	// A card is words over a held frame. Blank time carries no annotations, so with
+	// no footage to hold there is nothing to put them on.
+	if (clips.length === 0) throw new Error(NO_CLIPS);
 	const args = requireObject(payload, op);
 	rejectUnknown(args, ["text", "subtitle", "background", "logo", "durationMs", "position"], op);
 	const text = requireCardText(args.text, "text", op);
@@ -131,7 +116,6 @@ async function addCard(payload: unknown, context: EditorOpContext, kind: CardKin
 	const position = requirePosition(args.position, kind, op);
 	const logo = await requireLogoDataUrl(args.logo, op);
 
-	const clips = sortClipRegions(context.timeline.clipRegions);
 	const atMs =
 		position === "start"
 			? 0
@@ -166,8 +150,8 @@ async function addCard(payload: unknown, context: EditorOpContext, kind: CardKin
 			type: "text",
 			content: text,
 			textContent: text,
-			position: { x: 10, y: logo ? 44 : 38 },
-			size: { width: 80, height: 18 },
+			position: { x: 10, y: logo ? 36 : 30 },
+			size: { width: 80, height: 26 },
 			style: {
 				...DEFAULT_ANNOTATION_STYLE,
 				fontSize: kind === "title" ? TITLE_FONT_SIZE : END_FONT_SIZE,
@@ -195,7 +179,7 @@ async function addCard(payload: unknown, context: EditorOpContext, kind: CardKin
 		context,
 		clips,
 		atMs,
-		cardClip(context, clips, atMs, durationMs),
+		freezeClip(context, clips, atMs, durationMs),
 	);
 	context.timeline.setAnnotationRegions((current) => [...current, ...annotations]);
 	return {

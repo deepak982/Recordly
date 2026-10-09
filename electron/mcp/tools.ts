@@ -1750,8 +1750,9 @@ export function buildRecordlyMcpServer(
 				"start, end at the end — and position overrides that, so op end with position start " +
 				"is a legal chapter card. background is a hex colour and anything else is refused " +
 				"rather than quietly defaulted; a logo must be an absolute path to an image that " +
-				"reads, checked before anything changes. One history undo takes back the card, its " +
-				"text and the region shifts together.",
+				"reads, checked before anything changes. It refuses when no recording is loaded: a card " +
+				"needs a frame to hold, and on empty time its words would not render at all. One " +
+				"history undo takes back the card, its text and the region shifts together.",
 			inputSchema: z.object({
 				op: z.enum(["title", "end"]),
 				text: z.string().min(1).max(200).describe("The card's heading"),

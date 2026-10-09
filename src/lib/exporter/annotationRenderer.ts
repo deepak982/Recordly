@@ -277,6 +277,10 @@ function renderArrow(
 	ctx.restore();
 }
 
+const LINE_HEIGHT_RATIO = 1.4;
+const MIN_TEXT_FONT_SIZE = 1;
+const FIT_STEPS = 8;
+
 function renderText(
 	ctx: CanvasRenderingContext2D,
 	annotation: AnnotationRegion,
@@ -296,8 +300,6 @@ function renderText(
 
 	const fontWeight = style.fontWeight === "bold" ? "bold" : "normal";
 	const fontStyle = style.fontStyle === "italic" ? "italic" : "normal";
-	const scaledFontSize = style.fontSize * scaleFactor;
-	ctx.font = `${fontStyle} ${fontWeight} ${scaledFontSize}px ${style.fontFamily}`;
 	ctx.textBaseline = "middle";
 
 	const containerPadding = 8 * scaleFactor;
@@ -317,27 +319,61 @@ function renderText(
 	}
 
 	const availableWidth = width - containerPadding * 2;
-	const rawLines = annotation.content.split("\n");
-	const lines: string[] = [];
-	for (const rawLine of rawLines) {
-		if (!rawLine) {
-			lines.push("");
-			continue;
+	const wrapAt = (fontSize: number) => {
+		ctx.font = `${fontStyle} ${fontWeight} ${fontSize}px ${style.fontFamily}`;
+		const wrapped: string[] = [];
+		for (const rawLine of annotation.content.split("\n")) {
+			if (!rawLine) {
+				wrapped.push("");
+				continue;
+			}
+			const words = rawLine.split(/(\s+)/);
+			let current = "";
+			for (const word of words) {
+				const test = current + word;
+				if (current && ctx.measureText(test).width > availableWidth) {
+					wrapped.push(current);
+					current = word.trimStart();
+				} else {
+					current = test;
+				}
+			}
+			if (current) wrapped.push(current);
 		}
-		const words = rawLine.split(/(\s+)/);
-		let current = "";
-		for (const word of words) {
-			const test = current + word;
-			if (current && ctx.measureText(test).width > availableWidth) {
-				lines.push(current);
-				current = word.trimStart();
+		return wrapped;
+	};
+	const wrapWithinBox = (fontSize: number): string[] | null => {
+		const wrapped = wrapAt(fontSize);
+		const widest = wrapped.reduce(
+			(most, line) => Math.max(most, ctx.measureText(line).width),
+			0,
+		);
+		if (widest > availableWidth) return null;
+		if (wrapped.length * fontSize * LINE_HEIGHT_RATIO > height) return null;
+		return wrapped;
+	};
+
+	// Clipped words are worth nothing, so text that still overflows after wrapping
+	// shrinks to the largest size that fits instead.
+	let scaledFontSize = style.fontSize * scaleFactor;
+	let fitted = wrapWithinBox(scaledFontSize);
+	if (!fitted) {
+		let smallest = MIN_TEXT_FONT_SIZE;
+		let largest = scaledFontSize;
+		for (let step = 0; step < FIT_STEPS; step++) {
+			const candidate = (smallest + largest) / 2;
+			const wrapped = wrapWithinBox(candidate);
+			if (wrapped) {
+				smallest = candidate;
+				fitted = wrapped;
 			} else {
-				current = test;
+				largest = candidate;
 			}
 		}
-		if (current) lines.push(current);
+		scaledFontSize = smallest;
 	}
-	const lineHeight = scaledFontSize * 1.4;
+	const lines = fitted ?? wrapAt(scaledFontSize);
+	const lineHeight = scaledFontSize * LINE_HEIGHT_RATIO;
 
 	const startY = textY - ((lines.length - 1) * lineHeight) / 2;
 

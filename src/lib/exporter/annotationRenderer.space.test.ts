@@ -116,6 +116,8 @@ function createRasterCanvas(width: number, height: number) {
 		clip: { x: 0, y: 0, width, height },
 	};
 	const stack: RasterState[] = [];
+	const texts: Array<{ text: string; left: number; top: number; width: number; height: number }> =
+		[];
 	let pending = { x: 0, y: 0, width: 0, height: 0 };
 
 	const fontSize = () => Number.parseFloat(/(\d+(?:\.\d+)?)px/.exec(state.font)?.[1] ?? "10");
@@ -253,12 +255,14 @@ function createRasterCanvas(width: number, height: number) {
 						? x - runWidth
 						: x;
 			const top = state.textBaseline === "middle" ? y - size / 2 : y - size;
+			texts.push({ text, left, top, width: runWidth, height: size });
 			paint(left, top, runWidth, size, state.fillStyle);
 		},
 	};
 
 	return {
 		ctx: ctx as unknown as CanvasRenderingContext2D,
+		texts,
 		paints,
 		paintedBounds: () => {
 			let left = width;
@@ -675,5 +679,110 @@ describe("fillBox backs a card with one solid plate", () => {
 	it("leaves the corners of the box alone without it, which is why a card needs it", async () => {
 		const { pixelAt } = await paint(false);
 		expect(pixelAt(4, 4)).toEqual(toRgb(PICTURE).concat(255));
+	});
+});
+
+describe("a card's words fit the box they are given", () => {
+	const CARD = { width: 1920, height: 1080, previewWidth: 860, previewHeight: 484 };
+	const HEADING = { position: { x: 10, y: 30 }, size: { width: 80, height: 26 } };
+	const SUBTITLE = { position: { x: 15, y: 57 }, size: { width: 70, height: 12 } };
+
+	const wordsOf = (
+		content: string,
+		fontSize: number,
+		box: { position: { x: number; y: number }; size: { width: number; height: number } },
+	): AnnotationRegion => ({
+		id: "card-words",
+		startMs: 0,
+		endMs: 2000,
+		type: "text",
+		content,
+		textContent: content,
+		...box,
+		style: { ...DEFAULT_ANNOTATION_STYLE, fontSize, color: "#FFFFFF" },
+		zIndex: 2,
+		space: "screen",
+	});
+
+	async function rasterizeWords(annotation: AnnotationRegion) {
+		const placement = placeAnnotation(
+			annotation,
+			CARD,
+			{ x: 0, y: 0, width: CARD.width, height: CARD.height },
+			getAnnotationScaleFactor(CARD),
+		);
+		const element = createRasterElement();
+		vi.stubGlobal("document", { createElement: () => element });
+		try {
+			await renderAnnotationToCanvas(
+				annotation,
+				placement.width,
+				placement.height,
+				placement.scaleFactor,
+			);
+		} finally {
+			vi.unstubAllGlobals();
+		}
+		const sprite = element.sprite();
+		if (!sprite) throw new Error("the card words rasterized no canvas");
+		return { words: sprite.texts, box: { width: element.width, height: element.height } };
+	}
+
+	it.each([
+		["one word", "Entries"],
+		["a heading that must wrap", "Payroll, end to end"],
+		[
+			"a heading of sixty characters",
+			"Filing a timesheet, approving it and posting the payroll",
+		],
+		["a heading with nowhere to wrap", "Payroll,end-to-end,start-to-finish"],
+		["the longest heading a card accepts", "Payroll ".repeat(25)],
+	])("keeps %s inside the heading box", async (_label, text) => {
+		const { words, box } = await rasterizeWords(wordsOf(text, 76, HEADING));
+		expect(words.length).toBeGreaterThan(0);
+		expect(words.map((word) => word.text.trim()).join(" ")).toBe(text.trim());
+		for (const word of words) {
+			expect(word.left).toBeGreaterThanOrEqual(0);
+			expect(word.left + word.width).toBeLessThanOrEqual(box.width);
+			expect(word.top).toBeGreaterThanOrEqual(0);
+			expect(word.top + word.height).toBeLessThanOrEqual(box.height);
+		}
+	});
+
+	it("keeps the subtitle inside its own box and at its own size", async () => {
+		const { words, box } = await rasterizeWords(wordsOf("in under a minute", 34, SUBTITLE));
+		expect(words).toHaveLength(1);
+		expect(words[0].height).toBeCloseTo(34 * getAnnotationScaleFactor(CARD), 5);
+		expect(words[0].top).toBeGreaterThanOrEqual(0);
+		expect(words[0].top + words[0].height).toBeLessThanOrEqual(box.height);
+		expect(words[0].left + words[0].width).toBeLessThanOrEqual(box.width);
+	});
+
+	it("does not shrink a heading that already fits", async () => {
+		const { words } = await rasterizeWords(wordsOf("Entries", 76, HEADING));
+		expect(words).toHaveLength(1);
+		expect(words[0].height).toBeCloseTo(76 * getAnnotationScaleFactor(CARD), 5);
+	});
+
+	it("leaves a heading and an overflowing subtitle in their own boxes", async () => {
+		const heading = await rasterizeWords(
+			wordsOf("Payroll, end to end, every month", 76, HEADING),
+		);
+		const subtitle = await rasterizeWords(
+			wordsOf(
+				"from the first timesheet to the last payslip, without a spreadsheet",
+				34,
+				SUBTITLE,
+			),
+		);
+		for (const { words, box } of [heading, subtitle]) {
+			expect(words.length).toBeGreaterThan(0);
+			for (const word of words) {
+				expect(word.top).toBeGreaterThanOrEqual(0);
+				expect(word.top + word.height).toBeLessThanOrEqual(box.height);
+				expect(word.left).toBeGreaterThanOrEqual(0);
+				expect(word.left + word.width).toBeLessThanOrEqual(box.width);
+			}
+		}
 	});
 });

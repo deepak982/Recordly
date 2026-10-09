@@ -54,7 +54,7 @@ type Shrink = { split: ClipRegion[]; slots: Slot[] };
 export const SPEEDUP_MAX = 1.25;
 export const HOLD_FLOOR_MS = HOLD_KEEP_MS - WAIT_KEEP_TAIL_MS;
 
-const NO_CLIPS =
+export const NO_CLIPS =
 	"The timeline has no clips yet. Wait for the recording to finish loading, then try again.";
 
 /** Ten minutes. Longer is a typo, and it would be rendered frame by frame. */

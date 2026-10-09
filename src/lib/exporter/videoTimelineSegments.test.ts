@@ -79,6 +79,14 @@ describe("blank clips", () => {
 		).toBe(false);
 	});
 
+	it("gives a card at the front its own pass, first, spanning one millisecond", () => {
+		const front = { id: "card", startMs: 0, endMs: 2000, sourceStartMs: 0, speed: 1 / 2000 };
+		const runs = buildClipDecodeRuns([front, { ...footage, startMs: 2000, endMs: 4000 }]);
+		expect(runs.map((run) => run[0].outputStartSec)).toEqual([0, 2]);
+		expect(runs[0][0]).toMatchObject({ startSec: 0, endSec: 0.001 });
+		expect(segmentFrameCount(runs[0][0], 30)).toBe(60);
+	});
+
 	it("keeps a held frame as real footage to decode", () => {
 		const held = { id: "h", startMs: 2000, endMs: 4000, sourceStartMs: 1999, speed: 0.0005 };
 		const runs = buildClipDecodeRuns([held]);
