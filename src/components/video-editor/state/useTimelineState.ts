@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { SourceAudioTrackSettings } from "../audio/audioTypes";
+import type { ClipTransition } from "../export/editorOps/transitions";
 import type {
 	AnnotationRegion,
 	AudioRegion,
@@ -21,6 +22,7 @@ export function useTimelineState() {
 	const [trimRegions, setTrimRegions] = useState<TrimRegion[]>([]);
 	const [clipRegions, setClipRegions] = useState<ClipRegion[]>([]);
 	const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+	const [transitions, setTransitions] = useState<ClipTransition[]>([]);
 	const [speedRegions, setSpeedRegions] = useState<SpeedRegion[]>([]);
 	const [annotationRegions, setAnnotationRegions] = useState<AnnotationRegion[]>([]);
 	const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null);
@@ -55,6 +57,8 @@ export function useTimelineState() {
 		setClipRegions,
 		selectedClipId,
 		setSelectedClipId,
+		transitions,
+		setTransitions,
 		speedRegions,
 		setSpeedRegions,
 		annotationRegions,

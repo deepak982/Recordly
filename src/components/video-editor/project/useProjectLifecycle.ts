@@ -177,6 +177,7 @@ export function useProjectLifecycle(input: Input) {
 		refs.clipInitializedRef.current = Array.isArray(persistedEditor.clipRegions);
 		refs.autoFullTrackClipIdRef.current = null;
 		refs.autoFullTrackClipEndMsRef.current = null;
+		timeline.setTransitions(editor.transitions);
 		timeline.setSpeedRegions(editor.speedRegions);
 		timeline.setAnnotationRegions(editor.annotationRegions);
 		timeline.setAudioRegions(editor.audioRegions);

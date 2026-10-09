@@ -1,6 +1,11 @@
 import { Application, Container, Graphics, Rectangle, Sprite, Texture } from "pixi.js";
 import { MotionBlurFilter } from "pixi-filters/motion-blur";
 import { ZoomBlurFilter } from "pixi-filters/zoom-blur";
+import {
+	dipAlphaAt,
+	paintDip,
+	type TimelineDip,
+} from "@/components/video-editor/export/editorOps/transitions";
 import type {
 	AnnotationRegion,
 	AutoCaptionSettings,
@@ -81,6 +86,7 @@ import { resolveMediaElementSource } from "./localMediaSource";
 
 interface FrameRenderConfig {
 	timelineEffects?: boolean;
+	dips?: TimelineDip[];
 	width: number;
 	height: number;
 	preferredRenderBackend?: "webgl" | "webgpu";
@@ -1400,6 +1406,7 @@ export class FrameRenderer {
 			}
 			this.app.renderer.render(this.app.stage);
 			this.compositeWithShadows(false);
+			this.paintTimelineDip(backgroundTimelineTimestamp / 1000);
 			return;
 		}
 
@@ -1525,6 +1532,18 @@ export class FrameRenderer {
 				timestamp / 1000,
 			);
 		}
+
+		this.paintTimelineDip(timeMs);
+	}
+
+	private paintTimelineDip(timelineTimeMs: number): void {
+		if (!this.compositeCtx) return;
+		paintDip(
+			this.compositeCtx,
+			this.config.width,
+			this.config.height,
+			dipAlphaAt(this.config.dips, timelineTimeMs),
+		);
 	}
 
 	private updateLayout(): void {

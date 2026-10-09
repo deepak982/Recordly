@@ -3,6 +3,7 @@ import { toFileUrl } from "../projectPersistence";
 import type { useAppearanceState } from "../state/useAppearanceState";
 import type { useTimelineState } from "../state/useTimelineState";
 import type { CursorTelemetryPoint, SpeedRegion, ZoomRegion } from "../types";
+import { resolveTimelineDips } from "./editorOps/transitions";
 import type { RangedTimeline } from "./exportRange";
 
 type AppearanceState = ReturnType<typeof useAppearanceState>;
@@ -37,6 +38,7 @@ export function buildExportRenderOptions({
 }: BuildExportRenderOptionsInput) {
 	return {
 		clipRegions: (ranged ?? timeline).clipRegions,
+		dips: resolveTimelineDips((ranged ?? timeline).clipRegions, timeline.transitions),
 		wallpaper: appearance.wallpaper,
 		trimRegions: (ranged ?? timeline).trimRegions,
 		speedRegions: effectiveSpeedRegions,

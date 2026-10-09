@@ -5,6 +5,11 @@ import { ASPECT_RATIOS, type AspectRatio, isCustomAspectRatio } from "@/utils/as
 import { closeClipGaps, rippleRegionAnchors, rippleRegions } from "./clipSequence";
 import { CURSOR_MOTION_PRESETS, resolveCursorMotionPresetId } from "./cursorMotionPresets";
 import {
+	type ClipTransition,
+	MAX_TRANSITION_MS,
+	MIN_TRANSITION_MS,
+} from "./export/editorOps/transitions";
+import {
 	ADVANCED_VERTICAL_PADDING_MAX,
 	type AnnotationRegion,
 	type AudioRegion,
@@ -124,6 +129,7 @@ export interface ProjectEditorState {
 	zoomRegions: ZoomRegion[];
 	trimRegions: TrimRegion[];
 	clipRegions: ClipRegion[];
+	transitions: ClipTransition[];
 	autoFullTrackClipId?: string | null;
 	autoFullTrackClipEndMs?: number | null;
 	speedRegions: SpeedRegion[];
@@ -298,6 +304,25 @@ export function validateProjectData(candidate: unknown): candidate is EditorProj
 	if (typeof project.videoPath !== "string" || !project.videoPath) return false;
 	if (!project.editor || typeof project.editor !== "object") return false;
 	return true;
+}
+
+function normalizeClipTransitions(value: unknown, clips: ClipRegion[]): ClipTransition[] {
+	if (!Array.isArray(value)) return [];
+	const known = new Set(clips.map((clip) => clip.id));
+	const kept = new Map<string, ClipTransition>();
+	for (const entry of value) {
+		const transition = entry as Partial<ClipTransition>;
+		if (transition?.kind !== "dip") continue;
+		if (typeof transition.afterClipId !== "string" || !known.has(transition.afterClipId)) {
+			continue;
+		}
+		if (!isFiniteNumber(transition.ms)) continue;
+		const ms = Math.round(clamp(transition.ms, MIN_TRANSITION_MS, MAX_TRANSITION_MS));
+		const id = `dip-${transition.afterClipId}`;
+		if (kept.has(id)) continue;
+		kept.set(id, { id, kind: "dip", ms, afterClipId: transition.afterClipId });
+	}
+	return [...kept.values()];
 }
 
 function normalizeAudioDuck(value: unknown) {
@@ -486,6 +511,7 @@ export function normalizeProjectEditor(editor: Partial<ProjectEditorState>): Pro
 						sourceMinMs,
 						sourceMaxMs,
 						speed: isFiniteNumber(region.speed) && region.speed > 0 ? region.speed : 1,
+						blank: region.blank === true ? (true as const) : undefined,
 						muted: typeof region.muted === "boolean" ? region.muted : false,
 						showSourceAudio:
 							typeof region.showSourceAudio === "boolean"
@@ -959,6 +985,10 @@ export function normalizeProjectEditor(editor: Partial<ProjectEditorState>): Pro
 			: normalizedZoomRegions,
 		trimRegions: normalizedTrimRegions,
 		clipRegions: sequenceClips,
+		transitions: normalizeClipTransitions(
+			(editor as Partial<ProjectEditorState>).transitions,
+			sequenceClips,
+		),
 		autoFullTrackClipId: normalizedAutoFullTrackClipId,
 		autoFullTrackClipEndMs: normalizedAutoFullTrackClipEndMs,
 		speedRegions: normalizedSpeedRegions,

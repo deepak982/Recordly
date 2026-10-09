@@ -11,6 +11,11 @@ import {
 	getCaptionTextMaxWidth,
 	getCaptionWordVisualState,
 } from "@/components/video-editor/captionStyle";
+import {
+	dipAlphaAt,
+	paintDip,
+	type TimelineDip,
+} from "@/components/video-editor/export/editorOps/transitions";
 import type {
 	AnnotationRegion,
 	AutoCaptionSettings,
@@ -104,6 +109,7 @@ import type { ExportRenderBackend } from "./types";
 
 interface FrameRenderConfig {
 	timelineEffects?: boolean;
+	dips?: TimelineDip[];
 	width: number;
 	height: number;
 	preferredRenderBackend?: ExportRenderBackend;
@@ -375,6 +381,7 @@ export class FrameRenderer {
 	private videoContainer: Container | null = null;
 	private cursorContainer: Container | null = null;
 	private overlayContainer: Container | null = null;
+	private dipGraphics: Graphics | null = null;
 	private annotationContainer: Container | null = null;
 	private captionContainer: Container | null = null;
 	private webcamRootContainer: Container | null = null;
@@ -523,6 +530,9 @@ export class FrameRenderer {
 		this.app.stage.addChild(this.backgroundContainer);
 		this.app.stage.addChild(this.cameraContainer);
 		this.app.stage.addChild(this.overlayContainer);
+		this.dipGraphics = new Graphics();
+		this.dipGraphics.visible = false;
+		this.app.stage.addChild(this.dipGraphics);
 
 		this.videoShadowLayers = this.createShadowLayers(
 			this.cameraContainer,
@@ -1477,7 +1487,7 @@ export class FrameRenderer {
 		context.restore();
 	}
 
-	private async composeBlurAnnotationFrame(timeMs: number): Promise<void> {
+	private async composeBlurAnnotationFrame(timeMs: number, dipAlpha = 0): Promise<void> {
 		if (!this.app) {
 			this.outputCanvasOverride = null;
 			return;
@@ -1510,6 +1520,7 @@ export class FrameRenderer {
 		);
 
 		this.drawCaptionOverlay(context);
+		paintDip(context, this.config.width, this.config.height, dipAlpha);
 		this.outputCanvasOverride = canvas;
 	}
 
@@ -2869,6 +2880,7 @@ export class FrameRenderer {
 			}
 			if (this.webcamRootContainer) this.webcamRootContainer.visible = false;
 			if (this.captionContainer) this.captionContainer.visible = false;
+			this.setStageDipAlpha(dipAlphaAt(this.config.dips, backgroundTimelineTimestamp / 1000));
 			// Gap frames must bypass canvas annotation compositing as well as Pixi layers.
 			this.outputCanvasOverride = null;
 			this.app.render();
@@ -2962,8 +2974,24 @@ export class FrameRenderer {
 		await this.renderOutput(timeMs);
 	}
 
+	private setStageDipAlpha(alpha: number): void {
+		const graphics = this.dipGraphics;
+		if (!graphics) return;
+		if (!(alpha > 0)) {
+			graphics.visible = false;
+			return;
+		}
+		graphics.clear();
+		graphics.rect(0, 0, this.config.width, this.config.height);
+		graphics.fill({ color: 0x000000 });
+		graphics.alpha = Math.min(1, alpha);
+		graphics.visible = true;
+	}
+
 	private async renderOutput(timeMs: number): Promise<void> {
+		const dipAlpha = dipAlphaAt(this.config.dips, timeMs);
 		if (this.hasActiveBlurAnnotations(timeMs)) {
+			this.setStageDipAlpha(0);
 			const annotationContainerVisible = this.annotationContainer?.visible ?? true;
 			const captionContainerVisible = this.captionContainer?.visible ?? true;
 
@@ -2983,10 +3011,11 @@ export class FrameRenderer {
 				this.captionContainer.visible = captionContainerVisible;
 			}
 
-			await this.composeBlurAnnotationFrame(timeMs);
+			await this.composeBlurAnnotationFrame(timeMs, dipAlpha);
 			return;
 		}
 
+		this.setStageDipAlpha(dipAlpha);
 		this.outputCanvasOverride = null;
 		this.app!.render();
 	}
@@ -3266,6 +3295,7 @@ export class FrameRenderer {
 		this.videoContainer = null;
 		this.cursorContainer = null;
 		this.overlayContainer = null;
+		this.dipGraphics = null;
 		this.annotationContainer = null;
 		this.captionContainer = null;
 		this.webcamRootContainer = null;
