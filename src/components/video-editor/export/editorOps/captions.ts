@@ -1,7 +1,7 @@
 import { CAPTION_DURATION_MS, CAPTION_MAX_CHARS } from "../../agentEdits/planAgentEdits";
 import { normalizeCaptionEditText } from "../../captionEditing";
 import { addCue, createCaptionCue, deleteCue, retimeCue } from "../../captionOps";
-import { captionSpanToSource } from "../../captionTimeline";
+import { captionSpanToSource, projectCaptionCues } from "../../captionTimeline";
 import {
 	type AutoCaptionAnimation,
 	type AutoCaptionSettings,
@@ -13,6 +13,7 @@ import {
 	getTimelineDurationMs,
 	sortClipRegions,
 } from "../../types";
+import { midpointMs, requirePreviewFlag, withPreview } from "./previewAfterEdit";
 import {
 	type EditorOpContext,
 	type EditorOpMap,
@@ -244,10 +245,34 @@ function planSceneSpan(
 	return best;
 }
 
+function captionsEdited(cues: CaptionCue[], context: EditorOpContext) {
+	return {
+		timeline: {
+			autoCaptions: cues,
+			autoCaptionSettings: { ...context.timeline.autoCaptionSettings, enabled: true },
+		},
+	};
+}
+
+function captionMoment(cue: CaptionCue, context: EditorOpContext, which: string) {
+	const clips = context.timeline.clipRegions;
+	const span = clips.length === 0 ? cue : projectCaptionCues([cue], clips)[0];
+	if (!span) {
+		throw new Error(
+			`${which} sits entirely inside a cut, so it never plays and there is nothing to show`,
+		);
+	}
+	return {
+		atMs: midpointMs(span.startMs, span.endMs, context),
+		why: `Shown at the middle of ${which} (cue times are recording time, this is its place on the edited timeline).`,
+	};
+}
+
 export const captionsOps: EditorOpMap = {
 	"captions.fit_to_scenes": async (payload, context) => {
 		const args = requireObject(payload, "captions.fit_to_scenes");
-		rejectUnknown(args, ["texts", "padMs"], "captions.fit_to_scenes");
+		rejectUnknown(args, ["texts", "padMs", "preview"], "captions.fit_to_scenes");
+		const preview = requirePreviewFlag(args.preview);
 		if (!Array.isArray(args.texts) || args.texts.length === 0) {
 			throw new Error("texts must be a non-empty list with one caption per scene.");
 		}
@@ -327,12 +352,18 @@ export const captionsOps: EditorOpMap = {
 		const cues = built.reduce<CaptionCue[]>(addCue, []);
 		apply(context, cues);
 		context.timeline.setSelectedCaptionId(null);
-		return {
-			count: cues.length,
-			cues: cues.map(({ id, startMs, endMs, text }) => ({ id, startMs, endMs, text })),
-			skipped,
-			note: "Replaced all existing captions. Cue times are recording (source) times.",
-		};
+		return withPreview(
+			{
+				count: cues.length,
+				cues: cues.map(({ id, startMs, endMs, text }) => ({ id, startMs, endMs, text })),
+				skipped,
+				note: "Replaced all existing captions. Cue times are recording (source) times.",
+			},
+			preview,
+			context,
+			captionsEdited(cues, context),
+			() => captionMoment(cues[0], context, "the first caption"),
+		);
 	},
 
 	"captions.generate": async (payload, context) => {
@@ -377,6 +408,7 @@ export const captionsOps: EditorOpMap = {
 
 	"captions.set": (payload, context) => {
 		const args = requireObject(payload, "captions.set");
+		const preview = requirePreviewFlag(args.preview);
 		if (!Array.isArray(args.cues) || args.cues.length === 0) {
 			throw new Error("cues must be a non-empty list of { startMs, endMs, text }.");
 		}
@@ -395,11 +427,18 @@ export const captionsOps: EditorOpMap = {
 		const cues = built.reduce<CaptionCue[]>(addCue, []);
 		apply(context, cues);
 		context.timeline.setSelectedCaptionId(null);
-		return { count: cues.length, ids: cues.map((cue) => cue.id) };
+		return withPreview(
+			{ count: cues.length, ids: cues.map((cue) => cue.id) },
+			preview,
+			context,
+			captionsEdited(cues, context),
+			() => captionMoment(cues[0], context, "the first caption"),
+		);
 	},
 
 	"captions.update": (payload, context) => {
 		const args = requireObject(payload, "captions.update");
+		const preview = requirePreviewFlag(args.preview);
 		const id = requireText(args.id, "id");
 		const current = context.timeline.autoCaptions;
 		const cue = current.find((value) => value.id === id);
@@ -428,7 +467,13 @@ export const captionsOps: EditorOpMap = {
 			rejectOverlap(next, "The captions", id);
 		}
 		context.timeline.setAutoCaptions(next);
-		return { id };
+		return withPreview({ id }, preview, context, { timeline: { autoCaptions: next } }, () =>
+			captionMoment(
+				next.find((value) => value.id === id) as CaptionCue,
+				context,
+				"the changed caption",
+			),
+		);
 	},
 
 	"captions.remove": (payload, context) => {

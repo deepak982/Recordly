@@ -2,6 +2,7 @@ import {
 	ADVANCED_VERTICAL_PADDING_MAX,
 	type CropRegion,
 	type CursorClickEffectStyle,
+	getTimelineDurationMs,
 	type Padding,
 	type WebcamCorner,
 	type WebcamOverlaySettings,
@@ -9,6 +10,7 @@ import {
 	type ZoomMotionBlurTuning,
 	type ZoomTransitionEasing,
 } from "../../types";
+import { midpointMs, requirePreviewFlag, withPreview } from "./previewAfterEdit";
 import {
 	type EditorOpContext,
 	type EditorOpMap,
@@ -244,8 +246,23 @@ function nonEmptyArgs(args: Record<string, unknown>, op: string) {
 	}
 }
 
+function lookMoment(context: EditorOpContext) {
+	return {
+		atMs: midpointMs(
+			0,
+			getTimelineDurationMs(
+				context.timeline.clipRegions,
+				Math.round(context.duration * 1000),
+			),
+			context,
+		),
+		why: "A look change has no moment of its own and the editor does not report a playhead, so this is the middle of the edited timeline. Pass render_preview an atMs to check it elsewhere, for example during a zoom or while the webcam shows.",
+	};
+}
+
 export const lookOps: EditorOpMap = {
-	"look.set": (payload, { appearance }) => {
+	"look.set": (payload, context) => {
+		const { appearance } = context;
 		const args = requireObject(payload, "look.set");
 		rejectUnknown(
 			args,
@@ -258,10 +275,13 @@ export const lookOps: EditorOpMap = {
 				"crop",
 				"cropRegion",
 				"webcam",
+				"preview",
 			],
 			"look.set",
 		);
-		nonEmptyArgs(args, "look.set");
+		const { preview: previewArg, ...changes } = args;
+		const preview = requirePreviewFlag(previewArg);
+		nonEmptyArgs(changes, "look.set");
 		if (args.crop !== undefined && args.cropRegion !== undefined) {
 			throw new Error("Send either crop or cropRegion, not both: they are the same setting.");
 		}
@@ -296,11 +316,17 @@ export const lookOps: EditorOpMap = {
 			updates.webcam = requireWebcam(args.webcam, appearance.webcam);
 		applyAll(appearance, updates, "look.set");
 		const { cropRegion, ...rest } = updates;
-		return {
-			applied: cropRegion ? { ...rest, crop: cropRegion } : rest,
-			undoable: false,
-			note: NOT_UNDOABLE,
-		};
+		return withPreview(
+			{
+				applied: cropRegion ? { ...rest, crop: cropRegion } : rest,
+				undoable: false,
+				note: NOT_UNDOABLE,
+			},
+			preview,
+			context,
+			{ appearance: updates as Partial<Appearance> },
+			() => lookMoment(context),
+		);
 	},
 
 	"look.motion": (payload, { appearance }) => {
@@ -362,9 +388,11 @@ export const lookOps: EditorOpMap = {
 		return { applied: updates, undoable: false, note: NOT_UNDOABLE };
 	},
 
-	"look.preset": (payload, { appearance }) => {
+	"look.preset": (payload, context) => {
+		const { appearance } = context;
 		const args = requireObject(payload, "look.preset");
-		rejectUnknown(args, ["name"], "look.preset");
+		rejectUnknown(args, ["name", "preview"], "look.preset");
+		const preview = requirePreviewFlag(args.preview);
 
 		if (args.name === undefined) {
 			throw new Error("look.preset: name is required.");
@@ -426,6 +454,12 @@ export const lookOps: EditorOpMap = {
 		}
 
 		applyAll(appearance, processedUpdates, "look.preset");
-		return { applied: processedUpdates, undoable: false, note: NOT_UNDOABLE };
+		return withPreview(
+			{ applied: processedUpdates, undoable: false, note: NOT_UNDOABLE },
+			preview,
+			context,
+			{ appearance: processedUpdates as Partial<Appearance> },
+			() => lookMoment(context),
+		);
 	},
 };

@@ -8,6 +8,7 @@ import {
 	type ZoomMode,
 	type ZoomRegion,
 } from "../../types";
+import { midpointMs, requirePreviewFlag, withPreview } from "./previewAfterEdit";
 import {
 	type EditorOpContext,
 	type EditorOpMap,
@@ -96,10 +97,18 @@ function describe(region: ZoomRegion) {
 	return { ...region, scale: ZOOM_DEPTH_SCALES[region.depth] };
 }
 
+function zoomMoment(region: ZoomRegion, context: EditorOpContext) {
+	return {
+		atMs: midpointMs(region.startMs, region.endMs, context),
+		why: `Shown at the middle of the zoom (${region.startMs}-${region.endMs} ms), where it is fully in.`,
+	};
+}
+
 export const zoomOps: EditorOpMap = {
 	"zoom.add": (payload, context) => {
 		const args = requireObject(payload, "zoom.add");
-		rejectUnknown(args, ["startMs", "endMs", "depth", "focus", "mode"], "zoom.add");
+		rejectUnknown(args, ["startMs", "endMs", "depth", "focus", "mode", "preview"], "zoom.add");
+		const preview = requirePreviewFlag(args.preview);
 		const startMs = Math.round(requireFiniteNumber(args.startMs, "startMs"));
 		const endMs = Math.round(requireFiniteNumber(args.endMs, "endMs"));
 		const depth =
@@ -118,12 +127,23 @@ export const zoomOps: EditorOpMap = {
 		};
 		context.timeline.setZoomRegions((current) => [...current, region]);
 		context.timeline.setSelectedZoomId(region.id);
-		return { zoom: describe(region), undoable: true };
+		return withPreview(
+			{ zoom: describe(region), undoable: true },
+			preview,
+			context,
+			{ timeline: { zoomRegions: [...context.timeline.zoomRegions, region] } },
+			() => zoomMoment(region, context),
+		);
 	},
 
 	"zoom.update": (payload, context) => {
 		const args = requireObject(payload, "zoom.update");
-		rejectUnknown(args, ["id", "startMs", "endMs", "depth", "focus", "mode"], "zoom.update");
+		rejectUnknown(
+			args,
+			["id", "startMs", "endMs", "depth", "focus", "mode", "preview"],
+			"zoom.update",
+		);
+		const preview = requirePreviewFlag(args.preview);
 		const region = requireKnownZoom(args, context, "zoom.update");
 		const next: ZoomRegion = { ...region };
 		if (args.startMs !== undefined)
@@ -133,7 +153,7 @@ export const zoomOps: EditorOpMap = {
 		if (args.depth !== undefined) next.depth = requireDepth(args.depth, "zoom.update");
 		if (args.focus !== undefined) next.focus = requireFocus(args.focus, "zoom.update");
 		if (args.mode !== undefined) next.mode = requireMode(args.mode, "zoom.update");
-		if (Object.keys(args).length === 1) {
+		if (Object.keys(args).filter((key) => key !== "preview").length === 1) {
 			throw new Error("zoom.update needs at least one field to change besides id.");
 		}
 		checkRange(
@@ -147,7 +167,19 @@ export const zoomOps: EditorOpMap = {
 		context.timeline.setZoomRegions((current) =>
 			current.map((candidate) => (candidate.id === region.id ? next : candidate)),
 		);
-		return { zoom: describe(next), undoable: true };
+		return withPreview(
+			{ zoom: describe(next), undoable: true },
+			preview,
+			context,
+			{
+				timeline: {
+					zoomRegions: context.timeline.zoomRegions.map((candidate) =>
+						candidate.id === region.id ? next : candidate,
+					),
+				},
+			},
+			() => zoomMoment(next, context),
+		);
 	},
 
 	"zoom.remove": (payload, context) => {

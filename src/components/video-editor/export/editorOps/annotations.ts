@@ -8,6 +8,7 @@ import {
 	DEFAULT_FIGURE_DATA,
 	getTimelineDurationMs,
 } from "../../types";
+import { midpointMs, requirePreviewFlag, withPreview } from "./previewAfterEdit";
 import {
 	type EditorOpContext,
 	type EditorOpMap,
@@ -37,7 +38,7 @@ const KIND_FIELDS: Record<AnnotationType, string[]> = {
 const ALL_KIND_FIELDS = [...new Set(Object.values(KIND_FIELDS).flat())];
 const SPACES: AnnotationSpace[] = ["frame", "screen"];
 const GEOMETRY = ["startMs", "endMs", "x", "y", "width", "height", "trackIndex", "space"];
-const ADD_FIELDS = ["kind", ...GEOMETRY, ...ALL_KIND_FIELDS];
+const ADD_FIELDS = ["kind", "preview", ...GEOMETRY, ...ALL_KIND_FIELDS];
 const MIN_RENDERED_MS = 67;
 
 function optionalNumber(value: unknown, field: string) {
@@ -216,6 +217,13 @@ function requireKnownId(args: Record<string, unknown>, context: EditorOpContext,
 	return region;
 }
 
+function annotationMoment(region: AnnotationRegion, context: EditorOpContext) {
+	return {
+		atMs: midpointMs(region.startMs, region.endMs, context),
+		why: `Shown at ${region.startMs}-${region.endMs} ms's midpoint, the middle of the ${region.type} annotation.`,
+	};
+}
+
 export const annotationsOps: EditorOpMap = {
 	"annotate.add": (payload, context) => {
 		const args = requireObject(payload, "annotate.add");
@@ -224,6 +232,7 @@ export const annotationsOps: EditorOpMap = {
 		if (!KINDS.includes(kind)) {
 			throw new Error(`annotate.add: kind must be one of ${KINDS.join(", ")}.`);
 		}
+		const preview = requirePreviewFlag(args.preview);
 		rejectInapplicable(args, kind, "annotate.add");
 		for (const field of ["startMs", "endMs", "x", "y", "width", "height"]) {
 			requireFiniteNumber(args[field], field);
@@ -256,13 +265,19 @@ export const annotationsOps: EditorOpMap = {
 		};
 		context.timeline.setAnnotationRegions((current) => [...current, region]);
 		context.timeline.setSelectedAnnotationId(region.id);
-		return {
-			id: region.id,
-			kind,
-			space: region.space ?? "frame",
-			startMs: region.startMs,
-			endMs: region.endMs,
-		};
+		return withPreview(
+			{
+				id: region.id,
+				kind,
+				space: region.space ?? "frame",
+				startMs: region.startMs,
+				endMs: region.endMs,
+			},
+			preview,
+			context,
+			{ timeline: { annotationRegions: [...context.timeline.annotationRegions, region] } },
+			() => annotationMoment(region, context),
+		);
 	},
 
 	"annotate.update": (payload, context) => {
@@ -274,7 +289,8 @@ export const annotationsOps: EditorOpMap = {
 			);
 		}
 		const fields = [...GEOMETRY, ...ALL_KIND_FIELDS];
-		rejectUnknown(args, ["id", "kind", ...fields], "annotate.update");
+		rejectUnknown(args, ["id", "kind", "preview", ...fields], "annotate.update");
+		const preview = requirePreviewFlag(args.preview);
 		if (!fields.some((field) => args[field] !== undefined)) {
 			throw new Error(
 				`annotate.update needs at least one field to change: ${fields.join(", ")}.`,
@@ -288,7 +304,19 @@ export const annotationsOps: EditorOpMap = {
 		context.timeline.setAnnotationRegions((current) =>
 			current.map((candidate) => (candidate.id === region.id ? region : candidate)),
 		);
-		return { id: region.id, kind: region.type, startMs: region.startMs, endMs: region.endMs };
+		return withPreview(
+			{ id: region.id, kind: region.type, startMs: region.startMs, endMs: region.endMs },
+			preview,
+			context,
+			{
+				timeline: {
+					annotationRegions: context.timeline.annotationRegions.map((candidate) =>
+						candidate.id === region.id ? region : candidate,
+					),
+				},
+			},
+			() => annotationMoment(region, context),
+		);
 	},
 
 	"annotate.remove": (payload, context) => {
