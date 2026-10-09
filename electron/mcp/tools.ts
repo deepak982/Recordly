@@ -73,31 +73,31 @@ const INPUT_HELP =
 	"screenshot again.";
 
 const MAC_INSTRUCTIONS =
-	"Recordly records the screen and turns recordings into polished demo videos: it zooms on clicks " +
-	"and smooths the cursor. On macOS it drives the recorded window with the real mouse and keyboard.\n\n" +
+	"Recordly records the screen and makes a polished demo video: automatic zoom on clicks, a " +
+	"smoothed cursor. On macOS it drives the recorded window with the real mouse and keyboard.\n\n" +
 	"Never record a flow you have not already run. Plan, rehearse, take:\n" +
 	"1. Target: open_url for a web page, or list_sources → select_source for an app. Keep the window " +
 	"landscape (at least 1.2 × as wide as tall) so zooms work, and uncovered. Two apps in one take: " +
 	"select a screen, then select_source with a window id picks the window you drive, switchable " +
 	"mid-take.\n" +
-	"2. Plan. Write the scene list and every step first. Aim with targets {text, role?, index?}, not " +
-	"coordinates: give role (a link is not a button) and the label's whole visible text.\n" +
+	"2. Plan: write the scene list and every step first. Aim with targets {text, role?, index?}, " +
+	"not coordinates — give role (a link is not a button) and the label's whole text.\n" +
 	"3. Rehearse unrecorded, one page at a time: perform dryRun: true (one page only), fix every " +
-	"missing or ambiguous target, then perform that page's steps with then: " +
-	'"elements" and confirm the page. Note durationMs. Do side effects here, not in the take.\n' +
+	"missing or ambiguous target, then perform that page with then: " +
+	'"elements". Note durationMs. Do side effects here, not in the take.\n' +
 	"4. Reset to the start state, move_pointer to scene 1's start, then start_recording.\n" +
-	"5. Replay the rehearsed steps in as few perform calls as you can; gaps between calls are cut, so " +
-	"one per scene reads best. Leave timing to Recordly.\n" +
-	"6. stop_recording, then review_recording. Cover anything private with annotate blur before " +
-	"anyone sees the video; sample_frames checks the whole take. Then export_video.\n\n" +
+	"5. Replay the rehearsed steps in as few perform calls as you can; gaps are cut, so one per " +
+	"scene reads best. Leave timing to Recordly.\n" +
+	"6. stop_recording, then review_recording; cover anything private with annotate blur.\n" +
+	"7. Check before exporting, not by exporting: check_edits is free, render_preview shows a moment " +
+	"as the export will, and export_video fromMs/toMs renders only the seconds you changed. Export " +
+	"the whole file once, when it is right.\n\n" +
 	"Coordinates are window-relative points; (0,0) is the window's top-left.\n\n" +
 	"Errors: 'the user took over' cuts only that scene: wait, re-aim, carry on; ask " +
-	"only if they want the machine back. 'Mouse and keyboard control is off' → ask " +
-	`the user to turn on ${CONTROL_SWITCH}. Missing permission → ask the user to grant it in System ` +
-	"Settings and reopen Recordly. Window closed or covered → list_sources, select_source, " +
-	"screenshot. A failed step ('Step n') means the page diverged: cancel_recording, " +
-	"re-plan, rehearse, re-take. Never retry blindly or patch a ruined take. Act only in the window " +
-	"you drive.";
+	"only if they want control back. 'Mouse and keyboard control is off' → ask " +
+	`the user to turn on ${CONTROL_SWITCH}. Covered or closed window → list_sources, select_source, ` +
+	"screenshot. A failed step ('Step n') means the page diverged: cancel_recording, re-plan, " +
+	"rehearse, re-take. Never retry blindly or patch a ruined take.";
 
 function controlInstructions(platform: NodeJS.Platform) {
 	if (platform === "darwin") return MAC_INSTRUCTIONS;
@@ -107,15 +107,10 @@ function controlInstructions(platform: NodeJS.Platform) {
 		linux
 			? "On Linux it records the whole screen and drives the window you choose"
 			: "On Windows it drives the recorded window",
-	)
-		.replace(
-			"Missing permission → ask the user to grant it in System Settings and reopen Recordly. ",
-			"",
-		)
-		.replace(
-			"Coordinates are window-relative points; (0,0) is the window's top-left.",
-			`Coordinates are window-relative points; (0,0) is the window's top-left. Shortcuts use ctrl (cmd is the ${linux ? "Super" : "Windows"} key).`,
-		);
+	).replace(
+		"Coordinates are window-relative points; (0,0) is the window's top-left.",
+		`Coordinates are window-relative points; (0,0) is the window's top-left. Shortcuts use ctrl (cmd is the ${linux ? "Super" : "Windows"} key).`,
+	);
 	return linux
 		? text.replace(
 				"or list_sources → select_source for an app. Keep the window landscape (at least " +
@@ -134,15 +129,34 @@ const INSTRUCTIONS =
 	"clicks, smooth cursor). It cannot move the mouse or type on this platform, so the user (or another " +
 	"tool) performs the demo. Flow for any demo: list_sources → select_source → agree the steps with the " +
 	"user → start_recording → the user performs the demo → stop_recording (returns the saved video path " +
-	"and opens the editor) → review_recording → export_video. Before anyone sees the video, cover " +
-	"anything private with annotate blur; sample_frames checks the whole take, and edit_timeline, " +
-	"edit_zoom, edit_captions and edit_audio change the cut, with history to undo. On Linux with " +
+	"and opens the editor) → review_recording → check_edits → export_video. Before anyone sees the " +
+	"video, cover anything private with annotate blur; edit_timeline, " +
+	"edit_zoom, edit_captions and edit_audio change the cut, with history to undo. Check the cut " +
+	"before you export rather than by exporting: check_edits costs nothing, and render_preview " +
+	"composites a moment exactly as the export will. On Linux with " +
 	"Wayland, the user must pick the screen in the " +
 	"system share dialog after start_recording. Call get_status at any time. Tools refuse with a clear " +
 	"message instead of showing dialogs; relay permission errors to the user.";
 
 function textResult(value: unknown) {
 	return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
+}
+
+function editResult(value: unknown) {
+	const record = value as Record<string, unknown> | null;
+	const preview = record?.preview as Record<string, unknown> | undefined;
+	const image = preview?.image as { data?: string; mimeType?: string } | undefined;
+	if (!image?.data || !image.mimeType) return textResult(value);
+	const { image: _image, ...previewRest } = preview as Record<string, unknown>;
+	return {
+		content: [
+			{ type: "image" as const, data: image.data, mimeType: image.mimeType },
+			{
+				type: "text" as const,
+				text: JSON.stringify({ ...record, preview: previewRest }, null, 2),
+			},
+		],
+	};
 }
 
 const coordinate = (description: string) => z.number().min(0).describe(description);
@@ -350,6 +364,10 @@ function demoPrompt(
 		"Call stop_recording, then review_recording to check the contact sheet. Sweep the whole take " +
 		"with sample_frames and cover anything private — account names, email addresses, figures — " +
 		"with annotate blur: nothing else hides it, and a blur is reversible with history. Then " +
+		"call check_edits, which is free and catches what needs no picture, and render_preview to " +
+		"see any moment composited as the export will be — checking that way costs seconds, while " +
+		"exporting the whole file to find out costs minutes. Use export_video with fromMs and toMs " +
+		"to render just a span you are unsure of. Export the whole file once, when it is right: " +
 		`export_video${output_path ? ` with outputPath "${output_path}"` : ""}.`;
 	const linux = platform === "linux";
 	if (control) {
@@ -777,8 +795,13 @@ export function buildRecordlyMcpServer(
 				"Export the last recording to a video file with no dialog, using the editor's current look " +
 				"(automatic zooms, cursor, background). Waits for the editor to finish loading, then returns " +
 				"the saved path, with the file's width, height, duration and frame rate so you can " +
-				"check it without another tool. A very long export returns { status: " +
-				'"still-exporting" } — then poll get_status until export.state is done or failed.',
+				"check it without another tool, plus warnings naming any moment it wrote with no " +
+				"picture. A very long export returns { status: " +
+				'"still-exporting" } — then poll get_status until export.state is done or failed. ' +
+				"fromMs and toMs render only that span of the edited timeline, which is how you check " +
+				"a change without paying for the whole file; the result is marked a fragment, and a " +
+				"zoom already under way at fromMs settles in from rest rather than arriving " +
+				"mid-flight, which it tells you.",
 			inputSchema: z.object({
 				outputPath: z
 					.string()
@@ -824,6 +847,18 @@ export function buildRecordlyMcpServer(
 						"Use the frame at this edited time as the file's cover, instead of the first " +
 							"frame, which is often a dull starting screen; mp4 only",
 					),
+				fromMs: z
+					.number()
+					.min(0)
+					.optional()
+					.describe(
+						"Render only from this edited time. Needs toMs. At least 100 ms apart",
+					),
+				toMs: z
+					.number()
+					.min(0)
+					.optional()
+					.describe("Render only up to this edited time. Needs fromMs"),
 			}),
 		},
 		async (args, ctx) => {
@@ -861,8 +896,10 @@ export function buildRecordlyMcpServer(
 				"the latest recording. Returns a contact sheet (up to 9 tiles, left to right, top to " +
 				"bottom: the start, the last frame before each cut, the end) and a summary: each tile's " +
 				"time and label, raw and final duration, time removed, cuts, zooms, captions, scenes, " +
-				"failed scenes and the longest still stretch left. If a tile shows something wrong (an error, the wrong page, a covered window), tell " +
-				"the user and offer to record that part again; otherwise call export_video.",
+				"failed scenes and the longest still stretch left. If a tile shows something wrong (an " +
+				"error, the wrong page, a covered window), tell the user and offer to record that part " +
+				"again. The tiles are the recorded screen, not the export, so run check_edits and " +
+				"render_preview before export_video.",
 			inputSchema: z.object({}),
 		},
 		async (_args, ctx) => {
@@ -975,10 +1012,16 @@ export function buildRecordlyMcpServer(
 					.optional()
 					.describe("Fraction of the frame; defaults to the centre"),
 				mode: z.enum(["auto", "manual"]).optional(),
+				preview: z
+					.boolean()
+					.optional()
+					.describe(
+						"Return a composited frame of the moment this changed, so you can see the result",
+					),
 			}),
 		},
 		async ({ op, ...rest }, ctx) =>
-			textResult(
+			editResult(
 				await editor.requestEditor(`zoom.${op}`, rest, { signal: ctx.mcpReq.signal }),
 			),
 	);
@@ -1011,10 +1054,16 @@ export function buildRecordlyMcpServer(
 					.describe(
 						'The settings to change, e.g. {wallpaper, padding}, {cursorSize}, or {name: "clean"} for op preset',
 					),
+				preview: z
+					.boolean()
+					.optional()
+					.describe(
+						"Return a composited frame of the moment this changed, so you can see the result",
+					),
 			}),
 		},
 		async ({ op, fields }, ctx) =>
-			textResult(
+			editResult(
 				await editor.requestEditor(`look.${op}`, fields, { signal: ctx.mcpReq.signal }),
 			),
 	);
@@ -1073,6 +1122,12 @@ export function buildRecordlyMcpServer(
 					.max(2000)
 					.optional()
 					.describe("op fit_to_scenes: inset at each end, default 200"),
+				preview: z
+					.boolean()
+					.optional()
+					.describe(
+						"Return a composited frame of the moment this changed, so you can see the result",
+					),
 				style: z.enum(["none", "fade", "rise", "pop"]).optional().describe("op animation"),
 				fields: z
 					.record(z.string(), z.unknown())
@@ -1081,7 +1136,7 @@ export function buildRecordlyMcpServer(
 			}),
 		},
 		async ({ op, fields, ...rest }, ctx) =>
-			textResult(
+			editResult(
 				await editor.requestEditor(
 					`captions.${op}`,
 					op === "style" ? (fields ?? {}) : rest,
@@ -1177,6 +1232,12 @@ export function buildRecordlyMcpServer(
 					.describe(
 						"frame (default) follows the zoom; screen pins to the output frame. Not for blur",
 					),
+				preview: z
+					.boolean()
+					.optional()
+					.describe(
+						"Return a composited frame of the moment this changed, so you can see the result",
+					),
 				text: z.string().min(1).optional().describe("kind text"),
 				fontSize: z.number().positive().optional().describe("kind text"),
 				color: z.string().min(1).optional().describe("kind text or figure"),
@@ -1206,7 +1267,7 @@ export function buildRecordlyMcpServer(
 			}),
 		},
 		async ({ op, ...rest }, ctx) =>
-			textResult(
+			editResult(
 				await editor.requestEditor(`annotate.${op}`, rest, { signal: ctx.mcpReq.signal }),
 			),
 	);
@@ -1287,7 +1348,8 @@ export function buildRecordlyMcpServer(
 				"A part-written file never matches, and nor does a file that was already there — so if " +
 				"the download may have finished before you called, pass since_ms (epoch ms, e.g. the " +
 				"moment you clicked Download) and anything newer than that counts. Use it when a demo " +
-				"downloads something you then open with open_file.",
+				"downloads something" +
+				(control ? " you then open with open_file." : " and you need the saved path."),
 			inputSchema: z.object({
 				glob: z
 					.string()
@@ -1583,9 +1645,11 @@ export function buildRecordlyMcpServer(
 				"padding, corner radius, shadow), the cursor, annotations and captions. Use it after " +
 				"any edit you cannot otherwise check — a blur you need to know covers the right thing, " +
 				"a caption's position, a title that an active zoom might crop, a padding value. Times " +
-				"are milliseconds in the EDITED timeline. Each frame is a full composite rather than " +
-				"an ffmpeg tile, so a sheet of 6 can take tens of seconds; ask for one frame when one " +
-				"will do. The reply lists which layers it drew and which it could not, with the " +
+				"are milliseconds in the EDITED timeline. The first call loads the recording and starts " +
+				"the renderer, so it is slow; after that both are kept warm for a minute and another " +
+				"single frame comes back quickly, so check often rather than saving it up. reused says " +
+				"which half was warm. An edit that changes the picture rebuilds the renderer, as it must. " +
+				"The reply lists which layers it drew and which it could not, with the " +
 				"reason, so a half-composited frame is never passed off as the finished look. Needs " +
 				"the editor open.",
 			inputSchema: z.object({

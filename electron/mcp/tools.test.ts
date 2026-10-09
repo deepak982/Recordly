@@ -168,6 +168,23 @@ function setup(
 	return { remote, remoteExport, agent, review, editor, recordings, files, capture, call };
 }
 
+function collectSchemaWords(node: unknown, into: Set<string>) {
+	if (!node || typeof node !== "object") return;
+	if (Array.isArray(node)) {
+		for (const item of node) collectSchemaWords(item, into);
+		return;
+	}
+	for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+		if (key === "properties" && value && typeof value === "object") {
+			for (const name of Object.keys(value as Record<string, unknown>)) into.add(name);
+		}
+		if (key === "enum" && Array.isArray(value)) {
+			for (const option of value) if (typeof option === "string") into.add(option);
+		}
+		collectSchemaWords(value, into);
+	}
+}
+
 const PROTOCOL_INSTRUCTIONS = [
 	"Never record a flow you have not already run",
 	"Plan, rehearse, take:",
@@ -204,7 +221,6 @@ const PERMISSIVE_WORDING = [
 
 const REPLACE_ANCHORS = [
 	"On macOS it drives the recorded window",
-	"Missing permission → ask the user to grant it in System Settings and reopen Recordly. ",
 	"Coordinates are window-relative points; (0,0) is the window's top-left.",
 	"or list_sources → select_source for an app. Keep the window landscape (at least 1.2 × as wide " +
 		"as tall) so zooms work, and uncovered. Two apps in one take: select a screen, then " +
@@ -1124,6 +1140,38 @@ describe("buildRecordlyMcpServer", () => {
 		for (const anchor of REPLACE_ANCHORS) {
 			expect(instructions.split(anchor)).toHaveLength(2);
 		}
+	});
+
+	it.each([
+		["darwin", false],
+		["win32", false],
+		["linux", false],
+		["linux", true],
+	] as const)("only ever names tools that exist on %s (wayland: %s)", async (platform, wayland) => {
+		const { call } = setup("idle", { platform, wayland });
+		const init = await call("initialize", INITIALIZE);
+		const { result } = await call("tools/list");
+		const tools = result.tools as { name: string; description: string }[];
+		const offered = new Set(tools.map((tool) => tool.name));
+		const schemaWords = new Set<string>();
+		for (const tool of tools) collectSchemaWords(tool, schemaWords);
+		const prompt = await call("prompts/get", {
+			name: "record_demo",
+			arguments: { goal: "creating a project", url: "https://example.com" },
+		});
+		const texts: [string, string][] = [
+			["instructions", init.result.instructions as string],
+			["record_demo", prompt.result.messages[0].content.text as string],
+			...tools.map((tool) => [tool.name, tool.description] as [string, string]),
+		];
+		const missing: string[] = [];
+		for (const [where, text] of texts) {
+			for (const mentioned of new Set(text.match(/\b[a-z][a-z_]{3,}_[a-z]+\b/g) ?? [])) {
+				if (offered.has(mentioned) || schemaWords.has(mentioned)) continue;
+				missing.push(`${where} names ${mentioned}`);
+			}
+		}
+		expect(missing).toEqual([]);
 	});
 
 	it.each([
