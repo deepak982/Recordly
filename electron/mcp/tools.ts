@@ -1613,6 +1613,45 @@ export function buildRecordlyMcpServer(
 	);
 
 	server.registerTool(
+		"edit_project",
+		{
+			description:
+				"Save the edit under a name, open a saved one, or start again. Until now an edit " +
+				"lived only in the editor's memory against the current recording, with no name and " +
+				"no second version, so a restart lost the work. op save writes clips, zooms, " +
+				"annotations, captions, audio and the look to a named project and reports the counts " +
+				"it wrote; op open loads one back by name or absolute path and reports what it " +
+				"loaded; op new clears the edit back to the untouched recording. Opening refuses " +
+				"while there are unsaved changes unless you pass discard, and opening a project made " +
+				"from a different recording switches the editor to that recording and says so. " +
+				"Saving under a name that belongs to a different project is refused rather than " +
+				"overwriting it. The look is saved and restored; the thumbnail is not.",
+			inputSchema: z.object({
+				op: z.enum(["save", "open", "new"]),
+				name: z
+					.string()
+					.min(1)
+					.max(100)
+					.optional()
+					.describe("op save, or op open: the project name, no path separators"),
+				path: z
+					.string()
+					.min(1)
+					.optional()
+					.describe("op open: an absolute path to a .recordly or .openscreen file"),
+				discard: z
+					.boolean()
+					.optional()
+					.describe("op open: throw away unsaved changes instead of refusing"),
+			}),
+		},
+		async ({ op, ...rest }, ctx) =>
+			textResult(
+				await editor.requestEditor(`project.${op}`, rest, { signal: ctx.mcpReq.signal }),
+			),
+	);
+
+	server.registerTool(
 		"check_edits",
 		{
 			description:
