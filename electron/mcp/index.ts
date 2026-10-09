@@ -84,7 +84,7 @@ export function setupMcpServer({
 				{ signal },
 			);
 			const { cardSpans } = await import(
-				"../../src/components/video-editor/export/editorOps/checkEdits"
+				"../../src/components/video-editor/export/editorOps/cardPlate"
 			);
 			return cardSpans((state.annotations ?? []) as never);
 		},
