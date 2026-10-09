@@ -683,3 +683,156 @@ describe("isSameFile", () => {
 		expect(isSameFile("/Rec/A.mp4", unknown, "/rec/a.mp4", unknown, "linux")).toBe(false);
 	});
 });
+
+describe("fromMs and toMs", () => {
+	it.each([
+		[{ fromMs: 1_000 }, /both fromMs and toMs/],
+		[{ toMs: 1_000 }, /both fromMs and toMs/],
+		[{ fromMs: -1, toMs: 5_000 }, /fromMs must be 0 or more/],
+		[{ fromMs: 5_000, toMs: 5_000 }, /must be greater than fromMs/],
+		[{ fromMs: 5_000, toMs: 4_000 }, /must be greater than fromMs/],
+		[{ fromMs: 1_000, toMs: 1_050 }, /at least 100 ms/],
+		[{ fromMs: Number.NaN, toMs: 5_000 }, /fromMs must be a number of milliseconds/],
+		[{ fromMs: 0, toMs: Number.POSITIVE_INFINITY }, /toMs must be a number of milliseconds/],
+		[
+			{ fromMs: 8_000, toMs: 18_000, posterAtMs: 20_000 },
+			/posterAtMs 20000 is outside the range being rendered \(8000 to 18000 ms\)/,
+		],
+		[{ fromMs: 8_000, toMs: 18_000, posterAtMs: 1_000 }, /outside the range being rendered/],
+	])("rejects %o before touching the editor", async (args, message) => {
+		const { remote, editor } = setup();
+		await expect(remote.exportVideo({ videoPath, ...args })).rejects.toThrow(message);
+		expect(remote.getStatus().state).toBe("idle");
+		expect(editor.send).not.toHaveBeenCalled();
+		expect(await fs.readdir(dir)).toEqual(["recording-1.mp4"]);
+	});
+
+	it("asks the editor for the range and reports the fragment it got back", async () => {
+		const { remote, ready, sent, lastRequest, reply } = setup();
+		const out = path.join(dir, "fragment.mp4");
+		ready(videoPath);
+		const pending = remote.exportVideo({
+			videoPath,
+			outputPath: out,
+			fromMs: 8_000,
+			toMs: 18_000,
+		});
+		await sent();
+		expect(lastRequest()).toMatchObject({ fromMs: 8_000, toMs: 18_000 });
+		reply({
+			ok: true,
+			path: out,
+			fromMs: 8_000,
+			toMs: 18_000,
+			timelineDurationMs: 21_000,
+			warnings: ["A zoom was already under way at 8000 ms."],
+		});
+		const done = await pending;
+		expect(done).toMatchObject({
+			status: "done",
+			fragment: true,
+			fragmentFromMs: 8_000,
+			fragmentToMs: 18_000,
+			warnings: ["A zoom was already under way at 8000 ms."],
+		});
+		expect((done as { fragmentNote: string }).fragmentNote).toMatch(
+			/10000 ms fragment of the edited timeline, from 8000 ms to 18000 ms of 21000 ms/,
+		);
+		expect((done as { fragmentNote: string }).fragmentNote).toMatch(/not the finished/);
+	});
+
+	it("keeps the frame check's own warnings alongside the range warning", async () => {
+		const verify = vi.fn(async () => ({ warnings: ["2.0 s of frames are black (1.0 s)"] }));
+		const { remote, ready, sent, lastRequest, reply } = setup(undefined, undefined, verify);
+		const out = path.join(dir, "fragment.mp4");
+		ready(videoPath);
+		const pending = remote.exportVideo({ videoPath, outputPath: out, fromMs: 0, toMs: 5_000 });
+		await sent();
+		reply({ ok: true, path: out, fromMs: 0, toMs: 5_000, timelineDurationMs: 21_000 });
+		expect(await pending).toMatchObject({
+			fragment: true,
+			warnings: ["2.0 s of frames are black (1.0 s)"],
+		});
+		expect(lastRequest().fromMs).toBe(0);
+		expect(verify).toHaveBeenCalledWith(out, info.durationMs, undefined);
+	});
+
+	it("does not call a range over the whole timeline a fragment", async () => {
+		const { remote, ready, sent, reply } = setup();
+		const out = path.join(dir, "whole.mp4");
+		ready(videoPath);
+		const pending = remote.exportVideo({ videoPath, outputPath: out, fromMs: 0, toMs: 21_000 });
+		await sent();
+		reply({ ok: true, path: out, fromMs: 0, toMs: 21_000, timelineDurationMs: 21_000 });
+		const done = await pending;
+		expect(done).not.toHaveProperty("fragment");
+		expect(done).not.toHaveProperty("fragmentNote");
+	});
+
+	it("says nothing about a fragment for an ordinary export", async () => {
+		const { remote, ready, sent, lastRequest, reply } = setup();
+		const out = path.join(dir, "all.mp4");
+		ready(videoPath);
+		const pending = remote.exportVideo({ videoPath, outputPath: out });
+		await sent();
+		expect(lastRequest().fromMs).toBeUndefined();
+		reply({ ok: true, path: out });
+		expect(await pending).not.toHaveProperty("fragment");
+	});
+
+	it("seeks the poster relative to the fragment, not the timeline", async () => {
+		const calls: string[][] = [];
+		const { remote, ready, sent, reply } = setup(async (args) => {
+			calls.push(args);
+			await fs.writeFile(args[args.length - 1], "");
+		});
+		const out = path.join(dir, "poster.mp4");
+		ready(videoPath);
+		const pending = remote.exportVideo({
+			videoPath,
+			outputPath: out,
+			fromMs: 8_000,
+			toMs: 18_000,
+			posterAtMs: 12_500,
+		});
+		await sent();
+		reply({ ok: true, fromMs: 8_000, toMs: 18_000, timelineDurationMs: 21_000 });
+		await pending;
+		expect(calls[0]).toContain("4.500");
+		expect(calls[0]).not.toContain("12.500");
+	});
+
+	it("renders a range for a gif too", async () => {
+		const { remote, ready, sent, lastRequest, reply } = setup();
+		const out = path.join(dir, "fragment.gif");
+		ready(videoPath);
+		const pending = remote.exportVideo({
+			videoPath,
+			outputPath: out,
+			fromMs: 8_000,
+			toMs: 18_000,
+		});
+		await sent();
+		expect(lastRequest()).toMatchObject({ format: "gif", fromMs: 8_000, toMs: 18_000 });
+		reply({ ok: true, path: out, fromMs: 8_000, toMs: 18_000, timelineDurationMs: 21_000 });
+		expect(await pending).toMatchObject({ status: "done", fragment: true });
+	});
+
+	it("refuses a range while another export is running", async () => {
+		const { remote, ready, sent, reply } = setup();
+		const out = path.join(dir, "one.mp4");
+		ready(videoPath);
+		const first = remote.exportVideo({ videoPath, outputPath: out });
+		await sent();
+		await expect(
+			remote.exportVideo({
+				videoPath,
+				outputPath: path.join(dir, "two.mp4"),
+				fromMs: 0,
+				toMs: 1_000,
+			}),
+		).rejects.toThrow(/already running/);
+		reply({ ok: true, path: out });
+		await first;
+	});
+});

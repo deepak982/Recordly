@@ -4,6 +4,7 @@ import { constants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { type IpcMain, ipcMain, type WebContents } from "electron";
+import { readExportRangeArgs } from "../../src/components/video-editor/export/exportRange";
 import { getFfmpegBinaryPath } from "../ipc/ffmpeg/binary";
 import { parseFfmpegFrameRate, parseNativeVideoMetadataProbeOutput } from "../ipc/ffmpeg/metadata";
 import { getRecordingsDir } from "../ipc/utils";
@@ -35,8 +36,12 @@ export type RemoteExportArgs = {
 	scale?: number;
 	/** Output frame rate, 1 to 120. */
 	fps?: number;
-	/** Use the frame at this time of the exported video as the file's poster image. */
+	/** Use the frame at this time of the edited timeline as the file's poster image. */
 	posterAtMs?: number;
+	/** Render only the edited timeline from here; needs toMs. */
+	fromMs?: number;
+	/** Render only the edited timeline up to here; needs fromMs. */
+	toMs?: number;
 };
 
 export type ExportedVideoInfo = {
@@ -47,6 +52,30 @@ export type ExportedVideoInfo = {
 	probeNote?: string;
 	warnings?: string[];
 };
+
+export type ExportedFragmentInfo = {
+	fragment: true;
+	fragmentFromMs: number;
+	fragmentToMs: number;
+	fragmentNote: string;
+};
+
+export function describeFragment(reply: RemoteExportResult): ExportedFragmentInfo | null {
+	const { fromMs, toMs, timelineDurationMs } = reply;
+	if (fromMs === undefined || toMs === undefined) return null;
+	if (fromMs <= 0 && timelineDurationMs !== undefined && toMs >= timelineDurationMs) return null;
+	const of = timelineDurationMs === undefined ? "" : ` of ${Math.round(timelineDurationMs)} ms`;
+	return {
+		fragment: true,
+		fragmentFromMs: fromMs,
+		fragmentToMs: toMs,
+		fragmentNote:
+			`This file is a ${Math.round(toMs - fromMs)} ms fragment of the edited timeline, ` +
+			`from ${Math.round(fromMs)} ms to ${Math.round(toMs)} ms${of}. It is not the finished ` +
+			"video, so do not hand it to anyone as one. Every time inside the file, including any " +
+			"in warnings, is measured from the start of the fragment.",
+	};
+}
 
 export type ProbeVideo = (videoPath: string, signal?: AbortSignal) => Promise<ExportedVideoInfo>;
 
@@ -312,7 +341,19 @@ async function resolveTarget(args: RemoteExportArgs, recordingsDir: () => Promis
 	if (requested && !path.isAbsolute(requested)) {
 		throw new Error(`outputPath must be an absolute path: ${requested}`);
 	}
-	const pad = buildPostSpec(args);
+	const range = readExportRangeArgs(args);
+	if (range && args.posterAtMs !== undefined) {
+		if (args.posterAtMs < range.fromMs || args.posterAtMs > range.toMs) {
+			throw new Error(
+				`posterAtMs ${Math.round(args.posterAtMs)} is outside the range being rendered (${range.fromMs} to ${range.toMs} ms). It is a time on the edited timeline, so it has to fall inside the range.`,
+			);
+		}
+	}
+	const pad = buildPostSpec(
+		range && args.posterAtMs !== undefined
+			? { ...args, posterAtMs: args.posterAtMs - range.fromMs }
+			: args,
+	);
 	const format: ExportFormat =
 		args.format ?? (requested?.toLowerCase().endsWith(".gif") ? "gif" : "mp4");
 	if (pad && format !== "mp4") {
@@ -343,7 +384,7 @@ async function resolveTarget(args: RemoteExportArgs, recordingsDir: () => Promis
 	if (existing && !args.overwrite) {
 		throw new Error(`${outputPath} already exists. Pass overwrite: true to replace it.`);
 	}
-	return { videoPath, outputPath, format, pad };
+	return { videoPath, outputPath, format, pad, range };
 }
 
 export function createRemoteExport({
@@ -487,7 +528,8 @@ export function createRemoteExport({
 		args: RemoteExportArgs,
 		opts: { onProgress?: (pct: number) => void; signal?: AbortSignal } = {},
 	): Promise<
-		({ status: "done"; path: string } & ExportedVideoInfo) | { status: "still-exporting" }
+		| ({ status: "done"; path: string } & ExportedVideoInfo & Partial<ExportedFragmentInfo>)
+		| { status: "still-exporting" }
 	> {
 		if (busy) throw new Error("An export is already running. get_status shows its progress.");
 		busy = true;
@@ -527,6 +569,7 @@ export function createRemoteExport({
 			outputPath: rendered,
 			format: target.format,
 			quality: args.quality,
+			...target.range,
 		};
 		const describeFile = async (
 			filePath: string,
@@ -552,7 +595,19 @@ export function createRemoteExport({
 				};
 			}
 		};
-		const padRendered = async (renderedPath: string, signal?: AbortSignal) => {
+		const withFragment = <T extends ExportedVideoInfo>(reply: RemoteExportResult, info: T) => {
+			const warnings = [...(reply.warnings ?? []), ...(info.warnings ?? [])];
+			return {
+				...info,
+				...(warnings.length > 0 ? { warnings } : {}),
+				...describeFragment(reply),
+			};
+		};
+		const padRendered = async (
+			renderedPath: string,
+			reply: RemoteExportResult,
+			signal?: AbortSignal,
+		) => {
 			const staged = `${target.outputPath}.padding-${unique}.mp4`;
 			busy = true;
 			status = { ...status, state: "exporting", progress: 99, outputPath: target.outputPath };
@@ -597,7 +652,7 @@ export function createRemoteExport({
 			return {
 				status: "done" as const,
 				path: target.outputPath,
-				...(await describeFile(target.outputPath, signal)),
+				...withFragment(reply, await describeFile(target.outputPath, signal)),
 			};
 		};
 		const completion = runInEditor(editor, request, opts.onProgress);
@@ -617,7 +672,7 @@ export function createRemoteExport({
 			if (target.pad) {
 				void completion
 					.then(async (done) => {
-						if (done.ok) await padRendered(done.path ?? rendered);
+						if (done.ok) await padRendered(done.path ?? rendered, done);
 						else await fs.rm(rendered, { force: true });
 					})
 					.catch(() => undefined);
@@ -633,10 +688,10 @@ export function createRemoteExport({
 			return {
 				status: "done",
 				path: donePath,
-				...(await describeFile(donePath, opts.signal)),
+				...withFragment(result, await describeFile(donePath, opts.signal)),
 			};
 		}
-		return padRendered(result.path ?? rendered, opts.signal);
+		return padRendered(result.path ?? rendered, result, opts.signal);
 	}
 
 	const verifyFile = async (filePath: string, samples?: number, signal?: AbortSignal) => {

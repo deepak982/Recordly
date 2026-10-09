@@ -1,6 +1,14 @@
 import { type MutableRefObject, type RefObject, useEffect, useRef, useState } from "react";
 import { resolveExportStartSettings } from "../exportStartSettings";
+import type { useTimelineState } from "../state/useTimelineState";
+import type { ZoomRegion } from "../types";
 import type { VideoPlaybackRef } from "../VideoPlayback";
+import {
+	describeExportRangeLimits,
+	type ExportRange,
+	readExportRangeArgs,
+	resolveExportRange,
+} from "./exportRange";
 import type { useExportRunner } from "./useExportRunner";
 import type { useExportSession } from "./useExportSession";
 import type { useExportSettings } from "./useExportSettings";
@@ -18,6 +26,8 @@ type Input = {
 	pendingFreshRecordingAutoZoomPathRef?: MutableRefObject<string | null>;
 	agentEditsSettled?: boolean;
 	videoPlaybackRef: RefObject<VideoPlaybackRef | null>;
+	timeline: ReturnType<typeof useTimelineState>;
+	effectiveZoomRegions: ZoomRegion[];
 	settings: ReturnType<typeof useExportSettings>;
 	session: ReturnType<typeof useExportSession>;
 	handleExport: ReturnType<typeof useExportRunner>["handleExport"];
@@ -87,6 +97,29 @@ export function useRemoteExportBridge(input: Input) {
 					reply({ ok: false, error: "The video is not loaded in the editor." });
 					return;
 				}
+				let range: ExportRange | undefined;
+				let warnings: string[] = [];
+				let timelineDurationMs: number | undefined;
+				try {
+					const requested = readExportRangeArgs(request);
+					if (requested) {
+						const resolved = resolveExportRange(
+							requested,
+							current.timeline.clipRegions,
+							current.duration * 1000,
+						);
+						range = resolved.range;
+						timelineDurationMs = resolved.timelineDurationMs;
+						warnings = describeExportRangeLimits(range, current.effectiveZoomRegions);
+					}
+				} catch (rangeError) {
+					reply({
+						ok: false,
+						error:
+							rangeError instanceof Error ? rangeError.message : String(rangeError),
+					});
+					return;
+				}
 				const { settings } = current;
 				const exportSettings = resolveExportStartSettings({
 					sourceWidth: video.videoWidth,
@@ -108,13 +141,21 @@ export function useRemoteExportBridge(input: Input) {
 					const path = await current.handleExport(exportSettings, {
 						destination: "download",
 						outputPath: request.outputPath,
+						range,
 						onError: (message) => {
 							error = message;
 						},
 					});
 					reply(
 						path
-							? { ok: true, path }
+							? {
+									ok: true,
+									path,
+									fromMs: range?.fromMs,
+									toMs: range?.toMs,
+									timelineDurationMs,
+									warnings: warnings.length > 0 ? warnings : undefined,
+								}
 							: {
 									ok: false,
 									error: error ?? "The export was canceled in the editor.",

@@ -71,6 +71,13 @@ function baseInput(overrides: Partial<Input> = {}): Input {
 		cursorTelemetrySourcePath: "/rec.mp4",
 		pendingFreshRecordingAutoZoomPathRef: { current: null },
 		videoPlaybackRef: { current: { video: { videoWidth: 1920, videoHeight: 1080 } } },
+		timeline: {
+			clipRegions: [
+				{ id: "a", startMs: 0, endMs: 4_000, sourceStartMs: 0, speed: 1 },
+				{ id: "b", startMs: 6_000, endMs: 10_000, sourceStartMs: 20_000, speed: 1 },
+			],
+		},
+		effectiveZoomRegions: [{ id: "z", startMs: 2_500, endMs: 3_500 }],
 		settings: {
 			mp4FrameRate: 30,
 			exportBackendPreference: "auto",
@@ -223,5 +230,78 @@ describe("requests", () => {
 		]);
 		finish("/out/a.mp4");
 		await pending;
+	});
+});
+
+describe("range requests", () => {
+	it.each([
+		[{ fromMs: 1_000 }, /both fromMs and toMs/],
+		[{ fromMs: 2_000, toMs: 2_050 }, /at least 100 ms/],
+		[{ fromMs: -5, toMs: 2_000 }, /0 or more/],
+		[{ fromMs: 9_000, toMs: 12_000 }, /past the end of the edited timeline/],
+		[{ fromMs: 4_200, toMs: 5_800 }, /whole span was cut/],
+	])("refuses %o without rendering", async (overrides, message) => {
+		const input = baseInput();
+		render(input);
+		await request(overrides as Partial<RemoteExportRequest>);
+		expect(lastResult()).toEqual({
+			id: "r1",
+			ok: false,
+			error: expect.stringMatching(message),
+		});
+		expect(input.handleExport).not.toHaveBeenCalled();
+	});
+
+	it("passes the range through and reports it back", async () => {
+		const input = baseInput();
+		render(input);
+		await request({ fromMs: 2_000, toMs: 8_000 });
+		expect(input.handleExport).toHaveBeenCalledWith(
+			expect.anything(),
+			expect.objectContaining({ range: { fromMs: 2_000, toMs: 8_000 } }),
+		);
+		expect(lastResult()).toEqual({
+			id: "r1",
+			ok: true,
+			path: "/out/a.mp4",
+			fromMs: 2_000,
+			toMs: 8_000,
+			timelineDurationMs: 10_000,
+			warnings: undefined,
+		});
+	});
+
+	it("warns when a zoom was already under way at the start", async () => {
+		const input = baseInput();
+		render(input);
+		await request({ fromMs: 2_000, toMs: 8_000 });
+		expect(lastResult()?.warnings).toBeUndefined();
+
+		react.reset();
+		const settling = baseInput({
+			effectiveZoomRegions: [{ id: "z", startMs: 500, endMs: 3_000 }],
+		} as unknown as Partial<Input>);
+		render(settling);
+		await request({ fromMs: 2_000, toMs: 8_000 });
+		expect(lastResult()?.warnings).toEqual([
+			expect.stringContaining("already under way at 2000 ms"),
+		]);
+	});
+
+	it("accepts a range that starts exactly on a cut", async () => {
+		const input = baseInput();
+		render(input);
+		await request({ fromMs: 4_000, toMs: 8_000 });
+		expect(lastResult()?.ok).toBe(true);
+	});
+
+	it("leaves an export with no range alone", async () => {
+		const input = baseInput();
+		render(input);
+		await request();
+		expect(input.handleExport).toHaveBeenCalledWith(
+			expect.anything(),
+			expect.objectContaining({ range: undefined }),
+		);
 	});
 });

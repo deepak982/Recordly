@@ -14,6 +14,7 @@ import {
 	streamExportBlobToTempFile,
 	writeSmokeExportReport,
 } from "./exportPersistence";
+import { type ExportRange, restrictTimelineToRange } from "./exportRange";
 import {
 	type ExportRunnerInput,
 	showExportErrorToast,
@@ -31,6 +32,7 @@ export function useExportRunner(input: ExportRunnerInput) {
 			options?: {
 				destination?: "download" | "share";
 				outputPath?: string;
+				range?: ExportRange;
 				onError?: (message: string) => void;
 			},
 		): Promise<string | undefined> => {
@@ -101,6 +103,22 @@ export function useExportRunner(input: ExportRunnerInput) {
 				return;
 			}
 
+			const ranged = options?.range
+				? restrictTimelineToRange(
+						{
+							clipRegions,
+							trimRegions: timeline.trimRegions,
+							annotationRegions: timeline.annotationRegions,
+							zoomRegions: effectiveZoomRegions,
+							audioRegions,
+						},
+						options.range,
+						Number.isFinite(video.duration) ? video.duration * 1000 : 0,
+					)
+				: undefined;
+			const exportClipRegions = ranged?.clipRegions ?? clipRegions;
+			const exportAudioRegions = ranged?.audioRegions ?? audioRegions;
+
 			const exportRunId = exportRunIdRef.current + 1;
 			exportRunIdRef.current = exportRunId;
 			cancelledExportRunIdRef.current = null;
@@ -167,6 +185,7 @@ export function useExportRunner(input: ExportRunnerInput) {
 							previewWidth,
 							previewHeight,
 							shadowIntensity: effectiveShadowIntensity,
+							ranged,
 							onProgress: (progress) => {
 								if (exportWasCancelled()) return;
 								recordSmokeProgress(progress);
@@ -331,14 +350,15 @@ export function useExportRunner(input: ExportRunnerInput) {
 							previewWidth,
 							previewHeight,
 							shadowIntensity: effectiveShadowIntensity,
+							ranged,
 							onProgress: (progress) => {
 								if (exportWasCancelled()) return;
 								recordSmokeProgress(progress);
 								setExportProgress(progress);
 							},
 						}),
-						audioRegions,
-						clipRegions,
+						audioRegions: exportAudioRegions,
+						clipRegions: exportClipRegions,
 						sourceAudioFallbackPaths: audio.sourceAudioFallbackPaths,
 						sourceAudioFallbackStartDelayMsByPath:
 							audio.sourceAudioFallbackStartDelayMsByPath,

@@ -52,6 +52,8 @@ interface RemoteExportRequest {
 	outputPath: string;
 	format: "mp4" | "gif";
 	quality?: "medium" | "good" | "high" | "source";
+	fromMs?: number;
+	toMs?: number;
 }
 
 interface RemoteExportResult {
@@ -59,6 +61,10 @@ interface RemoteExportResult {
 	ok: boolean;
 	path?: string;
 	error?: string;
+	fromMs?: number;
+	toMs?: number;
+	timelineDurationMs?: number;
+	warnings?: string[];
 }
 
 interface RemoteExportProgress {
