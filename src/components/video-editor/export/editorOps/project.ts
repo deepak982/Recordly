@@ -198,7 +198,7 @@ export const projectOps: EditorOpMap = {
 			videoPath,
 			videoChanged: videoPath !== context.videoSourcePath,
 			counts: counts(normalizeProjectEditor(data.editor)),
-			note: "The editor is reloading the recording. Wait for get_state to answer before the next edit.",
+			note: "The editor is reloading the recording. Wait for get_editor_state to answer before the next edit.",
 		};
 	},
 

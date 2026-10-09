@@ -58,7 +58,15 @@ function writeSettings(settings: StoredSettings) {
 
 const createToken = () => randomBytes(32).toString("base64url");
 
-export function setupMcpServer({ isDev, remote }: { isDev: boolean; remote: RemoteControl }) {
+export function setupMcpServer({
+	isDev,
+	remote,
+	openEditorWindow,
+}: {
+	isDev: boolean;
+	remote: RemoteControl;
+	openEditorWindow: () => { created: boolean };
+}) {
 	const port = isDev ? PORT + 1 : PORT;
 	const url = `http://127.0.0.1:${port}${MCP_PATH}`;
 	let settings = readSettings();
@@ -81,7 +89,14 @@ export function setupMcpServer({ isDev, remote }: { isDev: boolean; remote: Remo
 			return cardSpans((state.annotations ?? []) as never);
 		},
 	});
-	const recordings = createRemoteRecordings();
+	const recordings = createRemoteRecordings({
+		openEditorWindow,
+		waitForEditorState: (opts) => editor.getState(opts),
+		isExporting: () => {
+			const state = remoteExport.getStatus().state;
+			return state === "exporting" || state === "waiting-for-editor";
+		},
+	});
 	const agent = createAgentControl(remote);
 	const review = createRemoteReview({ remote });
 	const thumbnail = createThumbnail({

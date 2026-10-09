@@ -30,6 +30,11 @@ vi.mock("../ipc/utils", () => ipc.utils);
 const { createRemoteRecordings } = await import("./remoteRecordings");
 
 function setup(overrides = {}) {
+	const wiring = {
+		openEditorWindow: vi.fn(() => ({ created: true })),
+		waitForEditorState: vi.fn(async () => ({ videoPath: "/r/take.mp4" })),
+		isExporting: vi.fn(() => false),
+	};
 	const deps = {
 		list: vi.fn(async () => [
 			{ path: "/r/old.mp4", name: "old.mp4", bytes: 10, createdAt: 1000 },
@@ -39,9 +44,10 @@ function setup(overrides = {}) {
 		validate: vi.fn(async () => ({ fileSizeBytes: 5000, durationSeconds: 90 })),
 		activate: vi.fn(async () => ({ usedLiveCapture: false })),
 		isCapturing: vi.fn(async () => false),
+		currentRecordingPath: vi.fn(async () => null as string | null),
 		...overrides,
 	};
-	return { deps, recordings: createRemoteRecordings(deps) };
+	return { deps: { ...wiring, ...deps }, recordings: createRemoteRecordings(wiring, deps) };
 }
 
 describe("recoverRecording", () => {
@@ -90,14 +96,128 @@ describe("recoverRecording", () => {
 		expect(deps.validate).not.toHaveBeenCalled();
 		expect(deps.activate).not.toHaveBeenCalled();
 	});
+
+	it("refuses while an export is running, so the export keeps its video", async () => {
+		const wiring = {
+			openEditorWindow: vi.fn(() => ({ created: false })),
+			waitForEditorState: vi.fn(async () => ({ videoPath: "/r/take.mp4" })),
+			isExporting: vi.fn(() => true),
+		};
+		const deps = {
+			validate: vi.fn(async () => ({ fileSizeBytes: 1, durationSeconds: 1 })),
+			activate: vi.fn(async () => ({ usedLiveCapture: false })),
+			isCapturing: vi.fn(async () => false),
+		};
+		const recordings = createRemoteRecordings(wiring, deps);
+		await expect(recordings.recoverRecording("/r/take.mp4")).rejects.toThrow(
+			/export is running/,
+		);
+		expect(deps.activate).not.toHaveBeenCalled();
+	});
+
+	it("warns that an open editor drops its unsaved edits", async () => {
+		const { recordings } = setup();
+		expect((await recordings.recoverRecording("/r/take.mp4")).note).toMatch(
+			/unsaved edits included/,
+		);
+	});
+});
+
+describe("openEditor", () => {
+	it("recovers the newest recording, opens the window and waits for the editor", async () => {
+		const { deps, recordings } = setup();
+		const result = await recordings.openEditor();
+		expect(deps.activate).toHaveBeenCalledWith("/r/new.mp4");
+		expect(deps.openEditorWindow).toHaveBeenCalled();
+		expect(deps.waitForEditorState).toHaveBeenCalled();
+		expect(result).toMatchObject({ path: "/r/new.mp4", windowCreated: true });
+	});
+
+	it("keeps the recording the app already has instead of recovering another", async () => {
+		const { deps, recordings } = setup({
+			currentRecordingPath: vi.fn(async () => "/r/take.mp4"),
+			waitForEditorState: vi.fn(async () => ({ videoPath: "/r/take.mp4" })),
+		});
+		const result = await recordings.openEditor();
+		expect(deps.activate).not.toHaveBeenCalled();
+		expect(result).toMatchObject({ path: "/r/take.mp4", editorReady: true });
+		expect(result.note).toMatch(/get_editor_state/);
+	});
+
+	it("loads the path it is given, and reports an existing window as not created", async () => {
+		const { deps, recordings } = setup({
+			currentRecordingPath: vi.fn(async () => "/r/other.mp4"),
+			openEditorWindow: vi.fn(() => ({ created: false })),
+		});
+		const result = await recordings.openEditor({ path: "/r/take.mp4" });
+		expect(deps.activate).toHaveBeenCalledWith("/r/take.mp4");
+		expect(result).toMatchObject({
+			path: "/r/take.mp4",
+			windowCreated: false,
+			editorReady: true,
+		});
+	});
+
+	it("validates the path before opening anything", async () => {
+		const { deps, recordings } = setup();
+		await expect(recordings.openEditor({ path: "/r/notes.txt" })).rejects.toThrow(
+			/not a video/,
+		);
+		await expect(recordings.openEditor({ path: "take.mp4" })).rejects.toThrow(/absolute/);
+		expect(deps.openEditorWindow).not.toHaveBeenCalled();
+	});
+
+	it("says there is nothing to open when no recording exists", async () => {
+		const { deps, recordings } = setup({ list: vi.fn(async () => []) });
+		await expect(recordings.openEditor()).rejects.toThrow(/no recordings yet/);
+		expect(deps.openEditorWindow).not.toHaveBeenCalled();
+	});
+
+	it("reports the window alone when the editor never finishes loading", async () => {
+		const { recordings } = setup({
+			waitForEditorState: vi.fn(async () => {
+				throw new Error("The editor did not finish loading a recording within 45 s.");
+			}),
+		});
+		const result = await recordings.openEditor();
+		expect(result.editorReady).toBe(false);
+		expect(result.note).toMatch(/Only the window is guaranteed/);
+		expect(result.note).toMatch(/within 45 s/);
+	});
+
+	it("says so when the editor answers with a different recording", async () => {
+		const { recordings } = setup({
+			currentRecordingPath: vi.fn(async () => "/r/take.mp4"),
+			waitForEditorState: vi.fn(async () => ({ videoPath: "/r/other.mp4" })),
+		});
+		const result = await recordings.openEditor();
+		expect(result).toMatchObject({ editorReady: true, showing: "/r/other.mp4" });
+		expect(result.note).toMatch(/not \/r\/take\.mp4/);
+	});
+
+	it("is a plain focus the second time around", async () => {
+		const { deps, recordings } = setup({
+			currentRecordingPath: vi.fn(async () => "/r/take.mp4"),
+			openEditorWindow: vi.fn(() => ({ created: false })),
+		});
+		await recordings.openEditor();
+		await recordings.openEditor();
+		expect(deps.activate).not.toHaveBeenCalled();
+		expect(deps.openEditorWindow).toHaveBeenCalledTimes(2);
+	});
 });
 
 describe("the default activation", () => {
 	const platform = process.platform;
 	const recover = () =>
-		createRemoteRecordings({
-			validate: async () => ({ fileSizeBytes: 5000, durationSeconds: 90 }),
-		}).recoverRecording("/r/take.mp4");
+		createRemoteRecordings(
+			{
+				openEditorWindow: () => ({ created: false }),
+				waitForEditorState: async () => ({ videoPath: "/r/take.mp4" }),
+				isExporting: () => false,
+			},
+			{ validate: async () => ({ fileSizeBytes: 5000, durationSeconds: 90 }) },
+		).recoverRecording("/r/take.mp4");
 
 	beforeEach(() => {
 		Object.defineProperty(process, "platform", { value: "darwin", configurable: true });

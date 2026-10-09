@@ -12,13 +12,22 @@ export type RecordingSummary = {
 
 type Validation = { fileSizeBytes: number; durationSeconds: number | null };
 
-export type RemoteRecordingsDeps = {
+export type RemoteRecordingsWiring = {
+	/** Focuses the editor window, creating one when the app has none. */
+	openEditorWindow: () => { created: boolean } | Promise<{ created: boolean }>;
+	/** Settles only once an editor renderer reports a fully loaded recording. */
+	waitForEditorState: (opts?: { signal?: AbortSignal }) => Promise<{ videoPath: string }>;
+	isExporting: () => boolean;
+};
+
+export type RemoteRecordingsDeps = RemoteRecordingsWiring & {
 	list: () => Promise<{ path: string; name: string; bytes: number; createdAt: number }[]>;
 	setRemoved: (paths: string[], removed: boolean) => Promise<void>;
 	validate: (videoPath: string) => Promise<Validation>;
 	/** Returns true only when this was the take still being captured, telemetry and all. */
 	activate: (videoPath: string) => Promise<{ usedLiveCapture: boolean }>;
 	isCapturing: () => Promise<boolean>;
+	currentRecordingPath: () => Promise<string | null>;
 };
 
 async function defaultActivate(videoPath: string) {
@@ -61,7 +70,7 @@ async function defaultActivate(videoPath: string) {
 	return { usedLiveCapture: false };
 }
 
-const defaultDeps = (): RemoteRecordingsDeps => ({
+const defaultDeps = (): Omit<RemoteRecordingsDeps, keyof RemoteRecordingsWiring> => ({
 	list: async () => (await import("../ipc/recording/library")).listRecordings(),
 	setRemoved: async (paths, removed) =>
 		(await import("../ipc/recording/library")).setRecordingsRemoved(paths, removed),
@@ -76,6 +85,10 @@ const defaultDeps = (): RemoteRecordingsDeps => ({
 			state.ffmpegScreenRecordingActive
 		);
 	},
+	currentRecordingPath: async () => {
+		const state = await import("../ipc/state");
+		return state.currentRecordingSession?.videoPath ?? state.currentVideoPath ?? null;
+	},
 });
 
 function requireAbsolute(filePath: string, what: string) {
@@ -85,57 +98,126 @@ function requireAbsolute(filePath: string, what: string) {
 	return path.resolve(filePath);
 }
 
-export function createRemoteRecordings(overrides: Partial<RemoteRecordingsDeps> = {}) {
-	const deps = { ...defaultDeps(), ...overrides };
+export function createRemoteRecordings(
+	wiring: RemoteRecordingsWiring,
+	overrides: Partial<RemoteRecordingsDeps> = {},
+) {
+	const deps = { ...defaultDeps(), ...wiring, ...overrides };
+
+	async function recoverRecording(filePath: string) {
+		const videoPath = requireAbsolute(filePath, "path");
+		if (!VIDEO_EXTENSIONS.has(path.extname(videoPath).toLowerCase())) {
+			throw new Error(
+				`${path.basename(videoPath)} is not a video Recordly can open (.mp4, .mov, .webm, .mkv or .m4v).`,
+			);
+		}
+		if (await deps.isCapturing()) {
+			throw new Error(
+				"Recordly is still recording. Call stop_recording first, then recover_recording.",
+			);
+		}
+		if (deps.isExporting()) {
+			throw new Error(
+				"An export is running. Wait for it to finish before recovering: switching the recording now would pull the video out from under the export.",
+			);
+		}
+		let validation: Validation;
+		try {
+			validation = await deps.validate(videoPath);
+		} catch (error) {
+			const message =
+				(error as NodeJS.ErrnoException).code === "ENOENT"
+					? `There is no file at ${videoPath}.`
+					: `Recordly cannot play ${videoPath}: ${(error as Error).message}`;
+			throw new Error(message);
+		}
+		const { usedLiveCapture } = await deps.activate(videoPath);
+		return {
+			path: videoPath,
+			sizeBytes: validation.fileSizeBytes,
+			durationSeconds: validation.durationSeconds,
+			telemetrySaved: usedLiveCapture,
+			note: usedLiveCapture
+				? "Recovered the unfinished capture, including its cursor data. An open editor switches to it and drops what it held, unsaved edits included."
+				: "It is now the current recording. An open editor switches to it and drops what it held, unsaved edits included, so call project.save first if you need them. It has no new cursor data unless a .cursor.json already sits next to it. If no editor is open, call open_editor; then review_recording or export_video.",
+		};
+	}
+
+	async function listRecordings(): Promise<{ recordings: RecordingSummary[] }> {
+		const entries = await deps.list();
+		return {
+			recordings: [...entries]
+				.sort((a, b) => b.createdAt - a.createdAt)
+				.map((entry) => ({
+					path: entry.path,
+					name: entry.name,
+					sizeBytes: entry.bytes,
+					modifiedAt: new Date(entry.createdAt).toISOString(),
+				})),
+		};
+	}
+
+	async function newestRecordingPath() {
+		const { recordings } = await listRecordings();
+		const newest = recordings[0];
+		if (!newest) {
+			throw new Error(
+				"There are no recordings yet, so there is nothing to open. Record one first, or pass open_editor the path to a video.",
+			);
+		}
+		return newest.path;
+	}
+
+	async function openEditor({
+		path: filePath,
+		signal,
+	}: {
+		path?: string;
+		signal?: AbortSignal;
+	} = {}) {
+		if (filePath !== undefined && typeof filePath !== "string") {
+			throw new Error("open_editor: path must be an absolute path to a recording.");
+		}
+		const current = filePath === undefined ? await deps.currentRecordingPath() : null;
+		let recovered: Awaited<ReturnType<typeof recoverRecording>> | null = null;
+		let target: string;
+		if (current) {
+			target = path.resolve(current);
+		} else {
+			recovered = await recoverRecording(filePath ?? (await newestRecordingPath()));
+			target = recovered.path;
+		}
+		const { created } = await deps.openEditorWindow();
+		const opened = {
+			path: target,
+			windowCreated: created,
+			...(recovered ? { recoveredNote: recovered.note } : {}),
+		};
+		try {
+			const state = await deps.waitForEditorState({ signal });
+			const showing = path.resolve(state.videoPath);
+			return {
+				...opened,
+				editorReady: true,
+				showing,
+				note:
+					showing === target
+						? "The editor is open with this recording loaded, so get_editor_state and the edit tools will answer."
+						: `The editor is open and answering, but it is showing ${showing}, not ${target}. Call open_editor again with the path you want.`,
+			};
+		} catch (error) {
+			return {
+				...opened,
+				editorReady: false,
+				note: `Recordly opened the editor window, but the editor never reported a loaded recording: ${(error as Error).message} Only the window is guaranteed. Call get_editor_state again once ${path.basename(target)} has finished loading.`,
+			};
+		}
+	}
 
 	return {
-		async recoverRecording(filePath: string) {
-			const videoPath = requireAbsolute(filePath, "path");
-			if (!VIDEO_EXTENSIONS.has(path.extname(videoPath).toLowerCase())) {
-				throw new Error(
-					`${path.basename(videoPath)} is not a video Recordly can open (.mp4, .mov, .webm, .mkv or .m4v).`,
-				);
-			}
-			if (await deps.isCapturing()) {
-				throw new Error(
-					"Recordly is still recording. Call stop_recording first, then recover_recording.",
-				);
-			}
-			let validation: Validation;
-			try {
-				validation = await deps.validate(videoPath);
-			} catch (error) {
-				const message =
-					(error as NodeJS.ErrnoException).code === "ENOENT"
-						? `There is no file at ${videoPath}.`
-						: `Recordly cannot play ${videoPath}: ${(error as Error).message}`;
-				throw new Error(message);
-			}
-			const { usedLiveCapture } = await deps.activate(videoPath);
-			return {
-				path: videoPath,
-				sizeBytes: validation.fileSizeBytes,
-				durationSeconds: validation.durationSeconds,
-				telemetrySaved: usedLiveCapture,
-				note: usedLiveCapture
-					? "Recovered the unfinished capture, including its cursor data."
-					: "It is now the current recording. It has no new cursor data unless a .cursor.json already sits next to it. Open the editor, then call review_recording or export_video.",
-			};
-		},
-
-		async listRecordings(): Promise<{ recordings: RecordingSummary[] }> {
-			const entries = await deps.list();
-			return {
-				recordings: [...entries]
-					.sort((a, b) => b.createdAt - a.createdAt)
-					.map((entry) => ({
-						path: entry.path,
-						name: entry.name,
-						sizeBytes: entry.bytes,
-						modifiedAt: new Date(entry.createdAt).toISOString(),
-					})),
-			};
-		},
+		recoverRecording,
+		listRecordings,
+		openEditor,
 
 		async deleteRecording(filePath: string) {
 			const target = requireAbsolute(filePath, "path");
