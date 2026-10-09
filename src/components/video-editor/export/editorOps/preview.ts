@@ -20,6 +20,8 @@ export const MAX_PREVIEW_FRAMES = 6;
 export const MIN_EVERY_MS = 17;
 export const MAX_SINGLE_WIDTH = 1280;
 export const MAX_TILE_WIDTH = 640;
+export const MIN_FRAMING_SCALE = 0.05;
+export const MAX_FRAMED_SIDE = 8192;
 
 const TILE_GAP = 6;
 const JPEG_QUALITY = 0.92;
@@ -38,16 +40,131 @@ const NO_PROGRESS = () => undefined;
 
 export type PreviewFrame = { atMs: number; sourceMs: number };
 
+export type PreviewFraming = {
+	aspect?: { w: number; h: number };
+	padTo?: { width: number; height: number };
+	scale?: number;
+};
+
 export type PreviewPlan = {
 	frames: PreviewFrame[];
 	skippedAtMs: number[];
 	cols: number;
 	rows: number;
 	durationMs: number;
+	framing: PreviewFraming | null;
+};
+
+export type FramedOutput = {
+	width: number;
+	height: number;
+	contentWidth: number;
+	contentHeight: number;
+	contentX: number;
+	contentY: number;
 };
 
 function even(value: number) {
 	return Math.max(2, 2 * Math.floor(value / 2));
+}
+
+function evenUp(value: number) {
+	return Math.max(2, 2 * Math.ceil(value / 2));
+}
+
+function evenDown(value: number) {
+	return 2 * Math.floor(value / 2);
+}
+
+export function parseFraming(args: Record<string, unknown>): PreviewFraming | null {
+	const { aspect, padTo, scale } = args;
+	if (aspect !== undefined && padTo !== undefined) {
+		throw new Error("Pass either aspect or padTo, not both.");
+	}
+	if (padTo !== undefined && scale !== undefined) {
+		throw new Error(
+			"Pass either padTo or scale, not both: padTo already fixes the output size. Use aspect with scale, or padTo alone.",
+		);
+	}
+	const framing: PreviewFraming = {};
+	if (aspect !== undefined) {
+		const match =
+			typeof aspect === "string"
+				? /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.exec(aspect.trim())
+				: null;
+		if (!match || Number(match[1]) <= 0 || Number(match[2]) <= 0) {
+			throw new Error(`aspect must look like 16:9, not ${JSON.stringify(aspect)}.`);
+		}
+		framing.aspect = { w: Number(match[1]), h: Number(match[2]) };
+	}
+	if (padTo !== undefined) {
+		const match = typeof padTo === "string" ? /^(\d+)x(\d+)$/i.exec(padTo.trim()) : null;
+		const [width, height] = [Number(match?.[1]), Number(match?.[2])];
+		if (!match || width < 2 || height < 2 || width % 2 || height % 2) {
+			throw new Error(
+				`padTo must look like 2880x1600 with even sizes, not ${JSON.stringify(padTo)}.`,
+			);
+		}
+		if (width > MAX_FRAMED_SIDE || height > MAX_FRAMED_SIDE) {
+			throw new Error(`padTo cannot be larger than ${MAX_FRAMED_SIDE} px on a side.`);
+		}
+		framing.padTo = { width, height };
+	}
+	if (scale !== undefined) {
+		if (
+			typeof scale !== "number" ||
+			!Number.isFinite(scale) ||
+			scale < MIN_FRAMING_SCALE ||
+			scale > 1
+		) {
+			throw new Error(
+				`scale must be a number from ${MIN_FRAMING_SCALE} to 1 (it only shrinks), not ${JSON.stringify(scale)}.`,
+			);
+		}
+		framing.scale = scale;
+	}
+	return Object.keys(framing).length > 0 ? framing : null;
+}
+
+export function frameOutput(
+	width: number,
+	height: number,
+	framing: PreviewFraming | null,
+): FramedOutput {
+	let outWidth = width;
+	let outHeight = height;
+	let contentWidth = width;
+	let contentHeight = height;
+	if (framing?.aspect) {
+		const { w, h } = framing.aspect;
+		outWidth = evenUp(Math.max(width, (height * w) / h));
+		outHeight = evenUp(Math.max(height, (width * h) / w));
+	} else if (framing?.padTo) {
+		outWidth = framing.padTo.width;
+		outHeight = framing.padTo.height;
+		contentWidth = even(Math.min(outWidth, Math.round((outHeight * width) / height)));
+		contentHeight = even(Math.min(outHeight, Math.round((outWidth * height) / width)));
+	}
+	let contentX = evenDown((outWidth - contentWidth) / 2);
+	let contentY = evenDown((outHeight - contentHeight) / 2);
+	if (framing?.scale !== undefined) {
+		const shrunkWidth = even(outWidth * framing.scale);
+		const shrunkHeight = even(outHeight * framing.scale);
+		const factorX = shrunkWidth / outWidth;
+		const factorY = shrunkHeight / outHeight;
+		contentX *= factorX;
+		contentY *= factorY;
+		contentWidth *= factorX;
+		contentHeight *= factorY;
+		outWidth = shrunkWidth;
+		outHeight = shrunkHeight;
+	}
+	if (outWidth > MAX_FRAMED_SIDE || outHeight > MAX_FRAMED_SIDE) {
+		throw new Error(
+			`Those framing settings letterbox a ${width}x${height} frame out to ${outWidth}x${outHeight}, and render_preview will not composite a side over ${MAX_FRAMED_SIDE} px. An export would still produce that size.`,
+		);
+	}
+	return { width: outWidth, height: outHeight, contentWidth, contentHeight, contentX, contentY };
 }
 
 export function timelineToSourceMs(atMs: number, clips: ClipRegion[]): number | null {
@@ -63,7 +180,8 @@ export function planPreview(
 	{ clipRegions, durationMs }: { clipRegions: ClipRegion[]; durationMs: number },
 ): PreviewPlan {
 	const args = requireObject(payload, "render_preview");
-	rejectUnknown(args, ["atMs", "count", "everyMs"], "render_preview");
+	rejectUnknown(args, ["atMs", "count", "everyMs", "aspect", "padTo", "scale"], "render_preview");
+	const framing = parseFraming(args);
 	const { atMs, count, everyMs } = args;
 	if (atMs !== undefined && (count !== undefined || everyMs !== undefined)) {
 		throw new Error(
@@ -138,7 +256,14 @@ export function planPreview(
 		);
 	}
 	const cols = Math.ceil(Math.sqrt(frames.length));
-	return { frames, skippedAtMs, cols, rows: Math.ceil(frames.length / cols), durationMs };
+	return {
+		frames,
+		skippedAtMs,
+		cols,
+		rows: Math.ceil(frames.length / cols),
+		durationMs,
+		framing,
+	};
 }
 
 function withTimeout<T>(work: Promise<T>, timeoutMs: number, waitingFor: string): Promise<T> {
@@ -305,20 +430,26 @@ export async function renderPreview(payload: unknown, context: EditorOpContext) 
 			throw new Error("The recording reports no picture size, so it cannot be composited.");
 		}
 		const previewSize = previewPixelSize();
+		const exportAspectRatio = context.exportAspectRatio ?? "native";
 		const native = calculateMp4SourceDimensions(
 			video.videoWidth,
 			video.videoHeight,
-			"native",
+			exportAspectRatio,
 			appearance.cropRegion,
 		);
+		const framed = frameOutput(native.width, native.height, plan.framing);
 		const cap = plan.frames.length > 1 ? MAX_TILE_WIDTH : MAX_SINGLE_WIDTH;
-		const scale = Math.min(1, cap / native.width);
-		const tileWidth = even(native.width * scale);
-		const tileHeight = even(native.height * scale);
+		const scale = Math.min(1, cap / framed.width);
+		const tileWidth = even(framed.width * scale);
+		const tileHeight = even(framed.height * scale);
+		const pictureWidth = even(framed.contentWidth * scale);
+		const pictureHeight = even(framed.contentHeight * scale);
+		const pictureX = Math.round((tileWidth - pictureWidth) / 2);
+		const pictureY = Math.round((tileHeight - pictureHeight) / 2);
 		const config = buildRendererConfig({
 			context,
-			tileWidth,
-			tileHeight,
+			pictureWidth,
+			pictureHeight,
 			video,
 			previewWidth: previewSize.width,
 			previewHeight: previewSize.height,
@@ -355,12 +486,16 @@ export async function renderPreview(payload: unknown, context: EditorOpContext) 
 				await seeked;
 			}
 			await renderer.draw(video, frame, seekMs);
+			const cellX = (index % plan.cols) * (tileWidth + TILE_GAP);
+			const cellY = Math.floor(index / plan.cols) * (tileHeight + TILE_GAP);
+			sheetCtx.fillStyle = "#000000";
+			sheetCtx.fillRect(cellX, cellY, tileWidth, tileHeight);
 			sheetCtx.drawImage(
 				renderer.canvas(),
-				(index % plan.cols) * (tileWidth + TILE_GAP),
-				Math.floor(index / plan.cols) * (tileHeight + TILE_GAP),
-				tileWidth,
-				tileHeight,
+				cellX + pictureX,
+				cellY + pictureY,
+				pictureWidth,
+				pictureHeight,
 			);
 			drawn.push(frame);
 		}
@@ -391,8 +526,23 @@ export async function renderPreview(payload: unknown, context: EditorOpContext) 
 			notRendered: layers.notRendered,
 			reused,
 			note: [
-				`This is the export pipeline's own composite at ${tileWidth}x${tileHeight} per frame, not the recorded screen.`,
-				`It uses the recording's native aspect ratio and the legacy export renderer, so an export set to another aspect ratio or to the modern pipeline can frame things differently.`,
+				`This is the export's own renderer compositing at ${tileWidth}x${tileHeight} per frame, not the recorded screen.`,
+				plan.framing
+					? `Those framing settings letterbox the export to ${framed.width}x${framed.height}; the bars here are drawn the way the export's letterbox pass draws them, scaled to fit the preview.`
+					: undefined,
+				exportAspectRatio === "native"
+					? undefined
+					: `The editor's export aspect ratio is ${exportAspectRatio}, so this composited on the ${native.width}x${native.height} canvas the export will use, not the recording's own shape. That setting is separate from the aspect argument, which only letterboxes.`,
+				context.exportAspectRatio === undefined
+					? `The editor's export aspect ratio could not be read here, so this assumed Native; an export set to another ratio renders on a differently shaped canvas, which moves the padding, wallpaper and annotations. That setting is separate from the aspect argument, which only letterboxes.`
+					: undefined,
+				context.effectiveSpeedRegions === undefined &&
+				timeline.clipRegions.some((clip) => clip.speed !== 1)
+					? `A clip here is not at 1x speed, and the export derives an extra speed region from it that this composite could not read, so cursor and camera motion can differ.`
+					: undefined,
+				context.effectiveShowCursor === undefined && appearance.showCursor
+					? `Whether this recording's session turned the overlay cursor off could not be read here, so a cursor is drawn; the export leaves it out for a session recorded with the system cursor showing.`
+					: undefined,
 				previewSize.measured
 					? undefined
 					: `The editor preview could not be measured, so annotation, caption and cursor sizes were scaled against ${FALLBACK_PREVIEW_WIDTH}x${FALLBACK_PREVIEW_HEIGHT}, as a headless export would.`,
@@ -416,17 +566,23 @@ function release(step: () => void) {
 	}
 }
 
-export function describeLayers(
-	{ timeline, appearance }: EditorOpContext,
-	cursorArtwork: string | null,
-) {
+export function showsCursor({ appearance, effectiveShowCursor }: EditorOpContext) {
+	return effectiveShowCursor ?? appearance.showCursor;
+}
+
+export function speedRegionsFor({ timeline, effectiveSpeedRegions }: EditorOpContext) {
+	return effectiveSpeedRegions ?? timeline.speedRegions;
+}
+
+export function describeLayers(context: EditorOpContext, cursorArtwork: string | null) {
+	const { timeline } = context;
 	const rendered = ["clips and speed", "look", "zooms", "webcam"];
 	const notRendered: string[] = [];
 	if (cursorArtwork) {
 		notRendered.push(
 			`cursor: its artwork could not be loaded here (${cursorArtwork}), so no cursor is drawn even though the export draws one`,
 		);
-	} else if (!appearance.showCursor) {
+	} else if (!showsCursor(context)) {
 		notRendered.push("cursor: it is turned off for this export");
 	} else if ((timeline.cursorTelemetry ?? []).length === 0) {
 		notRendered.push("cursor: this recording carries no cursor telemetry");
@@ -440,36 +596,37 @@ export function describeLayers(
 }
 
 function buildRendererConfig({
-	context: { timeline, appearance },
-	tileWidth,
-	tileHeight,
+	context,
+	pictureWidth,
+	pictureHeight,
 	video,
 	previewWidth,
 	previewHeight,
 }: {
 	context: EditorOpContext;
-	tileWidth: number;
-	tileHeight: number;
+	pictureWidth: number;
+	pictureHeight: number;
 	video: HTMLVideoElement;
 	previewWidth: number;
 	previewHeight: number;
 }): Record<string, unknown> {
+	const { timeline, appearance } = context;
 	return {
 		...buildExportRenderOptions({
 			appearance,
 			timeline,
-			effectiveSpeedRegions: timeline.speedRegions,
+			effectiveSpeedRegions: speedRegionsFor(context),
 			effectiveZoomRegions: timeline.zoomRegions,
 			effectiveCursorTelemetry: timeline.cursorTelemetry ?? [],
-			effectiveShowCursor: appearance.showCursor,
+			effectiveShowCursor: showsCursor(context),
 			previewWidth,
 			previewHeight,
 			shadowIntensity: appearance.shadowIntensity,
 			onProgress: NO_PROGRESS,
 		}),
 		timelineEffects: true,
-		width: tileWidth,
-		height: tileHeight,
+		width: pictureWidth,
+		height: pictureHeight,
 		videoWidth: video.videoWidth,
 		videoHeight: video.videoHeight,
 	};
@@ -483,7 +640,7 @@ async function openRenderer(config: Record<string, unknown>): Promise<WarmRender
 	} catch (error) {
 		cursorArtwork = error instanceof Error ? error.message : String(error);
 	}
-	const { FrameRenderer } = await import("@/lib/exporter/frameRenderer");
+	const { FrameRenderer } = await import("@/lib/exporter/modernFrameRenderer");
 	const renderer = new FrameRenderer(
 		config as unknown as ConstructorParameters<typeof FrameRenderer>[0],
 	);

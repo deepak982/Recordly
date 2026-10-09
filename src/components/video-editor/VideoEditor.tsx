@@ -14,12 +14,12 @@ import { useEditorSettingsPanelProps } from "./layout/useEditorSettingsPanelProp
 import { useVideoEditorPresets } from "./presets/useVideoEditorPresets";
 import { useEditorProjectController } from "./project/useEditorProjectController";
 import { useProjectLibraryController } from "./project/useProjectLibraryController";
+import { createProjectData } from "./projectPersistence";
 import { getDevOpenRecordingConfig, getSmokeExportConfig } from "./smokeExportConfig";
 import { useAppearanceState } from "./state/useAppearanceState";
 import { useEditorUiState } from "./state/useEditorUiState";
 import { useProjectState } from "./state/useProjectState";
 import { useTimelineState } from "./state/useTimelineState";
-import { createProjectData } from "./projectPersistence";
 import { useNvidiaCudaExportOptIn } from "./useNvidiaCudaExportOptIn";
 import { cloneStructured } from "./videoEditorUtils";
 
@@ -380,6 +380,7 @@ export default function VideoEditor() {
 		dimensions: exportDimensions,
 		audio,
 		smokeConfig: smokeExportConfig,
+		aspectRatio,
 		effectiveSpeedRegions,
 		effectiveZoomRegions,
 		effectiveCursorTelemetry,

@@ -1,8 +1,10 @@
 import type { MutableRefObject } from "react";
-import type { EditorProjectData } from "../../projectPersistence";
+import type { AspectRatio } from "@/utils/aspectRatioUtils";
 import type { AgentActivityLog } from "../../agentEdits/planAgentEdits";
+import type { EditorProjectData } from "../../projectPersistence";
 import type { useAppearanceState } from "../../state/useAppearanceState";
 import type { useTimelineState } from "../../state/useTimelineState";
+import type { SpeedRegion } from "../../types";
 
 export type EditorProjectHooks = {
 	snapshot: EditorProjectData | null;
@@ -22,6 +24,9 @@ export type EditorOpContext = {
 	assertSameRecording: () => void;
 	adoptJoinedMedia: (media: { path: string; url: string }) => void;
 	project?: EditorProjectHooks;
+	exportAspectRatio?: AspectRatio;
+	effectiveSpeedRegions?: SpeedRegion[];
+	effectiveShowCursor?: boolean;
 	ids: {
 		zoom: MutableRefObject<number>;
 		clip: MutableRefObject<number>;

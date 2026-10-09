@@ -1,5 +1,6 @@
 import type { MutableRefObject, RefObject } from "react";
 import type { useI18n } from "@/contexts/I18nContext";
+import type { AspectRatio } from "@/utils/aspectRatioUtils";
 import type { useVideoEditorAudio } from "../audio/useVideoEditorAudio";
 import type { getSmokeExportConfig } from "../smokeExportConfig";
 import type { useAppearanceState } from "../state/useAppearanceState";
@@ -39,6 +40,7 @@ type Input = {
 	dimensions: ReturnType<typeof useExportDimensions>;
 	audio: ReturnType<typeof useVideoEditorAudio>;
 	smokeConfig: ReturnType<typeof getSmokeExportConfig>;
+	aspectRatio: AspectRatio;
 	effectiveSpeedRegions: SpeedRegion[];
 	effectiveZoomRegions: ZoomRegion[];
 	effectiveCursorTelemetry: CursorTelemetryPoint[];

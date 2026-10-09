@@ -15,6 +15,9 @@ type Input = {
 	ids: EditorOpContext["ids"];
 	adoptJoinedMedia: EditorOpContext["adoptJoinedMedia"];
 	project?: EditorOpContext["project"];
+	aspectRatio?: EditorOpContext["exportAspectRatio"];
+	effectiveSpeedRegions?: EditorOpContext["effectiveSpeedRegions"];
+	effectiveShowCursor?: EditorOpContext["effectiveShowCursor"];
 };
 
 type Editor = Input;
@@ -37,6 +40,9 @@ function runOp(op: string, payload: unknown, editor: Editor, live: () => Editor)
 		ids: editor.ids,
 		adoptJoinedMedia: editor.adoptJoinedMedia,
 		project: editor.project,
+		exportAspectRatio: editor.aspectRatio,
+		effectiveSpeedRegions: editor.effectiveSpeedRegions,
+		effectiveShowCursor: editor.effectiveShowCursor,
 	};
 	if (op === "get_state") return getEditorState(context);
 	return runEditorOp(op, payload, context);

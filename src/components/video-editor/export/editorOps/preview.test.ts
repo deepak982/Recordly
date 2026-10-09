@@ -11,7 +11,7 @@ const recorder = vi.hoisted(() => ({
 	renderFails: false,
 }));
 
-vi.mock("@/lib/exporter/frameRenderer", () => ({
+vi.mock("@/lib/exporter/modernFrameRenderer", () => ({
 	FrameRenderer: class {
 		constructor(config: Record<string, unknown>) {
 			recorder.configs.push(config);
@@ -50,8 +50,11 @@ vi.mock("../../projectPersistence", () => ({
 }));
 
 import {
+	frameOutput,
+	MAX_FRAMED_SIDE,
 	MAX_PREVIEW_FRAMES,
 	MIN_EVERY_MS,
+	parseFraming,
 	planPreview,
 	previewSheetGeometry,
 	renderPreview,
@@ -107,11 +110,16 @@ function fakeCanvas() {
 		width: 0,
 		height: 0,
 		drawn: [] as unknown[][],
+		filled: [] as unknown[][],
 		getContext(kind: string) {
 			if (kind !== "2d") return null;
 			return {
+				fillStyle: "",
 				drawImage: (...args: unknown[]) => {
 					this.drawn.push(args);
+				},
+				fillRect: (...args: unknown[]) => {
+					this.filled.push(args);
 				},
 			};
 		},
@@ -208,6 +216,9 @@ function makeContext(over: Record<string, unknown> = {}) {
 		adoptJoinedMedia: () => undefined,
 		history: { undo: () => {}, redo: () => {}, canUndo: false, canRedo: false },
 		ids: {},
+		exportAspectRatio: "native",
+		effectiveSpeedRegions: timeline.speedRegions,
+		effectiveShowCursor: appearance.showCursor,
 		...over,
 		timeline,
 		appearance,
@@ -301,6 +312,21 @@ describe("planPreview", () => {
 
 	it("refuses a timeline with no length", () => {
 		expect(() => plan({}, [], 0)).toThrow(/no length to preview/);
+	});
+
+	it("carries the framing arguments through to the plan", () => {
+		expect(plan({ atMs: 0, aspect: "9:16", scale: 0.5 }).framing).toEqual({
+			aspect: { w: 9, h: 16 },
+			scale: 0.5,
+		});
+		expect(plan({ atMs: 0, padTo: "800x600" }).framing).toEqual({
+			padTo: { width: 800, height: 600 },
+		});
+		expect(plan({ atMs: 0 }).framing).toBeNull();
+	});
+
+	it("refuses framing arguments before it looks at the timeline", () => {
+		expect(() => plan({ aspect: "16:9", padTo: "800x600" }, [], 0)).toThrow(/not both/);
 	});
 
 	it("lays a sheet out in a grid and lists the moments that fall in gaps", () => {
@@ -459,6 +485,257 @@ describe("sameRendererConfig", () => {
 	});
 });
 
+describe("parseFraming", () => {
+	it("reads an aspect, a padTo and a scale", () => {
+		expect(parseFraming({ aspect: " 16:9 " })).toEqual({ aspect: { w: 16, h: 9 } });
+		expect(parseFraming({ padTo: "2880X1600" })).toEqual({
+			padTo: { width: 2880, height: 1600 },
+		});
+		expect(parseFraming({ aspect: "1:1", scale: 0.5 })).toEqual({
+			aspect: { w: 1, h: 1 },
+			scale: 0.5,
+		});
+	});
+
+	it("returns nothing when no framing was asked for", () => {
+		expect(parseFraming({ atMs: 0 })).toBeNull();
+	});
+
+	it("refuses aspect together with padTo and padTo together with scale", () => {
+		expect(() => parseFraming({ aspect: "16:9", padTo: "800x600" })).toThrow(
+			"Pass either aspect or padTo, not both.",
+		);
+		expect(() => parseFraming({ padTo: "800x600", scale: 0.5 })).toThrow(/not both/);
+	});
+
+	it("takes scale at both bounds and refuses it outside them", () => {
+		expect(parseFraming({ scale: 1 })).toEqual({ scale: 1 });
+		expect(parseFraming({ scale: 0.05 })).toEqual({ scale: 0.05 });
+		expect(() => parseFraming({ scale: 1.0001 })).toThrow(/from 0.05 to 1/);
+		expect(() => parseFraming({ scale: 0.0499 })).toThrow(/from 0.05 to 1/);
+		expect(() => parseFraming({ scale: Number.NaN })).toThrow(/from 0.05 to 1/);
+	});
+
+	it("refuses a malformed or oversized padTo and a malformed aspect", () => {
+		expect(() => parseFraming({ padTo: "801x600" })).toThrow(/with even sizes/);
+		expect(() => parseFraming({ padTo: "2880-1600" })).toThrow(/with even sizes/);
+		expect(() => parseFraming({ padTo: `${MAX_FRAMED_SIDE + 2}x1000` })).toThrow(
+			/larger than 8192/,
+		);
+		expect(() => parseFraming({ aspect: "0:9" })).toThrow(/look like 16:9/);
+		expect(() => parseFraming({ aspect: 169 })).toThrow(/look like 16:9/);
+	});
+});
+
+describe("frameOutput", () => {
+	it("leaves a frame alone when nothing was asked for", () => {
+		expect(frameOutput(1920, 1080, null)).toEqual({
+			width: 1920,
+			height: 1080,
+			contentWidth: 1920,
+			contentHeight: 1080,
+			contentX: 0,
+			contentY: 0,
+		});
+	});
+
+	it("is a no-op when the recording already has the asked-for aspect", () => {
+		expect(frameOutput(1920, 1080, { aspect: { w: 16, h: 9 } })).toEqual(
+			frameOutput(1920, 1080, null),
+		);
+	});
+
+	it("adds bars without ever cropping or stretching the picture", () => {
+		expect(frameOutput(1920, 1080, { aspect: { w: 1, h: 1 } })).toMatchObject({
+			width: 1920,
+			height: 1920,
+			contentWidth: 1920,
+			contentHeight: 1080,
+			contentY: 420,
+		});
+	});
+
+	it("fits the picture inside a padTo box and centres it", () => {
+		expect(frameOutput(1920, 1080, { padTo: { width: 2880, height: 1600 } })).toMatchObject({
+			width: 2880,
+			height: 1600,
+			contentWidth: 2844,
+			contentHeight: 1600,
+			contentX: 18,
+		});
+	});
+
+	it("shrinks everything by scale after letterboxing", () => {
+		expect(frameOutput(1920, 1080, { aspect: { w: 1, h: 1 }, scale: 0.5 })).toMatchObject({
+			width: 960,
+			height: 960,
+			contentWidth: 960,
+			contentHeight: 540,
+			contentY: 210,
+		});
+		expect(frameOutput(1920, 1080, { scale: 0.05 })).toMatchObject({
+			width: 96,
+			height: 54,
+		});
+	});
+
+	it("refuses an absurd aspect that would letterbox past the composite limit", () => {
+		expect(() => frameOutput(1920, 1080, { aspect: { w: 1, h: 1000 } })).toThrow(
+			/1920x1920000/,
+		);
+		expect(() => frameOutput(1920, 1080, { aspect: { w: 1000, h: 1 } })).toThrow(
+			/will not composite a side over 8192 px/,
+		);
+	});
+});
+
+describe("render_preview framing", () => {
+	it("letterboxes the sheet and keeps the picture at its native shape", async () => {
+		const result = (await renderPreview({ atMs: 500, aspect: "1:1" }, makeContext())) as {
+			image: { width: number; height: number };
+			note: string;
+		};
+		expect(result.image).toMatchObject({ width: 1280, height: 1280 });
+		expect(recorder.configs[0]).toMatchObject({ width: 1280, height: 720 });
+		const sheet = canvases[canvases.length - 1];
+		expect(sheet.filled).toEqual([[0, 0, 1280, 1280]]);
+		expect(sheet.drawn).toEqual([[{ tile: true }, 0, 280, 1280, 720]]);
+		expect(result.note).toMatch(/letterbox the export to 1920x1920/);
+	});
+
+	it("shrinks the whole composite for scale, down to the smallest allowed", async () => {
+		const result = (await renderPreview({ atMs: 500, scale: 0.05 }, makeContext())) as {
+			image: { width: number; height: number };
+		};
+		expect(result.image).toMatchObject({ width: 96, height: 54 });
+	});
+
+	it("fits the picture into a padTo box", async () => {
+		const result = (await renderPreview({ atMs: 500, padTo: "800x600" }, makeContext())) as {
+			image: { width: number; height: number };
+		};
+		expect(result.image).toMatchObject({ width: 800, height: 600 });
+		expect(canvases[canvases.length - 1].drawn).toEqual([[{ tile: true }, 0, 75, 800, 450]]);
+	});
+
+	it("says nothing about letterboxing when no framing was asked for", async () => {
+		const result = (await renderPreview({ atMs: 500 }, makeContext())) as { note: string };
+		expect(result.note).not.toMatch(/letterbox/);
+	});
+
+	it("letterboxes every tile of a contact sheet that skips a gap", async () => {
+		const clips = [
+			clip({ id: "a", startMs: 0, endMs: 1000, sourceStartMs: 0 }),
+			clip({ id: "b", startMs: 5000, endMs: 6000, sourceStartMs: 9000 }),
+		];
+		const result = (await renderPreview(
+			{ count: 3, aspect: "1:1" },
+			makeContext({ duration: 6, timeline: { clipRegions: clips } }),
+		)) as { skippedAtMs: number[]; image: { width: number; height: number } };
+		expect(result.skippedAtMs).toEqual([3000]);
+		expect(result.image).toMatchObject({ width: 1286, height: 640 });
+		expect(canvases[canvases.length - 1].filled).toEqual([
+			[0, 0, 640, 640],
+			[646, 0, 640, 640],
+		]);
+	});
+
+	it("still scales annotations against the fallback when the editor cannot be measured", async () => {
+		overlay = null;
+		const result = (await renderPreview({ atMs: 0, aspect: "1:1" }, makeContext())) as {
+			note: string;
+		};
+		expect(result.note).toMatch(/could not be measured/);
+		expect(recorder.configs[0]).toMatchObject({ previewWidth: 1920, previewHeight: 1080 });
+	});
+
+	it("refuses an absurd aspect instead of composing a sheet nothing can hold", async () => {
+		await expect(renderPreview({ atMs: 0, aspect: "1:1000" }, makeContext())).rejects.toThrow(
+			/will not composite a side over 8192 px/,
+		);
+	});
+
+	it("refuses aspect with padTo and padTo with scale", async () => {
+		await expect(
+			renderPreview({ atMs: 0, aspect: "16:9", padTo: "800x600" }, makeContext()),
+		).rejects.toThrow("Pass either aspect or padTo, not both.");
+		await expect(
+			renderPreview({ atMs: 0, padTo: "800x600", scale: 0.5 }, makeContext()),
+		).rejects.toThrow(/padTo already fixes the output size/);
+	});
+});
+
+describe("render_preview follows the editor state the export reads", () => {
+	it("composites on the canvas the editor's export aspect ratio gives the export", async () => {
+		const result = (await renderPreview(
+			{ atMs: 0 },
+			makeContext({ exportAspectRatio: "9:16" }),
+		)) as { image: { width: number; height: number }; note: string };
+		expect(result.image).toMatchObject({ width: 1080, height: 1920 });
+		expect(recorder.configs[0]).toMatchObject({ width: 1080, height: 1920 });
+		expect(result.note).toMatch(/export aspect ratio is 9:16/);
+		expect(result.note).toMatch(/separate from the aspect argument/);
+	});
+
+	it("says so instead of guessing when the export aspect ratio is not carried", async () => {
+		const result = (await renderPreview(
+			{ atMs: 0 },
+			makeContext({ exportAspectRatio: undefined }),
+		)) as { image: { width: number }; note: string };
+		expect(result.image).toMatchObject({ width: 1280 });
+		expect(result.note).toMatch(/export aspect ratio could not be read here/);
+	});
+
+	it("reports no cursor when the recording's session turned the overlay cursor off", async () => {
+		const result = (await renderPreview(
+			{ atMs: 0 },
+			makeContext({ effectiveShowCursor: false }),
+		)) as { rendered: string[]; notRendered: string[] };
+		expect(result.rendered).not.toContain("cursor");
+		expect(result.notRendered).toEqual(["cursor: it is turned off for this export"]);
+		expect(recorder.configs[0]).toMatchObject({ showCursor: false });
+	});
+
+	it("says so instead of claiming a cursor when the session override is not carried", async () => {
+		const result = (await renderPreview(
+			{ atMs: 0 },
+			makeContext({ effectiveShowCursor: undefined }),
+		)) as { rendered: string[]; note: string };
+		expect(result.rendered).toContain("cursor");
+		expect(result.note).toMatch(/turned the overlay cursor off could not be read/);
+	});
+
+	it("composites with the speed regions the export derives, not the raw ones", async () => {
+		const derived = [{ id: "clip-speed-a", startMs: 0, endMs: 1000, speed: 2 }];
+		await renderPreview({ atMs: 0 }, makeContext({ effectiveSpeedRegions: derived }));
+		expect(recorder.configs[0].speedRegions).toBe(derived);
+	});
+
+	it("keeps the speed caveat only while the derived regions are not carried", async () => {
+		const clips = [clip({ speed: 2 })];
+		const blind = (await renderPreview(
+			{ atMs: 0 },
+			makeContext({ effectiveSpeedRegions: undefined, timeline: { clipRegions: clips } }),
+		)) as { note: string };
+		expect(blind.note).toMatch(/not at 1x speed/);
+		const carried = (await renderPreview(
+			{ atMs: 0 },
+			makeContext({ effectiveSpeedRegions: [], timeline: { clipRegions: clips } }),
+		)) as { note: string };
+		expect(carried.note).not.toMatch(/not at 1x speed/);
+	});
+
+	it("drops every divergence caveat once the editor carries all three", async () => {
+		const result = (await renderPreview({ atMs: 0 }, makeContext())) as { note: string };
+		expect(result.note).not.toMatch(/could not be read/);
+		expect(result.note).not.toMatch(/not at 1x speed/);
+		expect(result.note).not.toMatch(/invisible to this tool/);
+		expect(result.note).toBe(
+			"This is the export's own renderer compositing at 1280x720 per frame, not the recorded screen.",
+		);
+	});
+});
+
 describe("render_preview warm cache", () => {
 	it("keeps the video and the renderer warm for the next preview", async () => {
 		const context = makeContext();
@@ -581,6 +858,58 @@ describe("render_preview warm cache", () => {
 		recorder.renderFails = false;
 		const cold = (await renderPreview({ atMs: 100 }, context)) as { reused: string[] };
 		expect(cold.reused).toEqual([]);
+	});
+
+	it("invalidates the cached renderer when padTo changes the size the picture is drawn at", async () => {
+		const context = makeContext();
+		await renderPreview({ atMs: 100 }, context);
+		const next = (await renderPreview({ atMs: 100, padTo: "800x600" }, context)) as {
+			reused: string[];
+		};
+		expect(next.reused).toEqual(["decoded video"]);
+		expect(recorder.configs[1]).toMatchObject({ width: 800, height: 450 });
+		expect(sameRendererConfig(recorder.configs[0], recorder.configs[1])).toBe(false);
+		expect(recorder.destroyed).toBe(1);
+	});
+
+	it("invalidates the cached renderer when the editor's export aspect ratio changes", async () => {
+		const context = makeContext();
+		await renderPreview({ atMs: 100 }, context);
+		const next = (await renderPreview(
+			{ atMs: 100 },
+			makeContext({ exportAspectRatio: "9:16" }),
+		)) as { reused: string[] };
+		expect(next.reused).toEqual(["decoded video"]);
+		expect(recorder.configs[1]).toMatchObject({ width: 1080, height: 1920 });
+		expect(sameRendererConfig(recorder.configs[0], recorder.configs[1])).toBe(false);
+	});
+
+	it("keeps the renderer when an aspect only adds bars, and still redraws them", async () => {
+		const context = makeContext();
+		const plain = (await renderPreview({ atMs: 100 }, context)) as {
+			image: { height: number };
+		};
+		const barred = (await renderPreview({ atMs: 100, aspect: "1:1" }, context)) as {
+			reused: string[];
+			image: { height: number };
+		};
+		expect(barred.reused).toEqual(["decoded video", "export renderer"]);
+		expect(recorder.configs).toHaveLength(1);
+		expect(barred.image.height).not.toBe(plain.image.height);
+	});
+
+	it("changes nothing at all when the asked-for aspect is the recording's own", async () => {
+		const context = makeContext();
+		const plain = (await renderPreview({ atMs: 100 }, context)) as {
+			image: { width: number; height: number };
+		};
+		const same = (await renderPreview({ atMs: 100, aspect: "16:9" }, context)) as {
+			reused: string[];
+			image: { width: number; height: number };
+		};
+		expect(same.reused).toEqual(["decoded video", "export renderer"]);
+		expect(same.image).toEqual(plain.image);
+		expect(recorder.configs).toHaveLength(1);
 	});
 
 	it("defers an explicit teardown asked for while a render is in flight", async () => {
