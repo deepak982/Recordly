@@ -10,8 +10,17 @@ vi.mock("electron", () => ({
 	ipcMain: { on: vi.fn() },
 }));
 
-const { buildPadFilter, buildPostArgs, buildPostSpec, createRemoteExport, isSameFile } =
-	await import("./remoteExport");
+const {
+	buildChapterMetadata,
+	buildPadFilter,
+	buildPostArgs,
+	buildPostSpec,
+	createRemoteExport,
+	escapeChapterTitle,
+	isSameFile,
+	rebaseChapters,
+} = await import("./remoteExport");
+type LoadScenes = import("./remoteExport").LoadScenes;
 type ExportedInfo = import("./remoteExport").ExportedVideoInfo;
 type VerifyFrames = import("./remoteExport").VerifyFrames;
 
@@ -42,6 +51,7 @@ function setup(
 	runFfmpeg: (args: string[]) => Promise<void> = async () => undefined,
 	probeVideo: (path: string) => Promise<ExportedInfo> = async () => info,
 	verifyFrames: VerifyFrames = async () => ({ warnings: [] }),
+	loadScenes?: LoadScenes,
 ) {
 	const ipc = new EventEmitter();
 	const remote = createRemoteExport({
@@ -50,6 +60,7 @@ function setup(
 		runFfmpeg,
 		probeVideo,
 		verifyFrames,
+		loadScenes,
 	});
 	const editor = fakeEditor();
 	const ready = (target: string | null, sender = editor) =>
@@ -834,5 +845,261 @@ describe("fromMs and toMs", () => {
 		).rejects.toThrow(/already running/);
 		reply({ ok: true, path: out });
 		await first;
+	});
+});
+
+describe("chapters", () => {
+	const scene = (title: string | null, startMs: number, endMs: number) => ({
+		title,
+		startMs,
+		endMs,
+	});
+
+	it("escapes the characters that would corrupt the metadata file", () => {
+		expect(escapeChapterTitle("a=b;c#d\\e")).toBe("a\\=b\\;c\\#d\\\\e");
+		expect(escapeChapterTitle("line one\nline two\r\n[CHAPTER]")).toBe(
+			"line one line two [CHAPTER]",
+		);
+		expect(escapeChapterTitle('say "hi"')).toBe('say "hi"');
+		const long = escapeChapterTitle("x".repeat(5000));
+		expect(Array.from(long).length).toBe(200);
+		expect(long.endsWith("…")).toBe(true);
+	});
+
+	it("keeps an injected title on one line of the file", () => {
+		const text = buildChapterMetadata([
+			{ title: "a\nSTART=999\n[CHAPTER]\ntitle=x", startMs: 0, endMs: 1000 },
+		]);
+		const lines = text.trimEnd().split("\n");
+		expect(lines).toEqual([
+			";FFMETADATA1",
+			"[CHAPTER]",
+			"TIMEBASE=1/1000",
+			"START=0",
+			"END=1000",
+			"title=a START\\=999 [CHAPTER] title\\=x",
+		]);
+	});
+
+	it("names a blank title by its position", () => {
+		expect(
+			rebaseChapters([scene(null, 0, 100), scene("  ", 100, 200)]).map((c) => c.title),
+		).toEqual(["Scene 1", "Scene 2"]);
+	});
+
+	it("rebases scenes onto a fragment, clamping and dropping those outside", () => {
+		const scenes = [
+			scene("Before", 0, 8_000),
+			scene("Straddles start", 7_000, 10_000),
+			scene("Inside", 10_000, 15_000),
+			scene("Straddles end", 15_000, 25_000),
+			scene("After", 25_000, 30_000),
+		];
+		expect(rebaseChapters(scenes, { fromMs: 8_000, toMs: 18_000 })).toEqual([
+			{ title: "Straddles start", startMs: 0, endMs: 2_000 },
+			{ title: "Inside", startMs: 2_000, endMs: 7_000 },
+			{ title: "Straddles end", startMs: 7_000, endMs: 10_000 },
+		]);
+	});
+
+	it("keeps a scene that touches the fragment edge only if it has length inside it", () => {
+		const scenes = [scene("Ends at from", 0, 8_000), scene("Starts at to", 18_000, 20_000)];
+		expect(rebaseChapters(scenes, { fromMs: 8_000, toMs: 18_000 })).toEqual([]);
+	});
+
+	it("drops zero-length scenes and stops overlaps", () => {
+		expect(
+			rebaseChapters([scene("Cut", 500, 500), scene("A", 0, 1_000), scene("B", 800, 2_000)]),
+		).toEqual([
+			{ title: "A", startMs: 0, endMs: 800 },
+			{ title: "B", startMs: 800, endMs: 2_000 },
+		]);
+	});
+
+	it("writes one chapter into the existing pass alongside padTo and a poster", async () => {
+		const calls: string[][] = [];
+		let meta = "";
+		const loadScenes = vi.fn(async () => [
+			scene("Intro", 0, 5_000),
+			scene("Demo = 1", 5_000, 20_000),
+		]);
+		const { remote, ready, sent, reply } = setup(
+			async (args) => {
+				calls.push(args);
+				meta = await fs.readFile(args[args.lastIndexOf("-i") + 1], "utf8");
+				await fs.writeFile(args[args.length - 1], "");
+			},
+			undefined,
+			undefined,
+			loadScenes,
+		);
+		const out = path.join(dir, "chapters.mp4");
+		ready(videoPath);
+		const pending = remote.exportVideo({
+			videoPath,
+			outputPath: out,
+			chapters: true,
+			posterAtMs: 1_000,
+			padTo: "1920x1080",
+		});
+		await sent();
+		reply({ ok: true });
+		const result = await pending;
+		expect(calls).toHaveLength(1);
+		const args = calls[0];
+		expect(args[args.indexOf("-map_chapters") + 1]).toBe("2");
+		expect(args).toContain("attached_pic");
+		expect(args.join(" ")).toContain("pad=1920:1080");
+		expect(meta).toContain("START=5000\nEND=20000\ntitle=Demo \\= 1\n");
+		expect(result).toMatchObject({ status: "done", chapters: 2 });
+		expect((await fs.readdir(dir)).sort()).toEqual(["chapters.mp4", "recording-1.mp4"]);
+	});
+
+	it("remuxes without re-encoding when chapters are the only change", async () => {
+		const calls: string[][] = [];
+		const { remote, ready, sent, reply } = setup(
+			async (args) => {
+				calls.push(args);
+				await fs.writeFile(args[args.length - 1], "");
+			},
+			undefined,
+			undefined,
+			async () => [scene("Only", 0, 60_000)],
+		);
+		ready(videoPath);
+		const pending = remote.exportVideo({
+			videoPath,
+			outputPath: path.join(dir, "o.mp4"),
+			chapters: true,
+		});
+		await sent();
+		reply({ ok: true });
+		expect(await pending).toMatchObject({ chapters: 1 });
+		expect(calls[0]).toContain("copy");
+		expect(calls[0]).not.toContain("libx264");
+		expect(calls[0][calls[0].indexOf("-map_chapters") + 1]).toBe("1");
+	});
+
+	it("rebases onto the fragment it renders", async () => {
+		let meta = "";
+		const { remote, ready, sent, reply } = setup(
+			async (args) => {
+				meta = await fs.readFile(args[args.lastIndexOf("-i") + 1], "utf8");
+				await fs.writeFile(args[args.length - 1], "");
+			},
+			undefined,
+			undefined,
+			async () => [scene("A", 0, 10_000), scene("B", 10_000, 30_000)],
+		);
+		ready(videoPath);
+		const pending = remote.exportVideo({
+			videoPath,
+			outputPath: path.join(dir, "f.mp4"),
+			chapters: true,
+			fromMs: 8_000,
+			toMs: 18_000,
+		});
+		await sent();
+		reply({ ok: true, fromMs: 8_000, toMs: 18_000, timelineDurationMs: 30_000 });
+		await pending;
+		expect(meta).toContain("START=0\nEND=2000\ntitle=A");
+		expect(meta).toContain("START=2000\nEND=10000\ntitle=B");
+	});
+
+	it("says so, and skips the pass, when the recording has no scenes", async () => {
+		const runFfmpeg = vi.fn(async () => undefined);
+		const { remote, ready, sent, lastRequest, reply } = setup(
+			runFfmpeg,
+			undefined,
+			undefined,
+			async () => ({
+				unavailable: "Scene times are only available for a recording an agent drove.",
+			}),
+		);
+		ready(videoPath);
+		const out = path.join(dir, "n.mp4");
+		const pending = remote.exportVideo({ videoPath, outputPath: out, chapters: true });
+		await sent();
+		expect(lastRequest().outputPath).toBe(out);
+		reply({ ok: true, path: out });
+		expect(await pending).toMatchObject({
+			status: "done",
+			chapters: 0,
+			chaptersNote: expect.stringContaining("No chapters were written"),
+		});
+		expect(runFfmpeg).not.toHaveBeenCalled();
+	});
+
+	it("says so when a fragment holds no scene", async () => {
+		const runFfmpeg = vi.fn(async () => undefined);
+		const { remote, ready, sent, reply } = setup(runFfmpeg, undefined, undefined, async () => [
+			scene("Early", 0, 5_000),
+		]);
+		ready(videoPath);
+		const pending = remote.exportVideo({
+			videoPath,
+			outputPath: path.join(dir, "n.mp4"),
+			chapters: true,
+			fromMs: 8_000,
+			toMs: 18_000,
+		});
+		await sent();
+		reply({ ok: true, fromMs: 8_000, toMs: 18_000, timelineDurationMs: 30_000 });
+		expect(await pending).toMatchObject({
+			chapters: 0,
+			chaptersNote: expect.stringContaining("inside the exported range"),
+		});
+		expect(runFfmpeg).not.toHaveBeenCalled();
+	});
+
+	it("refuses a gif before touching anything", async () => {
+		const { remote } = setup(undefined, undefined, undefined, async () => []);
+		await expect(
+			remote.exportVideo({ videoPath, outputPath: path.join(dir, "a.gif"), chapters: true }),
+		).rejects.toThrow(/chapters only work with mp4.*gif/);
+		await expect(
+			remote.exportVideo({ videoPath, format: "gif", chapters: true }),
+		).rejects.toThrow(/chapters only work with mp4/);
+		expect(remote.getStatus().state).toBe("idle");
+	});
+
+	it("rejects a non-boolean chapters value", async () => {
+		const { remote } = setup();
+		await expect(
+			remote.exportVideo({ videoPath, chapters: "yes" as unknown as boolean }),
+		).rejects.toThrow(/chapters must be true or false/);
+	});
+
+	it("fails before rendering when the scenes cannot be read", async () => {
+		const { remote, ready, editor } = setup(undefined, undefined, undefined, async () => {
+			throw new Error("Timed out waiting for the activity log.");
+		});
+		ready(videoPath);
+		await expect(
+			remote.exportVideo({ videoPath, outputPath: path.join(dir, "x.mp4"), chapters: true }),
+		).rejects.toThrow(/activity log/);
+		expect(editor.send).not.toHaveBeenCalled();
+		expect(remote.getStatus().state).toBe("failed");
+	});
+
+	it("keeps the unprocessed video and cleans up when the chapter pass fails", async () => {
+		const { remote, ready, sent, lastRequest, reply } = setup(
+			async () => {
+				throw new Error("boom");
+			},
+			undefined,
+			undefined,
+			async () => [scene("A", 0, 1_000)],
+		);
+		const out = path.join(dir, "final.mp4");
+		ready(videoPath);
+		const pending = remote.exportVideo({ videoPath, outputPath: out, chapters: true });
+		await sent();
+		await fs.writeFile(lastRequest().outputPath, "raw");
+		reply({ ok: true, path: lastRequest().outputPath });
+		await expect(pending).rejects.toThrow(
+			/post-processing it failed: boom.*unprocessed video is at/,
+		);
+		expect((await fs.readdir(dir)).sort()).toEqual(["final.mp4", "recording-1.mp4"]);
 	});
 });

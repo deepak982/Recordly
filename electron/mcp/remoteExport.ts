@@ -19,6 +19,7 @@ const MIN_SCALE = 0.05;
 const MAX_FPS = 120;
 const POSTER_END_BACKOFF_MS = 40;
 const PROBE_TIMEOUT_MS = 30_000;
+const MAX_CHAPTER_TITLE_CHARS = 200;
 
 type ExportFormat = RemoteExportRequest["format"];
 
@@ -42,7 +43,20 @@ export type RemoteExportArgs = {
 	fromMs?: number;
 	/** Render only the edited timeline up to here; needs fromMs. */
 	toMs?: number;
+	/** Write one chapter per rehearsed scene (mp4 only). */
+	chapters?: boolean;
 };
+
+export type SceneMark = {
+	title: string | null;
+	startMs: number;
+	endMs: number;
+	failed?: boolean;
+};
+
+export type LoadScenes = (signal?: AbortSignal) => Promise<SceneMark[] | { unavailable: string }>;
+
+export type Chapter = { title: string; startMs: number; endMs: number };
 
 export type ExportedVideoInfo = {
 	width?: number;
@@ -51,6 +65,8 @@ export type ExportedVideoInfo = {
 	fps?: number | null;
 	probeNote?: string;
 	warnings?: string[];
+	chapters?: number;
+	chaptersNote?: string;
 };
 
 export type ExportedFragmentInfo = {
@@ -93,7 +109,54 @@ type ActiveExport = {
 	settle: (result: RemoteExportResult) => void;
 };
 
-type PostSpec = { filter: string; posterAtMs?: number; label: "padding" | "post-processing" };
+type PostSpec = {
+	filter: string;
+	posterAtMs?: number;
+	chapters?: Chapter[];
+	label: "padding" | "post-processing";
+};
+
+export function rebaseChapters(
+	scenes: SceneMark[],
+	range?: { fromMs: number; toMs: number },
+): Chapter[] {
+	const fromMs = range?.fromMs ?? 0;
+	const toMs = range?.toMs ?? Number.POSITIVE_INFINITY;
+	const kept: Chapter[] = [];
+	scenes
+		.filter((scene) => Number.isFinite(scene.startMs) && Number.isFinite(scene.endMs))
+		.sort((a, b) => a.startMs - b.startMs)
+		.forEach((scene, index) => {
+			const startMs = Math.round(Math.max(scene.startMs, fromMs) - fromMs);
+			const endMs = Math.round(Math.min(scene.endMs, toMs) - fromMs);
+			if (endMs <= startMs) return;
+			kept.push({ title: scene.title?.trim() || `Scene ${index + 1}`, startMs, endMs });
+		});
+	return kept.flatMap((chapter, index) => {
+		const next = kept[index + 1];
+		const endMs = next ? Math.min(chapter.endMs, next.startMs) : chapter.endMs;
+		return endMs > chapter.startMs ? [{ ...chapter, endMs }] : [];
+	});
+}
+
+export function escapeChapterTitle(title: string) {
+	const flat = title.replace(/[\p{Cc}\u2028\u2029]+/gu, " ").trim();
+	const chars = Array.from(flat);
+	const cut =
+		chars.length > MAX_CHAPTER_TITLE_CHARS
+			? `${chars.slice(0, MAX_CHAPTER_TITLE_CHARS - 1).join("")}…`
+			: flat;
+	return cut.replace(/[\\=;#]/g, "\\$&");
+}
+
+export function buildChapterMetadata(chapters: Chapter[]) {
+	return chapters.reduce(
+		(text, chapter, index) =>
+			`${text}[CHAPTER]\nTIMEBASE=1/1000\nSTART=${chapter.startMs}\nEND=${chapter.endMs}\n` +
+			`title=${escapeChapterTitle(chapter.title) || `Chapter ${index + 1}`}\n`,
+		";FFMETADATA1\n",
+	);
+}
 
 function requireNumber(name: string, value: unknown, ok: (value: number) => boolean, rule: string) {
 	if (typeof value !== "number" || !Number.isFinite(value) || !ok(value)) {
@@ -135,7 +198,10 @@ export function buildPostSpec(args: RemoteExportArgs): PostSpec | null {
 	]
 		.filter(Boolean)
 		.join(",");
-	if (!filter && args.posterAtMs === undefined) return null;
+	if (args.chapters !== undefined && typeof args.chapters !== "boolean") {
+		throw new Error(`chapters must be true or false, not ${JSON.stringify(args.chapters)}.`);
+	}
+	if (!filter && args.posterAtMs === undefined && !args.chapters) return null;
 	return { filter, posterAtMs: args.posterAtMs, label: pad ? "padding" : "post-processing" };
 }
 
@@ -182,7 +248,11 @@ export function buildPostArgs(
 	output: string,
 	spec: Pick<PostSpec, "filter" | "posterAtMs">,
 	posterSeekMs = spec.posterAtMs,
+	chaptersFile?: string,
 ) {
+	const chapterInput = chaptersFile ? ["-i", chaptersFile] : [];
+	const chapterMap = (index: number) =>
+		chaptersFile ? ["-map_metadata", "0", "-map_chapters", String(index)] : [];
 	const encode = [
 		"-c:v:0",
 		"libx264",
@@ -198,7 +268,33 @@ export function buildPostArgs(
 		"+faststart",
 	];
 	if (posterSeekMs === undefined) {
-		return ["-y", "-hide_banner", "-i", input, "-vf", spec.filter, ...encode, output];
+		if (!spec.filter) {
+			return [
+				"-y",
+				"-hide_banner",
+				"-i",
+				input,
+				...chapterInput,
+				...chapterMap(1),
+				"-c",
+				"copy",
+				"-movflags",
+				"+faststart",
+				output,
+			];
+		}
+		return [
+			"-y",
+			"-hide_banner",
+			"-i",
+			input,
+			...chapterInput,
+			...chapterMap(1),
+			"-vf",
+			spec.filter,
+			...encode,
+			output,
+		];
 	}
 	const main = spec.filter || "null";
 	const poster = [
@@ -218,6 +314,8 @@ export function buildPostArgs(
 		(posterSeekMs / 1000).toFixed(3),
 		"-i",
 		input,
+		...chapterInput,
+		...chapterMap(2),
 		"-filter_complex",
 		`[0:v]${main}[v];[1:v]${poster}[p]`,
 		"-map",
@@ -341,6 +439,13 @@ async function resolveTarget(args: RemoteExportArgs, recordingsDir: () => Promis
 	if (requested && !path.isAbsolute(requested)) {
 		throw new Error(`outputPath must be an absolute path: ${requested}`);
 	}
+	const format: ExportFormat =
+		args.format ?? (requested?.toLowerCase().endsWith(".gif") ? "gif" : "mp4");
+	if (args.chapters && format !== "mp4") {
+		throw new Error(
+			"chapters only work with mp4 exports: a gif has no chapter track to hold them.",
+		);
+	}
 	const range = readExportRangeArgs(args);
 	if (range && args.posterAtMs !== undefined) {
 		if (args.posterAtMs < range.fromMs || args.posterAtMs > range.toMs) {
@@ -354,10 +459,10 @@ async function resolveTarget(args: RemoteExportArgs, recordingsDir: () => Promis
 			? { ...args, posterAtMs: args.posterAtMs - range.fromMs }
 			: args,
 	);
-	const format: ExportFormat =
-		args.format ?? (requested?.toLowerCase().endsWith(".gif") ? "gif" : "mp4");
 	if (pad && format !== "mp4") {
-		throw new Error("aspect, padTo, scale, fps and posterAtMs only work with mp4 exports.");
+		throw new Error(
+			"aspect, padTo, scale, fps, posterAtMs and chapters only work with mp4 exports.",
+		);
 	}
 	const outputPath = requested
 		? path.resolve(requested)
@@ -393,12 +498,14 @@ export function createRemoteExport({
 	runFfmpeg = defaultRunFfmpeg,
 	probeVideo = defaultProbe,
 	verifyFrames = defaultVerifyFrames,
+	loadScenes,
 }: {
 	ipc?: Pick<IpcMain, "on">;
 	recordingsDir?: () => Promise<string>;
 	runFfmpeg?: (args: string[]) => Promise<void>;
 	probeVideo?: ProbeVideo;
 	verifyFrames?: VerifyFrames;
+	loadScenes?: LoadScenes;
 } = {}) {
 	const readyEditors = new Map<WebContents, string>();
 	const watchedEditors = new WeakSet<WebContents>();
@@ -554,11 +661,40 @@ export function createRemoteExport({
 			fail((error as Error).message);
 			throw error;
 		}
+		let pad = target.pad;
+		let chapterInfo: Pick<ExportedVideoInfo, "chapters" | "chaptersNote"> = {};
+		if (args.chapters && pad) {
+			try {
+				if (!loadScenes) throw new Error("Chapters are not available in this build.");
+				const scenes = await loadScenes(opts.signal);
+				if ("unavailable" in scenes) {
+					chapterInfo = {
+						chapters: 0,
+						chaptersNote: `No chapters were written. ${scenes.unavailable}`,
+					};
+				} else {
+					const chapters = rebaseChapters(scenes, target.range);
+					chapterInfo = chapters.length
+						? { chapters: chapters.length }
+						: {
+								chapters: 0,
+								chaptersNote: target.range
+									? "No chapters were written: no rehearsed scene falls inside the exported range."
+									: "No chapters were written: the recording has no rehearsed scenes.",
+							};
+					pad = { ...pad, chapters };
+				}
+			} catch (error) {
+				fail((error as Error).message);
+				throw error;
+			}
+			if (!pad.chapters?.length && !pad.filter && pad.posterAtMs === undefined) pad = null;
+		}
 		status = { ...status, state: "exporting", progress: 0 };
 		// The editor renders at its own size; padding is a second ffmpeg pass over its file.
 		const id = randomUUID();
 		const unique = id.slice(0, 8);
-		const rendered = target.pad
+		const rendered = pad
 			? path.join(
 					path.dirname(target.outputPath),
 					`.${path.parse(target.outputPath).name}.prepad-${unique}.mp4`,
@@ -609,10 +745,14 @@ export function createRemoteExport({
 			signal?: AbortSignal,
 		) => {
 			const staged = `${target.outputPath}.padding-${unique}.mp4`;
+			const chaptersFile = path.join(
+				path.dirname(target.outputPath),
+				`.${path.parse(target.outputPath).name}.chapters-${unique}.txt`,
+			);
 			busy = true;
 			status = { ...status, state: "exporting", progress: 99, outputPath: target.outputPath };
 			try {
-				const spec = target.pad as PostSpec;
+				const spec = pad as PostSpec;
 				let posterSeekMs = spec.posterAtMs;
 				if (posterSeekMs !== undefined) {
 					const { durationMs } = await probeVideo(renderedPath, signal);
@@ -626,7 +766,18 @@ export function createRemoteExport({
 						Math.max(0, durationMs - POSTER_END_BACKOFF_MS),
 					);
 				}
-				await runFfmpeg(buildPostArgs(renderedPath, staged, spec, posterSeekMs));
+				if (spec.chapters?.length) {
+					await fs.writeFile(chaptersFile, buildChapterMetadata(spec.chapters), "utf8");
+				}
+				await runFfmpeg(
+					buildPostArgs(
+						renderedPath,
+						staged,
+						spec,
+						posterSeekMs,
+						spec.chapters?.length ? chaptersFile : undefined,
+					),
+				);
 				await fs.rename(staged, target.outputPath);
 				status = { ...status, state: "done", progress: 100, outputPath: target.outputPath };
 			} catch (error) {
@@ -636,7 +787,7 @@ export function createRemoteExport({
 					() => false,
 				);
 				status = { ...status, state: "failed", error: reason };
-				const label = target.pad?.label ?? "post-processing";
+				const label = pad?.label ?? "post-processing";
 				throw new Error(
 					kept
 						? `The export finished but ${label} it failed: ${reason}. The ${label === "padding" ? "unpadded" : "unprocessed"} video is at ${target.outputPath}.`
@@ -646,6 +797,7 @@ export function createRemoteExport({
 				busy = false;
 				await Promise.all([
 					fs.rm(staged, { force: true }),
+					fs.rm(chaptersFile, { force: true }),
 					fs.rm(renderedPath, { force: true }),
 				]);
 			}
@@ -653,6 +805,7 @@ export function createRemoteExport({
 				status: "done" as const,
 				path: target.outputPath,
 				...withFragment(reply, await describeFile(target.outputPath, signal)),
+				...chapterInfo,
 			};
 		};
 		const completion = runInEditor(editor, request, opts.onProgress);
@@ -669,7 +822,7 @@ export function createRemoteExport({
 		if (!result) {
 			if (active?.id === request.id) active.onProgress = undefined;
 			// A padded export that outlives the wait finishes padding in the background.
-			if (target.pad) {
+			if (pad) {
 				void completion
 					.then(async (done) => {
 						if (done.ok) await padRendered(done.path ?? rendered, done);
@@ -680,15 +833,16 @@ export function createRemoteExport({
 			return { status: "still-exporting" };
 		}
 		if (!result.ok) {
-			if (target.pad) await fs.rm(rendered, { force: true });
+			if (pad) await fs.rm(rendered, { force: true });
 			throw new Error(result.error ?? "The export failed.");
 		}
-		if (!target.pad) {
+		if (!pad) {
 			const donePath = result.path ?? request.outputPath;
 			return {
 				status: "done",
 				path: donePath,
 				...withFragment(result, await describeFile(donePath, opts.signal)),
+				...chapterInfo,
 			};
 		}
 		return padRendered(result.path ?? rendered, result, opts.signal);

@@ -34,7 +34,7 @@ export type RunFfmpeg = (
 	opts: { timeoutMs: number; signal?: AbortSignal },
 ) => Promise<Buffer>;
 
-const runFfmpegProcess: RunFfmpeg = async (binary, args, { timeoutMs, signal }) => {
+export const runFfmpegProcess: RunFfmpeg = async (binary, args, { timeoutMs, signal }) => {
 	const { stdout } = await execFileAsync(binary, args, {
 		encoding: "buffer",
 		timeout: timeoutMs,

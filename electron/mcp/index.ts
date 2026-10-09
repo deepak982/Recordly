@@ -3,6 +3,7 @@ import { chmodSync, readFileSync, renameSync, rmSync, writeFileSync } from "node
 import path from "node:path";
 import { app, clipboard, ipcMain, screen } from "electron";
 import { USER_DATA_PATH } from "../appPaths";
+import { getFfmpegBinaryPath } from "../ipc/ffmpeg/binary";
 import { setPlannedSceneTitles } from "./agentActivity";
 import { createAgentControl } from "./agentControl";
 import { agentInput } from "./agentInput";
@@ -11,12 +12,13 @@ import { waitUntilQuiet } from "./armRecording";
 import { restoreDoNotDisturb, setDoNotDisturb } from "./doNotDisturb";
 import { createOpenFile } from "./openFile";
 import type { RemoteControl } from "./remoteControl";
-import { createRemoteEditor } from "./remoteEditor";
+import { createRemoteEditor, runFfmpegProcess } from "./remoteEditor";
 import { createRemoteExport } from "./remoteExport";
 import { createRemoteRecordings } from "./remoteRecordings";
 import { createRemoteReview } from "./reviewRecording";
 import { waitForStillWindow } from "./screenshot";
 import { createMcpHttpServer, MCP_PATH } from "./server";
+import { createThumbnail } from "./thumbnail";
 import { buildRecordlyMcpServer } from "./tools";
 
 const SETTINGS_FILE = path.join(USER_DATA_PATH, "mcp-server.json");
@@ -62,11 +64,20 @@ export function setupMcpServer({ isDev, remote }: { isDev: boolean; remote: Remo
 	let settings = readSettings();
 	let error: McpServerState["error"] = null;
 	let applying = Promise.resolve();
-	const remoteExport = createRemoteExport();
 	const editor = createRemoteEditor();
+	const remoteExport = createRemoteExport({
+		loadScenes: async (signal) =>
+			(await editor.requestEditor<{ scenes: unknown }>("get_state", undefined, { signal }))
+				.scenes as never,
+	});
 	const recordings = createRemoteRecordings();
 	const agent = createAgentControl(remote);
 	const review = createRemoteReview({ remote });
+	const thumbnail = createThumbnail({
+		requestEditor: editor.requestEditor,
+		runFfmpeg: runFfmpegProcess,
+		ffmpegBinary: getFfmpegBinaryPath,
+	});
 	const isControlEnabled = () => settings.enabled && settings.controlEnabled;
 	const files = createOpenFile({
 		selectFrontWindow: (appName?: string) =>
@@ -114,6 +125,7 @@ export function setupMcpServer({ isDev, remote }: { isDev: boolean; remote: Remo
 				recordings,
 				files,
 				capture,
+				thumbnail,
 			}),
 	});
 

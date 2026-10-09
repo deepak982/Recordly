@@ -57,7 +57,11 @@ vi.mock("./server", () => ({
 vi.mock("./agentControl", () => ({ createAgentControl: () => ({}) }));
 vi.mock("./agentInput", () => ({ agentInput: { stop: vi.fn() } }));
 vi.mock("./agentPlatform", () => ({ agentPlatform: { support: () => mocks.support } }));
-vi.mock("./remoteEditor", () => ({ createRemoteEditor: () => ({}) }));
+vi.mock("./remoteEditor", () => ({
+	createRemoteEditor: () => ({ requestEditor: async () => ({}) }),
+	runFfmpegProcess: async () => Buffer.alloc(0),
+}));
+vi.mock("./thumbnail", () => ({ createThumbnail: () => async () => ({}) }));
 vi.mock("./remoteExport", () => ({ createRemoteExport: () => ({}) }));
 vi.mock("./reviewRecording", () => ({ createRemoteReview: () => ({}) }));
 vi.mock("./tools", () => ({ buildRecordlyMcpServer: vi.fn() }));
