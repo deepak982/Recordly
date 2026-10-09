@@ -14,6 +14,7 @@ type Input = {
 	history: { undo: () => void; redo: () => void; canUndo: boolean; canRedo: boolean };
 	ids: EditorOpContext["ids"];
 	adoptJoinedMedia: EditorOpContext["adoptJoinedMedia"];
+	project?: EditorOpContext["project"];
 };
 
 type Editor = Input;
@@ -35,6 +36,7 @@ function runOp(op: string, payload: unknown, editor: Editor, live: () => Editor)
 		history: editor.history,
 		ids: editor.ids,
 		adoptJoinedMedia: editor.adoptJoinedMedia,
+		project: editor.project,
 	};
 	if (op === "get_state") return getEditorState(context);
 	return runEditorOp(op, payload, context);

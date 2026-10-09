@@ -23,6 +23,7 @@ type Input = {
 	history: { undo: () => void; redo: () => void; canUndo: boolean; canRedo: boolean };
 	ids: Parameters<typeof useRemoteEditorBridge>[0]["ids"];
 	adoptJoinedMedia: Parameters<typeof useRemoteEditorBridge>[0]["adoptJoinedMedia"];
+	project?: Parameters<typeof useRemoteEditorBridge>[0]["project"];
 	videoPath: string | null;
 	videoSourcePath: string | null;
 	videoPlaybackRef: RefObject<VideoPlaybackRef | null>;

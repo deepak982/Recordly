@@ -5,6 +5,7 @@ import { checkEditsOps } from "./checkEdits";
 import { historyOps } from "./history";
 import { lookOps } from "./look";
 import { previewOps } from "./preview";
+import { projectOps } from "./project";
 import { timelineOps } from "./timeline";
 import type { EditorOpContext, EditorOpMap } from "./types";
 import { zoomOps } from "./zoom";
@@ -19,6 +20,7 @@ const ops: EditorOpMap = {
 	...previewOps,
 	...checkEditsOps,
 	...historyOps,
+	...projectOps,
 };
 
 export const READ_ONLY_OPS = new Set(["get_state", "render_preview", "check_edits"]);

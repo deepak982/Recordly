@@ -19,7 +19,9 @@ import { useAppearanceState } from "./state/useAppearanceState";
 import { useEditorUiState } from "./state/useEditorUiState";
 import { useProjectState } from "./state/useProjectState";
 import { useTimelineState } from "./state/useTimelineState";
+import { createProjectData } from "./projectPersistence";
 import { useNvidiaCudaExportOptIn } from "./useNvidiaCudaExportOptIn";
+import { cloneStructured } from "./videoEditorUtils";
 
 export default function VideoEditor() {
 	const { t } = useI18n();
@@ -326,6 +328,35 @@ export default function VideoEditor() {
 			setVideoPath(url);
 			setIsPreviewReady(false);
 			setPreviewVersion((version) => version + 1);
+		},
+		project: {
+			snapshot: projectController.lifecycle.currentProjectSnapshot,
+			hasUnsavedChanges: projectController.hasUnsavedChanges,
+			isExporting: exportSession.isExporting,
+			applyLoaded: async (loaded, path) => {
+				const applied = await projectController.lifecycle.applyLoadedProject(loaded, path);
+				remountPreview();
+				return applied;
+			},
+			markSaved: ({ path, projectId }) => {
+				const saved = projectController.lifecycle.currentProjectSnapshot;
+				project.setCurrentProjectPath(path);
+				if (saved) {
+					project.setLastSavedSnapshot(
+						cloneStructured(
+							createProjectData(
+								saved.videoPath,
+								saved.editor,
+								projectId ?? saved.projectId ?? null,
+							),
+						),
+					);
+				}
+			},
+			detach: () => {
+				project.setCurrentProjectPath(null);
+				project.setLastSavedSnapshot(null);
+			},
 		},
 		ids: {
 			zoom: nextZoomIdRef,

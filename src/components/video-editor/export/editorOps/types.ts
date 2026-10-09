@@ -1,7 +1,17 @@
 import type { MutableRefObject } from "react";
+import type { EditorProjectData } from "../../projectPersistence";
 import type { AgentActivityLog } from "../../agentEdits/planAgentEdits";
 import type { useAppearanceState } from "../../state/useAppearanceState";
 import type { useTimelineState } from "../../state/useTimelineState";
+
+export type EditorProjectHooks = {
+	snapshot: EditorProjectData | null;
+	hasUnsavedChanges: boolean;
+	isExporting: boolean;
+	applyLoaded: (project: unknown, path: string) => Promise<boolean>;
+	markSaved: (saved: { path: string; projectId?: string }) => void;
+	detach: () => void;
+};
 
 export type EditorOpContext = {
 	duration: number;
@@ -11,6 +21,7 @@ export type EditorOpContext = {
 	history: { undo: () => void; redo: () => void; canUndo: boolean; canRedo: boolean };
 	assertSameRecording: () => void;
 	adoptJoinedMedia: (media: { path: string; url: string }) => void;
+	project?: EditorProjectHooks;
 	ids: {
 		zoom: MutableRefObject<number>;
 		clip: MutableRefObject<number>;
