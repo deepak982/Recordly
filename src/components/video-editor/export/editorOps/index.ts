@@ -1,6 +1,7 @@
 import { annotationsOps } from "./annotations";
 import { audioOps } from "./audio";
 import { captionsOps } from "./captions";
+import { checkEditsOps } from "./checkEdits";
 import { historyOps } from "./history";
 import { lookOps } from "./look";
 import { previewOps } from "./preview";
@@ -16,10 +17,11 @@ const ops: EditorOpMap = {
 	...audioOps,
 	...lookOps,
 	...previewOps,
+	...checkEditsOps,
 	...historyOps,
 };
 
-export const READ_ONLY_OPS = new Set(["get_state", "render_preview"]);
+export const READ_ONLY_OPS = new Set(["get_state", "render_preview", "check_edits"]);
 
 export function runEditorOp(op: string, payload: unknown, context: EditorOpContext) {
 	const handler = ops[op];

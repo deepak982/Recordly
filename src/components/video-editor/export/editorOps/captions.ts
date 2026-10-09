@@ -56,7 +56,12 @@ function requireText(value: unknown, field: string) {
 	return text;
 }
 
-function toSourceSpan(startMs: number, endMs: number, context: EditorOpContext, field: string) {
+export function toSourceSpan(
+	startMs: number,
+	endMs: number,
+	context: EditorOpContext,
+	field: string,
+) {
 	const timelineMs = timelineMsOf(context);
 	if (startMs < 0 || endMs <= startMs) {
 		throw new Error(`${field} must have startMs of 0 or more and an endMs after it.`);
