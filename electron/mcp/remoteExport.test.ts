@@ -1102,4 +1102,16 @@ describe("chapters", () => {
 		);
 		expect((await fs.readdir(dir)).sort()).toEqual(["final.mp4", "recording-1.mp4"]);
 	});
+
+	it("refuses a non-string aspect instead of crashing on it", async () => {
+		const { remote, ready } = setup();
+		ready(videoPath);
+		await expect(
+			remote.exportVideo({
+				videoPath,
+				outputPath: path.join(dir, "bad.mp4"),
+				aspect: 16 as unknown as string,
+			}),
+		).rejects.toThrow(/aspect must look like 16:9/);
+	});
 });

@@ -214,6 +214,9 @@ export function buildPadFilter(args: {
 		throw new Error("Pass either aspect or padTo, not both.");
 	}
 	if (args.aspect !== undefined) {
+		if (typeof args.aspect !== "string") {
+			throw new Error(`aspect must look like 16:9, not "${args.aspect}".`);
+		}
 		const match = /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.exec(args.aspect.trim());
 		if (!match || Number(match[1]) <= 0 || Number(match[2]) <= 0) {
 			throw new Error(`aspect must look like 16:9, not "${args.aspect}".`);
