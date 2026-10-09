@@ -69,7 +69,6 @@ let cameraTargets: AgentActivityCameraTarget[] = [];
 let frozen = false;
 
 export function resetAgentActivity() {
-	plannedTitles = [];
 	scenes = [];
 	spans = [];
 	cameraTargets = [];
@@ -98,17 +97,19 @@ function close<T extends { endMs: number }>(entry: T | null, fields: Partial<T> 
 	}
 }
 
-let plannedTitles: string[] = [];
+let plannedTitles: (string | undefined)[] = [];
+
+const cleanTitle = (title: unknown) =>
+	typeof title === "string"
+		? title.trim().slice(0, MAX_SCENE_TITLE_LENGTH) || undefined
+		: undefined;
 
 export function setPlannedSceneTitles(titles: readonly string[] | undefined) {
-	plannedTitles = (titles ?? []).filter(
-		(title) => typeof title === "string" && title.trim().length > 0,
-	);
+	plannedTitles = (titles ?? []).map(cleanTitle);
 }
 
 export function beginScene(title?: string) {
-	const planned = plannedTitles[scenes.length];
-	const chosen = title ?? planned;
+	const chosen = cleanTitle(title) ?? plannedTitles[scenes.length];
 	const scene = open<AgentActivityScene>(scenes, {
 		failed: false,
 		...(chosen ? { title: chosen } : {}),

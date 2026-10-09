@@ -21,6 +21,7 @@ import {
 	persistAgentActivity,
 	readAgentActivity,
 	resetAgentActivity,
+	setPlannedSceneTitles,
 	snapshotAgentActivity,
 } from "./agentActivity";
 
@@ -446,6 +447,34 @@ describe("camera targets", () => {
 		} finally {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
+	});
+
+	it("keeps planned titles through the capture-start reset, aligned by scene order", () => {
+		setPlannedSceneTitles(["One", "  ", "Three", "x".repeat(250)]);
+		startRecording();
+		const titles = ["", "", "", "", ""].map((_, i) => {
+			at(i * 100 + 10);
+			const end = beginScene(i === 4 ? "Explicit" : undefined);
+			at(i * 100 + 50);
+			end(false);
+			return i;
+		});
+		expect(titles).toHaveLength(5);
+		const log = stopRecording(1_000);
+		expect(log.scenes.map((s) => s.title)).toEqual([
+			"One",
+			undefined,
+			"Three",
+			"x".repeat(200),
+			"Explicit",
+		]);
+		setPlannedSceneTitles(undefined);
+		startRecording();
+		at(10);
+		const end = beginScene();
+		at(20);
+		end(false);
+		expect(stopRecording(30).scenes.map((s) => s.title)).toEqual([undefined]);
 	});
 
 	it("drops scene titles that are empty, blank, not text or too long", () => {

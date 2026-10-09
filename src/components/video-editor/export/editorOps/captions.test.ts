@@ -410,7 +410,32 @@ describe("captions.generate from scenes", () => {
 				.mockResolvedValue(log([{ startMs: 0, endMs: 1, failed: true, title: "x" }])),
 		});
 		await expect(run("captions.generate", { from: "scenes" }, context)).rejects.toThrow(
-			/no titled scenes/,
+			/none can be captioned: each one failed/,
+		);
+		stubApi({ getAgentActivity: vi.fn().mockResolvedValue(log([])) });
+		await expect(run("captions.generate", { from: "scenes" }, context)).rejects.toThrow(
+			/log has no scenes/,
+		);
+		stubApi({
+			getAgentActivity: vi.fn().mockResolvedValue(
+				log([
+					{ startMs: 0, endMs: 1, failed: false },
+					{ startMs: 2, endMs: 3, failed: false, title: "   " },
+				]),
+			),
+		});
+		await expect(run("captions.generate", { from: "scenes" }, context)).rejects.toThrow(
+			/2 scenes but none has a title/,
+		);
+		stubApi({
+			getAgentActivity: vi
+				.fn()
+				.mockResolvedValue(
+					log([{ startMs: 99_000_000, endMs: 99_000_001, failed: false, title: "x" }]),
+				),
+		});
+		await expect(run("captions.generate", { from: "scenes" }, context)).rejects.toThrow(
+			/outside the kept footage/,
 		);
 		expect(state.cues).toEqual([]);
 	});

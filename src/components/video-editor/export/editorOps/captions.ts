@@ -149,8 +149,20 @@ async function cuesFromScenes(context: EditorOpContext): Promise<CaptionCue[]> {
 		);
 	}
 	const sourceMs = Math.round(context.duration * 1000);
-	const scenes = result.log.scenes
-		.filter((scene) => !scene.failed && typeof scene.title === "string" && scene.title.trim())
+	const all = result.log.scenes;
+	if (all.length === 0) {
+		throw new Error(
+			"This recording's activity log has no scenes. Scenes are logged when an agent drives a take with perform.",
+		);
+	}
+	const titled = all.filter((scene) => typeof scene.title === "string" && scene.title.trim());
+	if (titled.length === 0) {
+		throw new Error(
+			`The scene list has ${all.length} scenes but none has a title. Pass scenes to start_recording, or a title on each perform, when recording; or write the captions with captions.set.`,
+		);
+	}
+	const scenes = titled
+		.filter((scene) => !scene.failed)
 		.filter((scene) => scene.startMs >= 0 && scene.startMs < sourceMs)
 		.sort((a, b) => a.startMs - b.startMs);
 	const cues = scenes
@@ -176,7 +188,9 @@ async function cuesFromScenes(context: EditorOpContext): Promise<CaptionCue[]> {
 			}),
 		);
 	if (cues.length === 0) {
-		throw new Error("The scene list has no titled scenes inside this recording to caption.");
+		throw new Error(
+			`The scene list has ${titled.length} titled scenes but none can be captioned: each one failed (cut from the export) or lies outside the kept footage.`,
+		);
 	}
 	rejectOverlap(cues, "The scene captions");
 	return cues;
