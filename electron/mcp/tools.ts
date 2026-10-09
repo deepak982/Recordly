@@ -1391,6 +1391,32 @@ export function buildRecordlyMcpServer(
 	);
 
 	server.registerTool(
+		"open_editor",
+		{
+			description:
+				"Open the editor on a recording, which every editing tool and export_video needs and " +
+				"none of them can do for themselves. After the app restarts there may be no editor " +
+				"window at all, and until now the only way in was to record a throwaway clip — which " +
+				"then left the wrong recording loaded. Pass a path, or omit it for the current " +
+				"recording, or the newest one. It opens or focuses the window and waits for the " +
+				"editor to report a recording fully loaded. editorReady false means only the window " +
+				"is guaranteed, and showing names the recording the editor actually answered with, " +
+				"which may not be the one you asked for. Refused, changing nothing, for a relative " +
+				"path, a file that is not a decodable video, no recordings at all, or while a " +
+				"recording or export is running.",
+			inputSchema: z.object({
+				path: z
+					.string()
+					.min(1)
+					.optional()
+					.describe("Absolute path to a video; omit for the current or newest recording"),
+			}),
+		},
+		async ({ path }, ctx) =>
+			textResult(await recordings.openEditor({ path, signal: ctx.mcpReq.signal })),
+	);
+
+	server.registerTool(
 		"recover_recording",
 		{
 			description:
