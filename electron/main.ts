@@ -26,11 +26,12 @@ import {
 	killWindowsCaptureProcess,
 	registerIpcHandlers,
 } from "./ipc/handlers";
+import { isAllowedLocalReadPath } from "./ipc/project/manager";
 import { clearRecordingTrashUndo } from "./ipc/recording/library";
 import { pickWindowToFocus } from "./mainWindowTarget";
 import { setupMcpServer } from "./mcp";
 import { createRemoteControl } from "./mcp/remoteControl";
-import { ensureMediaServer } from "./mediaServer";
+import { ensureMediaServer, setMediaPathPrefixAllowance } from "./mediaServer";
 import { hardenWebContentsNavigation, shouldHardenWebContentsType } from "./navigationPolicy";
 import { shouldGrantDisplayCapture, shouldGrantMediaPermission } from "./permissionPolicy";
 import { ensurePackagedRendererServer, getPackagedRendererBaseUrl } from "./rendererServer";
@@ -1018,6 +1019,7 @@ app.whenReady().then(async () => {
 		updateTrayMenu();
 	}
 	setupApplicationMenu();
+	setMediaPathPrefixAllowance(isAllowedLocalReadPath);
 	await Promise.all([
 		ensureRecordingsDir(),
 		!VITE_DEV_SERVER_URL

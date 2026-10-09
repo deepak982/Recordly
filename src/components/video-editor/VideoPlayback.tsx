@@ -42,6 +42,7 @@ import {
 	getCaptionTextMaxWidth,
 	getCaptionWordVisualState,
 } from "./captionStyle";
+import { fromFileUrl } from "./projectPersistence";
 import {
 	type AnnotationRegion,
 	type AutoCaptionSettings,
@@ -119,6 +120,14 @@ import {
 	shouldComposePreviewFrame,
 } from "./videoPlayback/sceneMotion";
 import { usePreviewVideoReady } from "./videoPlayback/usePreviewVideoReady";
+import {
+	describeVideoLoadError,
+	formatVideoLoadErrorLog,
+	isSourceStillServable,
+	resolveDefaultServableCheckDeps,
+	toVideoLoadErrorKind,
+	type VideoLoadErrorDetail,
+} from "./videoPlayback/videoLoadError";
 import {
 	getWebcamMediaTargetTimeSeconds,
 	isWebcamMediaSynchronized,
@@ -225,7 +234,7 @@ interface VideoPlaybackProps {
 	onTimeUpdate: (time: number) => void;
 	currentTime: number;
 	onPlayStateChange: (playing: boolean) => void;
-	onError: (error: string) => void;
+	onError: (error: string, detail?: VideoLoadErrorDetail) => void;
 	wallpaper?: string;
 	zoomRegions: ZoomRegion[];
 	selectedZoomId: string | null;
@@ -2236,6 +2245,31 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 			currentTimeRef.current = targetTime * 1000;
 		};
 
+		const handleVideoLoadError = (e: React.SyntheticEvent<HTMLVideoElement, Event>) => {
+			const mediaError = e.currentTarget.error;
+			const code = mediaError?.code;
+			const src = e.currentTarget.currentSrc || videoPath;
+			const sourcePath = fromFileUrl(src);
+			const base = {
+				code,
+				kind: toVideoLoadErrorKind(code),
+				message: mediaError?.message,
+				src,
+				sourcePath: sourcePath === src ? "" : sourcePath,
+			};
+			const report = (servable: boolean | null) => {
+				const detail = { ...base, servable };
+				console.error("[VideoPlayback] Video load error:", formatVideoLoadErrorLog(detail));
+				onError(describeVideoLoadError(detail), detail);
+			};
+			const deps = resolveDefaultServableCheckDeps();
+			if (!deps || !base.sourcePath) {
+				report(null);
+				return;
+			}
+			void isSourceStillServable(base.sourcePath, deps).then(report, () => report(null));
+		};
+
 		const [resolvedWallpaper, setResolvedWallpaper] = useState<string | null>(null);
 		const [resolvedWallpaperKind, setResolvedWallpaperKind] = useState<
 			"image" | "video" | "style"
@@ -2831,26 +2865,7 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 					onDurationChange={(e) => {
 						onDurationChange(e.currentTarget.duration);
 					}}
-					onError={(e) => {
-						const mediaError = e.currentTarget.error;
-						const code = mediaError?.code;
-						const msg = mediaError?.message;
-						const detail =
-							code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
-								? "format not supported"
-								: code === MediaError.MEDIA_ERR_NETWORK
-									? "network error"
-									: code === MediaError.MEDIA_ERR_DECODE
-										? "decode error"
-										: msg || `code ${code ?? "unknown"}`;
-						console.error(
-							"[VideoPlayback] Video load error:",
-							detail,
-							"src:",
-							videoPath,
-						);
-						onError(`Failed to load video (${detail})`);
-					}}
+					onError={handleVideoLoadError}
 				/>
 			</div>
 		);
