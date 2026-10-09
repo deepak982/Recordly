@@ -16,11 +16,7 @@ import type {
 	ZoomRegion,
 	ZoomTransitionEasing,
 } from "@/components/video-editor/types";
-import {
-	BASE_PREVIEW_HEIGHT,
-	BASE_PREVIEW_WIDTH,
-	DEFAULT_WEBCAM_ROUNDNESS,
-} from "@/components/video-editor/types";
+import { DEFAULT_WEBCAM_ROUNDNESS } from "@/components/video-editor/types";
 import { DEFAULT_FOCUS } from "@/components/video-editor/videoPlayback/constants";
 import {
 	type CursorFollowCameraState,
@@ -44,7 +40,10 @@ import {
 } from "@/components/video-editor/videoPlayback/motionSmoothing";
 import { getSceneEffectMetrics } from "@/components/video-editor/videoPlayback/sceneEffects";
 import { resolveSceneZoomTarget } from "@/components/video-editor/videoPlayback/sceneMotion";
-import { getWebcamMediaTargetTimeSeconds, isWebcamVisibleAtSourceTime } from "@/components/video-editor/videoPlayback/webcamSync";
+import {
+	getWebcamMediaTargetTimeSeconds,
+	isWebcamVisibleAtSourceTime,
+} from "@/components/video-editor/videoPlayback/webcamSync";
 import {
 	applyZoomTransform,
 	computeZoomTransform,
@@ -71,11 +70,14 @@ import {
 	initializePixiApplicationWithTimeout,
 } from "@/lib/pixiApplicationLifecycle";
 import { isVideoWallpaperSource } from "@/lib/wallpapers";
-import { renderAnnotations } from "./annotationRenderer";
+import {
+	getAnnotationFrameRect,
+	getAnnotationScaleFactor,
+	renderAnnotations,
+} from "./annotationRenderer";
 import { renderCaptions } from "./captionRenderer";
 import { ForwardFrameSource } from "./forwardFrameSource";
 import { resolveMediaElementSource } from "./localMediaSource";
-
 
 interface FrameRenderConfig {
 	timelineEffects?: boolean;
@@ -1491,25 +1493,20 @@ export class FrameRenderer {
 			this.config.annotationRegions.length > 0 &&
 			this.compositeCtx
 		) {
-			// Calculate scale factor based on export vs preview dimensions
-			const scaleX = this.config.width / BASE_PREVIEW_WIDTH;
-			const scaleY = this.config.height / BASE_PREVIEW_HEIGHT;
-			const scaleFactor = (scaleX + scaleY) / 2;
-
 			await renderAnnotations(
 				this.compositeCtx,
 				this.config.annotationRegions,
 				this.config.width,
 				this.config.height,
 				timeMs,
-				scaleFactor,
+				getAnnotationScaleFactor(this.config),
 				undefined,
 				{
 					scale: this.animationState.appliedScale,
 					x: this.animationState.x,
 					y: this.animationState.y,
 				},
-				this.layoutCache?.maskRect,
+				getAnnotationFrameRect(this.config),
 			);
 		}
 
@@ -1740,7 +1737,11 @@ export class FrameRenderer {
 		const webcam = this.config.webcam;
 		const webcamDecodedFrame = this.webcamDecodedFrame;
 		const webcamVideo = this.webcamVideoElement;
-		if (!webcam?.enabled || !isWebcamVisibleAtSourceTime(webcam, this.currentVideoTime) || (!webcamDecodedFrame && !webcamVideo)) {
+		if (
+			!webcam?.enabled ||
+			!isWebcamVisibleAtSourceTime(webcam, this.currentVideoTime) ||
+			(!webcamDecodedFrame && !webcamVideo)
+		) {
 			return;
 		}
 

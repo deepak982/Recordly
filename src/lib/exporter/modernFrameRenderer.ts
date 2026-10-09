@@ -85,6 +85,9 @@ import {
 import { isVideoWallpaperSource } from "@/lib/wallpapers";
 import {
 	type AnnotationRenderAssets,
+	getAnnotationFrameRect,
+	getAnnotationScaleFactor,
+	placeAnnotation,
 	preloadAnnotationAssets,
 	renderAnnotations,
 	renderAnnotationToCanvas,
@@ -590,7 +593,7 @@ export class FrameRenderer {
 		await this.setupBackground();
 		await this.setupWebcamSource();
 
-		this.annotationScaleFactor = this.calculateAnnotationScaleFactor();
+		this.annotationScaleFactor = getAnnotationScaleFactor(this.config);
 		this.annotationAssets = await preloadAnnotationAssets(this.config.annotationRegions ?? []);
 		await this.setupAnnotationLayer();
 		this.setupCaptionResources();
@@ -1416,12 +1419,6 @@ export class FrameRenderer {
 		void previousSource?.destroy();
 	}
 
-	private calculateAnnotationScaleFactor(): number {
-		const previewWidth = this.config.previewWidth || 1920;
-		const previewHeight = this.config.previewHeight || 1080;
-		return (this.config.width / previewWidth + this.config.height / previewHeight) / 2;
-	}
-
 	private hasActiveBlurAnnotations(timeMs: number): boolean {
 		return (this.config.annotationRegions ?? []).some(
 			(annotation) =>
@@ -1509,7 +1506,7 @@ export class FrameRenderer {
 				x: this.animationState.x,
 				y: this.animationState.y,
 			},
-			this.layoutCache?.maskRect,
+			getAnnotationFrameRect(this.config),
 		);
 
 		this.drawCaptionOverlay(context);
@@ -1532,18 +1529,15 @@ export class FrameRenderer {
 			(first, second) => first.zIndex - second.zIndex,
 		);
 
+		const frameRect = getAnnotationFrameRect(this.config);
+
 		for (const annotation of annotations) {
-			const pinned = annotation.space === "screen";
-			const annotationRect = (!pinned && this.layoutCache?.maskRect) || {
-				x: 0,
-				y: 0,
-				width: this.config.width,
-				height: this.config.height,
-			};
-			const x = annotationRect.x + (annotation.position.x / 100) * annotationRect.width;
-			const y = annotationRect.y + (annotation.position.y / 100) * annotationRect.height;
-			const width = (annotation.size.width / 100) * annotationRect.width;
-			const height = (annotation.size.height / 100) * annotationRect.height;
+			const { x, y, width, height, scaleFactor } = placeAnnotation(
+				annotation,
+				this.config,
+				frameRect,
+				this.annotationScaleFactor,
+			);
 
 			if (width <= 0 || height <= 0) {
 				continue;
@@ -1553,7 +1547,7 @@ export class FrameRenderer {
 				annotation,
 				width,
 				height,
-				this.annotationScaleFactor,
+				scaleFactor,
 				this.annotationAssets ?? undefined,
 			);
 			if (!canvas) {
@@ -1564,7 +1558,9 @@ export class FrameRenderer {
 			const sprite = new Sprite(texture);
 			sprite.position.set(x, y);
 			sprite.visible = false;
-			(pinned ? this.overlayContainer : this.annotationContainer)?.addChild(sprite);
+			const parent =
+				annotation.space === "screen" ? this.overlayContainer : this.annotationContainer;
+			parent?.addChild(sprite);
 			this.annotationSprites.push({ annotation, sprite, texture });
 		}
 	}

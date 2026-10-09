@@ -125,13 +125,18 @@ vi.mock("./localMediaSource", () => ({
 	resolveMediaElementSource: resolveMediaElementSourceMock,
 }));
 
-vi.mock("./annotationRenderer", () => ({
+vi.mock("./annotationRenderer", async (importOriginal) => ({
+	...(await importOriginal<typeof import("./annotationRenderer")>()),
 	preloadAnnotationAssets: vi.fn(async () => ({ imageCache: new Map() })),
 	renderAnnotationToCanvas: vi.fn(async () => null),
 	renderAnnotations: vi.fn(async () => undefined),
 }));
 
-import { renderAnnotations } from "./annotationRenderer";
+import {
+	getAnnotationFrameRect,
+	renderAnnotations,
+	renderAnnotationToCanvas,
+} from "./annotationRenderer";
 import { FrameRenderer } from "./modernFrameRenderer";
 
 function createMockContext() {
@@ -880,5 +885,80 @@ describe("ModernFrameRenderer frame sequencing", () => {
 		expect(syncBackground).toHaveBeenLastCalledWith(2);
 		expect(updateAnnotations).toHaveBeenLastCalledWith(2000);
 		expect(updateCaptions).toHaveBeenLastCalledWith(6000);
+	});
+});
+
+describe("ModernFrameRenderer annotation placement", () => {
+	function createPaddedRenderer() {
+		return new FrameRenderer({
+			width: 1920,
+			height: 1080,
+			nativeReadbackMode: "pixels",
+			wallpaper: "#000000",
+			zoomRegions: [],
+			showShadow: false,
+			shadowIntensity: 0,
+			backgroundBlur: 0,
+			padding: 20,
+			previewWidth: 860,
+			previewHeight: 484,
+			cropRegion: { x: 0, y: 0, width: 1, height: 1 },
+			webcam: { ...DEFAULT_WEBCAM_OVERLAY, enabled: false },
+			videoWidth: 2560,
+			videoHeight: 1440,
+			annotationRegions: [
+				{
+					id: "title",
+					startMs: 0,
+					endMs: 2000,
+					type: "text",
+					content: "Entries",
+					textContent: "Entries",
+					position: { x: 10, y: 40 },
+					size: { width: 80, height: 20 },
+					style: {
+						color: "#ffffff",
+						backgroundColor: "transparent",
+						fontSize: 64,
+						fontFamily: "Inter",
+						fontWeight: "bold",
+						fontStyle: "normal",
+						textDecoration: "none",
+						textAlign: "center",
+						borderRadius: 0,
+					},
+					zIndex: 1,
+					space: "frame",
+				},
+			],
+		});
+	}
+
+	it("anchors a frame-space sprite to the padded picture, not the canvas", async () => {
+		vi.mocked(renderAnnotationToCanvas).mockResolvedValueOnce({
+			width: 10,
+			height: 10,
+		} as HTMLCanvasElement);
+		const renderer = createPaddedRenderer() as unknown as {
+			config: Parameters<typeof getAnnotationFrameRect>[0];
+			annotationContainer: { addChild: ReturnType<typeof vi.fn> };
+			overlayContainer: { addChild: ReturnType<typeof vi.fn> };
+			annotationScaleFactor: number;
+			annotationSprites: Array<{ sprite: { position: { set: ReturnType<typeof vi.fn> } } }>;
+			setupAnnotationLayer: () => Promise<void>;
+		};
+		renderer.annotationContainer = { addChild: vi.fn(), removeChildren: vi.fn() } as never;
+		renderer.overlayContainer = { addChild: vi.fn() } as never;
+		renderer.annotationScaleFactor = 1;
+
+		await renderer.setupAnnotationLayer();
+
+		const picture = getAnnotationFrameRect(renderer.config);
+		expect(picture.x).toBeGreaterThan(0);
+		expect(renderer.annotationSprites).toHaveLength(1);
+		expect(renderer.annotationSprites[0].sprite.position.set).toHaveBeenCalledWith(
+			picture.x + 0.1 * picture.width,
+			picture.y + 0.4 * picture.height,
+		);
 	});
 });

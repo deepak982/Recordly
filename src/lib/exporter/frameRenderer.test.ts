@@ -58,6 +58,9 @@ vi.mock("@/components/video-editor/videoPlayback/zoomTransform", () => ({
 }));
 
 vi.mock("./annotationRenderer", () => ({
+	getAnnotationFrameRect: vi.fn(() => ({ x: 0, y: 0, width: 1920, height: 1080 })),
+	getAnnotationScaleFactor: vi.fn(() => 1),
+	placeAnnotation: vi.fn(() => ({ x: 0, y: 0, width: 0, height: 0, scaleFactor: 1 })),
 	renderAnnotations: vi.fn(),
 }));
 

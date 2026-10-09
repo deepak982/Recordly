@@ -1,24 +1,76 @@
 import {
 	type AnnotationRegion,
 	type ArrowDirection,
+	BASE_PREVIEW_HEIGHT,
+	BASE_PREVIEW_WIDTH,
 	BLUR_ANNOTATION_STRENGTH,
+	type CropRegion,
+	type Padding,
 } from "@/components/video-editor/types";
+import { computePaddedLayout } from "@/components/video-editor/videoPlayback/layoutUtils";
 
 export interface AnnotationRenderAssets {
 	imageCache: Map<string, HTMLImageElement>;
 }
 
-interface AnnotationSceneTransform {
+export interface AnnotationSceneTransform {
 	scale: number;
 	x: number;
 	y: number;
 }
 
-interface AnnotationCoordinateRect {
+export interface AnnotationCoordinateRect {
 	x: number;
 	y: number;
 	width: number;
 	height: number;
+}
+
+export interface AnnotationPlacement {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+	scaleFactor: number;
+}
+
+export interface AnnotationFrameConfig {
+	width: number;
+	height: number;
+	padding?: Padding | number;
+	cropRegion: CropRegion;
+	videoWidth: number;
+	videoHeight: number;
+}
+
+export function getAnnotationFrameRect(config: AnnotationFrameConfig): AnnotationCoordinateRect {
+	const layout = computePaddedLayout({
+		width: config.width,
+		height: config.height,
+		padding: config.padding ?? 0,
+		frameInsets: null,
+		cropRegion: config.cropRegion,
+		videoWidth: config.videoWidth,
+		videoHeight: config.videoHeight,
+	});
+
+	return {
+		x: layout.centerOffsetX,
+		y: layout.centerOffsetY,
+		width: layout.croppedDisplayWidth,
+		height: layout.croppedDisplayHeight,
+	};
+}
+
+export function getAnnotationScaleFactor(config: {
+	width: number;
+	height: number;
+	previewWidth?: number;
+	previewHeight?: number;
+}): number {
+	const previewWidth = config.previewWidth || BASE_PREVIEW_WIDTH;
+	const previewHeight = config.previewHeight || BASE_PREVIEW_HEIGHT;
+	return (config.width / previewWidth + config.height / previewHeight) / 2;
 }
 
 function transformAnnotationRect(
@@ -34,6 +86,31 @@ function transformAnnotationRect(
 		y: rect.y * sceneTransform.scale + sceneTransform.y,
 		width: rect.width * sceneTransform.scale,
 		height: rect.height * sceneTransform.scale,
+	};
+}
+
+export function placeAnnotation(
+	annotation: AnnotationRegion,
+	canvas: { width: number; height: number },
+	frameRect: AnnotationCoordinateRect,
+	scaleFactor: number,
+	sceneTransform?: AnnotationSceneTransform,
+): AnnotationPlacement {
+	const pinned = annotation.space === "screen";
+	const space = pinned ? { x: 0, y: 0, width: canvas.width, height: canvas.height } : frameRect;
+	const rect = transformAnnotationRect(
+		{
+			x: space.x + (annotation.position.x / 100) * space.width,
+			y: space.y + (annotation.position.y / 100) * space.height,
+			width: (annotation.size.width / 100) * space.width,
+			height: (annotation.size.height / 100) * space.height,
+		},
+		pinned ? undefined : sceneTransform,
+	);
+
+	return {
+		...rect,
+		scaleFactor: scaleFactor * (pinned ? 1 : (sceneTransform?.scale ?? 1)),
 	};
 }
 
@@ -379,21 +456,19 @@ export async function renderAnnotations(
 	};
 
 	for (const annotation of sortedAnnotations) {
-		const pinned = annotation.space === "screen";
-		const space = pinned
-			? { x: 0, y: 0, width: canvasWidth, height: canvasHeight }
-			: annotationRect;
-		const rect = transformAnnotationRect(
-			{
-				x: space.x + (annotation.position.x / 100) * space.width,
-				y: space.y + (annotation.position.y / 100) * space.height,
-				width: (annotation.size.width / 100) * space.width,
-				height: (annotation.size.height / 100) * space.height,
-			},
-			pinned ? undefined : sceneTransform,
+		const {
+			x,
+			y,
+			width,
+			height,
+			scaleFactor: effectiveScaleFactor,
+		} = placeAnnotation(
+			annotation,
+			{ width: canvasWidth, height: canvasHeight },
+			annotationRect,
+			scaleFactor,
+			sceneTransform,
 		);
-		const { x, y, width, height } = rect;
-		const effectiveScaleFactor = scaleFactor * (pinned ? 1 : (sceneTransform?.scale ?? 1));
 
 		switch (annotation.type) {
 			case "text":

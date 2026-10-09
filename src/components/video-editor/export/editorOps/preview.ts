@@ -395,7 +395,7 @@ export async function renderPreview(payload: unknown, context: EditorOpContext) 
 				`It uses the recording's native aspect ratio and the legacy export renderer, so an export set to another aspect ratio or to the modern pipeline can frame things differently.`,
 				previewSize.measured
 					? undefined
-					: `The editor preview could not be measured, so caption and cursor sizes were scaled against ${FALLBACK_PREVIEW_WIDTH}x${FALLBACK_PREVIEW_HEIGHT}, as a headless export would.`,
+					: `The editor preview could not be measured, so annotation, caption and cursor sizes were scaled against ${FALLBACK_PREVIEW_WIDTH}x${FALLBACK_PREVIEW_HEIGHT}, as a headless export would.`,
 				budgetNote,
 			]
 				.filter(Boolean)

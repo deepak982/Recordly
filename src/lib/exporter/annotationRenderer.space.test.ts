@@ -1,7 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it, vi } from "vitest";
 import type { AnnotationRegion } from "@/components/video-editor/types";
 import { DEFAULT_ANNOTATION_STYLE } from "@/components/video-editor/types";
-import { renderAnnotations } from "./annotationRenderer";
+import { computePaddedLayout } from "@/components/video-editor/videoPlayback/layoutUtils";
+import {
+	getAnnotationScaleFactor,
+	placeAnnotation,
+	renderAnnotations,
+	renderAnnotationToCanvas,
+} from "./annotationRenderer";
+
+vi.mock("pixi.js", () => ({
+	Application: class {},
+	Graphics: class {},
+	Sprite: class {},
+}));
 
 function textAnnotation(space?: "frame" | "screen"): AnnotationRegion {
 	return {
@@ -59,5 +73,447 @@ describe("renderAnnotations space", () => {
 
 	it("screen ignores the zoom and the recording rect", async () => {
 		expect(await clipRect(textAnnotation("screen"))).toEqual([100, 100, 500, 50]);
+	});
+});
+
+const GLYPH_WIDTH_RATIO = 0.5;
+
+type RasterState = {
+	fillStyle: string;
+	strokeStyle: string;
+	globalAlpha: number;
+	filter: string;
+	globalCompositeOperation: string;
+	font: string;
+	textAlign: CanvasTextAlign;
+	textBaseline: CanvasTextBaseline;
+	clip: { x: number; y: number; width: number; height: number };
+};
+
+function toRgb(color: string): [number, number, number] {
+	const hex = color.replace("#", "");
+	const full =
+		hex.length === 3 ? [...hex].map((channel) => channel + channel).join("") : hex.slice(0, 6);
+	return [
+		Number.parseInt(full.slice(0, 2), 16) || 0,
+		Number.parseInt(full.slice(2, 4), 16) || 0,
+		Number.parseInt(full.slice(4, 6), 16) || 0,
+	];
+}
+
+function createRasterCanvas(width: number, height: number) {
+	const pixels = new Uint8ClampedArray(width * height * 4);
+	const paints: Array<{ alpha: number; filter: string; composite: string }> = [];
+	let state: RasterState = {
+		fillStyle: "#000000",
+		strokeStyle: "#000000",
+		globalAlpha: 1,
+		filter: "none",
+		globalCompositeOperation: "source-over",
+		font: "10px sans-serif",
+		textAlign: "start",
+		textBaseline: "alphabetic",
+		clip: { x: 0, y: 0, width, height },
+	};
+	const stack: RasterState[] = [];
+	let pending = { x: 0, y: 0, width: 0, height: 0 };
+
+	const fontSize = () => Number.parseFloat(/(\d+(?:\.\d+)?)px/.exec(state.font)?.[1] ?? "10");
+	const measure = (text: string) => text.length * fontSize() * GLYPH_WIDTH_RATIO;
+
+	function paint(x: number, y: number, w: number, h: number, color: string) {
+		paints.push({
+			alpha: state.globalAlpha,
+			filter: state.filter,
+			composite: state.globalCompositeOperation,
+		});
+		const [r, g, b] = toRgb(color);
+		const alpha = state.globalAlpha;
+		const left = Math.max(0, Math.round(Math.max(x, state.clip.x)));
+		const top = Math.max(0, Math.round(Math.max(y, state.clip.y)));
+		const right = Math.min(width, Math.round(Math.min(x + w, state.clip.x + state.clip.width)));
+		const bottom = Math.min(
+			height,
+			Math.round(Math.min(y + h, state.clip.y + state.clip.height)),
+		);
+		for (let py = top; py < bottom; py++) {
+			for (let px = left; px < right; px++) {
+				const index = (py * width + px) * 4;
+				pixels[index] = r * alpha + pixels[index] * (1 - alpha);
+				pixels[index + 1] = g * alpha + pixels[index + 1] * (1 - alpha);
+				pixels[index + 2] = b * alpha + pixels[index + 2] * (1 - alpha);
+				pixels[index + 3] = 255 * alpha + pixels[index + 3] * (1 - alpha);
+			}
+		}
+	}
+
+	const ctx = {
+		canvas: { width, height },
+		get fillStyle() {
+			return state.fillStyle;
+		},
+		set fillStyle(value: string) {
+			state.fillStyle = value;
+		},
+		get strokeStyle() {
+			return state.strokeStyle;
+		},
+		set strokeStyle(value: string) {
+			state.strokeStyle = value;
+		},
+		get globalAlpha() {
+			return state.globalAlpha;
+		},
+		set globalAlpha(value: number) {
+			state.globalAlpha = value;
+		},
+		get filter() {
+			return state.filter;
+		},
+		set filter(value: string) {
+			state.filter = value;
+		},
+		get globalCompositeOperation() {
+			return state.globalCompositeOperation;
+		},
+		set globalCompositeOperation(value: string) {
+			state.globalCompositeOperation = value;
+		},
+		get font() {
+			return state.font;
+		},
+		set font(value: string) {
+			state.font = value;
+		},
+		get textAlign() {
+			return state.textAlign;
+		},
+		set textAlign(value: CanvasTextAlign) {
+			state.textAlign = value;
+		},
+		get textBaseline() {
+			return state.textBaseline;
+		},
+		set textBaseline(value: CanvasTextBaseline) {
+			state.textBaseline = value;
+		},
+		lineWidth: 1,
+		lineCap: "butt",
+		lineJoin: "miter",
+		imageSmoothingEnabled: true,
+		imageSmoothingQuality: "high",
+		shadowColor: "transparent",
+		shadowBlur: 0,
+		shadowOffsetX: 0,
+		shadowOffsetY: 0,
+		measureText: (text: string) => ({ width: measure(text) }),
+		save: () => {
+			stack.push({ ...state, clip: { ...state.clip } });
+		},
+		restore: () => {
+			const previous = stack.pop();
+			if (previous) state = previous;
+		},
+		beginPath: () => undefined,
+		closePath: () => undefined,
+		moveTo: () => undefined,
+		lineTo: () => undefined,
+		stroke: () => undefined,
+		translate: () => undefined,
+		scale: () => undefined,
+		rect: (x: number, y: number, w: number, h: number) => {
+			pending = { x, y, width: w, height: h };
+		},
+		roundRect: (x: number, y: number, w: number, h: number) => {
+			pending = { x, y, width: w, height: h };
+		},
+		clip: () => {
+			const x = Math.max(state.clip.x, pending.x);
+			const y = Math.max(state.clip.y, pending.y);
+			state.clip = {
+				x,
+				y,
+				width: Math.min(state.clip.x + state.clip.width, pending.x + pending.width) - x,
+				height: Math.min(state.clip.y + state.clip.height, pending.y + pending.height) - y,
+			};
+		},
+		fill: () => paint(pending.x, pending.y, pending.width, pending.height, state.fillStyle),
+		fillRect: (x: number, y: number, w: number, h: number) =>
+			paint(x, y, w, h, state.fillStyle),
+		clearRect: (x: number, y: number, w: number, h: number) => paint(x, y, w, h, "#000000"),
+		drawImage: (source: { color?: string }, x = 0, y = 0, w = width, h = height) =>
+			paint(x, y, w, h, source.color ?? "#000000"),
+		fillText: (text: string, x: number, y: number) => {
+			const size = fontSize();
+			const runWidth = measure(text);
+			const left =
+				state.textAlign === "center"
+					? x - runWidth / 2
+					: state.textAlign === "right"
+						? x - runWidth
+						: x;
+			const top = state.textBaseline === "middle" ? y - size / 2 : y - size;
+			paint(left, top, runWidth, size, state.fillStyle);
+		},
+	};
+
+	return {
+		ctx: ctx as unknown as CanvasRenderingContext2D,
+		paints,
+		paintedBounds: () => {
+			let left = width;
+			let top = height;
+			let right = 0;
+			let bottom = 0;
+			for (let py = 0; py < height; py++) {
+				for (let px = 0; px < width; px++) {
+					if (pixels[(py * width + px) * 4 + 3] === 0) continue;
+					if (px < left) left = px;
+					if (py < top) top = py;
+					if (px + 1 > right) right = px + 1;
+					if (py + 1 > bottom) bottom = py + 1;
+				}
+			}
+			return { left, top, right, bottom };
+		},
+		pixelAt: (x: number, y: number) => {
+			const index = (Math.round(y) * width + Math.round(x)) * 4;
+			return [pixels[index], pixels[index + 1], pixels[index + 2], pixels[index + 3]];
+		},
+	};
+}
+
+const TILE_WIDTH = 1280;
+const TILE_HEIGHT = 720;
+const SCENE_SCALE_FACTOR = (TILE_WIDTH / 1920 + TILE_HEIGHT / 1080) / 2;
+const WALLPAPER = "#102030";
+const PICTURE = "#405060";
+
+function titleAnnotation(space: "frame" | "screen"): AnnotationRegion {
+	return {
+		id: "title",
+		startMs: 113000,
+		endMs: 115600,
+		type: "text",
+		content: "Entries · Payroll",
+		textContent: "Entries · Payroll",
+		position: { x: 10, y: 40 },
+		size: { width: 80, height: 20 },
+		style: { ...DEFAULT_ANNOTATION_STYLE, fontSize: 64, color: "#FFFFFF" },
+		zIndex: 1,
+		space,
+	};
+}
+
+const ZOOM = { scale: 2, x: -1000, y: -500 };
+const MASK_RECT = { x: 64, y: 36, width: TILE_WIDTH - 128, height: TILE_HEIGHT - 72 };
+
+async function rasterizeTitle(space: "frame" | "screen", annotationsFirst = false) {
+	const raster = createRasterCanvas(TILE_WIDTH, TILE_HEIGHT);
+	const { ctx } = raster;
+	const drawScene = () => {
+		ctx.fillStyle = WALLPAPER;
+		ctx.fillRect(0, 0, TILE_WIDTH, TILE_HEIGHT);
+		ctx.fillStyle = PICTURE;
+		ctx.fillRect(MASK_RECT.x, MASK_RECT.y, MASK_RECT.width, MASK_RECT.height);
+	};
+	if (!annotationsFirst) drawScene();
+	const beforeAnnotations = raster.paints.length;
+	await renderAnnotations(
+		ctx,
+		[titleAnnotation(space)],
+		TILE_WIDTH,
+		TILE_HEIGHT,
+		114800,
+		SCENE_SCALE_FACTOR,
+		undefined,
+		ZOOM,
+		MASK_RECT,
+	);
+	const annotationPaints = raster.paints.slice(beforeAnnotations);
+	if (annotationsFirst) drawScene();
+	return { ...raster, annotationPaints };
+}
+
+describe("renderAnnotations pixels over a zoomed scene", () => {
+	it("paints a screen-space title opaquely on top of the picture", async () => {
+		const { pixelAt, annotationPaints } = await rasterizeTitle("screen");
+		expect(annotationPaints.length).toBeGreaterThan(0);
+		expect(pixelAt(640, 360)).toEqual([255, 255, 255, 255]);
+		expect(pixelAt(200, 360)).toEqual(toRgb(PICTURE).concat(255));
+	});
+
+	it("leaves no alpha, filter or blend state that could dim the title", async () => {
+		const { annotationPaints } = await rasterizeTitle("screen");
+		for (const entry of annotationPaints) {
+			expect(entry).toEqual({ alpha: 1, filter: "none", composite: "source-over" });
+		}
+	});
+
+	it("would lose the title if the overlay were painted into the scene layer", async () => {
+		const { pixelAt } = await rasterizeTitle("screen", true);
+		expect(pixelAt(640, 360)).toEqual(toRgb(PICTURE).concat(255));
+	});
+
+	it("keeps the same title in frame space pinned to the zoomed picture instead", async () => {
+		const { pixelAt } = await rasterizeTitle("frame");
+		expect(pixelAt(280, 220)).toEqual([255, 255, 255, 255]);
+		expect(pixelAt(640, 360)).toEqual(toRgb(PICTURE).concat(255));
+	});
+});
+
+const EDITOR_CANVAS = { previewWidth: 860, previewHeight: 484 };
+const LOOK = {
+	padding: 20,
+	cropRegion: { x: 0, y: 0, width: 1, height: 1 },
+	videoWidth: 2560,
+	videoHeight: 1440,
+};
+const NO_ZOOM = { scale: 1, x: 0, y: 0 };
+
+function lookConfig(width: number, height: number) {
+	return { width, height, ...EDITOR_CANVAS, ...LOOK };
+}
+
+type LookConfig = ReturnType<typeof lookConfig>;
+
+function frameRectFor(config: LookConfig) {
+	const layout = computePaddedLayout({
+		width: config.width,
+		height: config.height,
+		padding: config.padding,
+		frameInsets: null,
+		cropRegion: config.cropRegion,
+		videoWidth: config.videoWidth,
+		videoHeight: config.videoHeight,
+	});
+	return {
+		x: layout.centerOffsetX,
+		y: layout.centerOffsetY,
+		width: layout.croppedDisplayWidth,
+		height: layout.croppedDisplayHeight,
+	};
+}
+
+function normalised(
+	bounds: { left: number; top: number; right: number; bottom: number },
+	config: LookConfig,
+) {
+	return {
+		left: bounds.left / config.width,
+		top: bounds.top / config.height,
+		width: (bounds.right - bounds.left) / config.width,
+		height: (bounds.bottom - bounds.top) / config.height,
+	};
+}
+
+async function previewPathRect(space: "frame" | "screen", config: LookConfig) {
+	const raster = createRasterCanvas(config.width, config.height);
+	await renderAnnotations(
+		raster.ctx,
+		[titleAnnotation(space)],
+		config.width,
+		config.height,
+		114800,
+		getAnnotationScaleFactor(config),
+		undefined,
+		NO_ZOOM,
+		frameRectFor(config),
+	);
+	return normalised(raster.paintedBounds(), config);
+}
+
+function createRasterElement() {
+	let raster: ReturnType<typeof createRasterCanvas> | null = null;
+	const element = {
+		width: 1,
+		height: 1,
+		getContext: () => {
+			raster ??= createRasterCanvas(element.width, element.height);
+			return raster.ctx;
+		},
+		sprite: () => raster,
+	};
+	return element;
+}
+
+async function exportPathRect(space: "frame" | "screen", config: LookConfig) {
+	const annotation = titleAnnotation(space);
+	const placement = placeAnnotation(
+		annotation,
+		config,
+		frameRectFor(config),
+		getAnnotationScaleFactor(config),
+	);
+	const element = createRasterElement();
+	vi.stubGlobal("document", { createElement: () => element });
+	try {
+		await renderAnnotationToCanvas(
+			annotation,
+			placement.width,
+			placement.height,
+			placement.scaleFactor,
+		);
+	} finally {
+		vi.unstubAllGlobals();
+	}
+	const sprite = element.sprite();
+	if (!sprite) throw new Error("the export sprite rasterized no pixels");
+	const bounds = sprite.paintedBounds();
+	return normalised(
+		{
+			left: bounds.left + placement.x,
+			top: bounds.top + placement.y,
+			right: bounds.right + placement.x,
+			bottom: bounds.bottom + placement.y,
+		},
+		config,
+	);
+}
+
+describe("render_preview and export_video place annotations identically", () => {
+	for (const space of ["frame", "screen"] as const) {
+		it(`agrees on the normalised rect of a ${space}-space title`, async () => {
+			const preview = await previewPathRect(space, lookConfig(1280, 720));
+			const exported = await exportPathRect(space, lookConfig(1920, 1080));
+			expect(preview.left).toBeCloseTo(exported.left, 2);
+			expect(preview.top).toBeCloseTo(exported.top, 2);
+			expect(preview.width).toBeCloseTo(exported.width, 2);
+			expect(preview.height).toBeCloseTo(exported.height, 2);
+		});
+	}
+
+	it("gives a fontSize the same share of the frame height at any output size", async () => {
+		const small = await exportPathRect("frame", lookConfig(960, 540));
+		const large = await exportPathRect("frame", lookConfig(3840, 2160));
+		expect(small.height).toBeCloseTo(large.height, 2);
+		expect(small.top).toBeCloseTo(large.top, 2);
+	});
+
+	it("keeps a frame-space title inside the padded picture, not the whole canvas", async () => {
+		const config = lookConfig(1920, 1080);
+		const picture = frameRectFor(config);
+		const exported = await exportPathRect("frame", config);
+		expect(picture.x).toBeGreaterThan(0);
+		expect(exported.left * config.width).toBeGreaterThanOrEqual(picture.x);
+		expect(exported.left * config.width + exported.width * config.width).toBeLessThanOrEqual(
+			picture.x + picture.width,
+		);
+	});
+});
+
+describe("both renderers read annotation geometry from one place", () => {
+	const source = (file: string) =>
+		readFileSync(fileURLToPath(new URL(file, import.meta.url)), "utf8");
+
+	it.each([
+		"./frameRenderer.ts",
+		"./modernFrameRenderer.ts",
+	])("%s derives the scale factor and the picture rect from the shared helpers", (file) => {
+		const text = source(file);
+		expect(text).toContain("getAnnotationScaleFactor(this.config)");
+		expect(text).toContain("getAnnotationFrameRect(this.config)");
+		expect(text).not.toContain("BASE_PREVIEW_WIDTH");
+		expect(text).not.toContain("BASE_PREVIEW_HEIGHT");
 	});
 });
