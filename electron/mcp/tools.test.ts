@@ -195,6 +195,8 @@ const PROTOCOL_INSTRUCTIONS = [
 	"cancel_recording, re-plan, rehearse, re-take",
 	"Never retry blindly or patch a ruined take",
 	"set_input_policy tunes the tolerance",
+	"2. Plan:",
+	"3. Rehearse",
 ];
 
 const PROTOCOL_PROMPT = [
@@ -215,6 +217,9 @@ const PROTOCOL_PROMPT = [
 	"cancel_recording and take it again",
 	"Never call start_recording before a clean rehearsal of the whole flow",
 	"Never export a take you have not checked with review_recording",
+	"keep every waitFor you rehearsed",
+	"capped at 30000",
+	"never re-run it hoping",
 ];
 
 const PERMISSIVE_WORDING = [
@@ -1200,7 +1205,7 @@ describe("buildRecordlyMcpServer", () => {
 		const init = await call("initialize", INITIALIZE);
 		const instructions: string = init.result.instructions;
 		for (const needle of PROTOCOL_INSTRUCTIONS) expect(instructions).toContain(needle);
-		expect(instructions.indexOf("2. Plan.")).toBeLessThan(instructions.indexOf("3. Rehearse"));
+		expect(instructions.indexOf("2. Plan:")).toBeLessThan(instructions.indexOf("3. Rehearse"));
 		expect(instructions.indexOf("3. Rehearse")).toBeLessThan(
 			instructions.indexOf("start_recording"),
 		);
