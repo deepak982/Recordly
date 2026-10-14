@@ -36,6 +36,43 @@ describe("setDoNotDisturb", () => {
 		expect(result.message).toContain(MAC_DND_ON_SHORTCUT);
 	});
 
+	it("says the Shortcut may still apply when it times out, and does not claim success", async () => {
+		const run = vi.fn(async () => {
+			throw new Error("shortcuts did not finish within 30 s and was stopped");
+		});
+		const result = await setDoNotDisturb(true, deps("darwin", run));
+		expect(result.ok).toBe(false);
+		expect(result.message).toMatch(/may still apply late/);
+		expect(result.message).toContain("Control Centre");
+		expect(hasChangedDoNotDisturb()).toBe(false);
+	});
+
+	it("fails cleanly when the shortcuts command is not installed", async () => {
+		const run = vi.fn(async () => {
+			throw new Error("spawn shortcuts ENOENT");
+		});
+		const result = await setDoNotDisturb(true, deps("darwin", run));
+		expect(result.ok).toBe(false);
+		expect(result.message).toContain("ENOENT");
+		expect(result.message).toContain("Control Centre");
+	});
+
+	it("runs a second macOS call only after the first has finished", async () => {
+		const order: string[] = [];
+		const run = vi.fn(async (_c: string, args: string[]) => {
+			order.push(`start ${args[1]}`);
+			await new Promise((r) => setTimeout(r, 20));
+			order.push(`end ${args[1]}`);
+			return "";
+		});
+		await Promise.all([
+			setDoNotDisturb(true, deps("darwin", run)),
+			setDoNotDisturb(false, deps("darwin", run)),
+		]);
+		expect(order[1]).toMatch(/^end /);
+		expect(order).toHaveLength(4);
+	});
+
 	it("restores the Linux state it found instead of forcing banners on", async () => {
 		const run = vi.fn(async (_c: string, args: string[]) =>
 			args[0] === "get" ? "false\n" : "",
@@ -179,7 +216,7 @@ describe("the real command runner", () => {
 		expect(execFileMock).toHaveBeenCalledWith(
 			expect.any(String),
 			expect.any(Array),
-			expect.objectContaining({ timeout: 8000, killSignal: "SIGKILL" }),
+			expect.objectContaining({ timeout: 30000, killSignal: "SIGKILL" }),
 			expect.any(Function),
 		);
 		expect(result.ok).toBe(false);

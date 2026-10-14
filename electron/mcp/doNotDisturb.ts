@@ -4,7 +4,7 @@ export const MAC_DND_ON_SHORTCUT = "Recordly Do Not Disturb On";
 export const MAC_DND_OFF_SHORTCUT = "Recordly Do Not Disturb Off";
 const WIN_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Notifications\\Settings";
 const WIN_VALUE = "NOC_GLOBAL_SETTING_TOASTS_ENABLED";
-const COMMAND_TIMEOUT_MS = 8000;
+const COMMAND_TIMEOUT_MS = 30000;
 
 export type DoNotDisturbResult = {
 	ok: boolean;
@@ -61,7 +61,9 @@ function createDriver(deps: DoNotDisturbDeps): Driver | null {
 						throw new Error(
 							/couldn.?t find|not found/i.test(detail)
 								? `the Shortcut "${name}" does not exist. Create Shortcuts named "${MAC_DND_ON_SHORTCUT}" and "${MAC_DND_OFF_SHORTCUT}", each with one "Set Focus" action`
-								: detail,
+								: /did not finish/.test(detail)
+									? `${detail}. The Shortcut may still apply late, or be waiting for you to approve a Shortcuts permission prompt, so check the menu bar before relying on it`
+									: detail,
 						);
 					}
 				},
