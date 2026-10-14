@@ -83,19 +83,19 @@ const MAC_INSTRUCTIONS =
 	"mid-take.\n" +
 	"2. Plan: write the scene list and every step first. Aim with targets {text, role?, index?}, " +
 	"not coordinates — give role (a link is not a button) and the label's whole text.\n" +
-	"3. Rehearse unrecorded, one page at a time: perform dryRun: true (one page only), fix every " +
+	"3. Rehearse unrecorded, one page at a time: perform dryRun: true, fixing every " +
 	"missing or ambiguous target, then perform that page with then: " +
-	'"elements". Note durationMs. Do side effects here, not in the take.\n' +
+	'"elements". Do side effects here, not in the take.\n' +
 	"4. Reset to the start state, move_pointer to scene 1's start, then start_recording.\n" +
 	"5. Replay the rehearsed steps in as few perform calls as you can; gaps are cut, so one per " +
 	"scene reads best. Leave timing to Recordly.\n" +
 	"6. stop_recording, then review_recording; cover anything private with annotate blur.\n" +
-	"7. Check before exporting, not by exporting: check_edits is free, render_preview shows a moment " +
+	"7. Check before exporting: check_edits is free, render_preview shows a moment " +
 	"as the export will, and export_video fromMs/toMs renders only the seconds you changed. Export " +
 	"the whole file once, when it is right.\n\n" +
 	"Coordinates are window-relative points; (0,0) is the window's top-left.\n\n" +
-	"Errors: 'the user took over' cuts only that scene: wait, re-aim, carry on; ask " +
-	"only if they want control back. 'Mouse and keyboard control is off' → ask " +
+	"Errors: 'the user took over' cuts only that scene: wait, re-aim, carry on " +
+	"(set_input_policy tunes the tolerance); ask only if they want control back. 'Mouse and keyboard control is off' → ask " +
 	`the user to turn on ${CONTROL_SWITCH}. Covered or closed window → list_sources, select_source, ` +
 	"screenshot. A failed step ('Step n') means the page diverged: cancel_recording, re-plan, " +
 	"rehearse, re-take. Never retry blindly or patch a ruined take.";
@@ -282,11 +282,19 @@ const waitForArgs = {
 		.optional()
 		.describe("Wait until an element with this text is on screen"),
 	role: z.string().trim().min(1).max(40).optional().describe("Kind of element to wait for"),
+	target: target("The element to wait for, as in a click step, instead of text and role"),
 	gone: z.boolean().optional().describe("Wait until the element disappears instead"),
 	settled: z
 		.boolean()
 		.optional()
 		.describe("Wait until nothing on screen changes (instead of text or role)"),
+	quietMs: z
+		.number()
+		.int()
+		.min(100)
+		.max(10_000)
+		.optional()
+		.describe("settled only: how long the screen must hold still, default 400"),
 	timeoutMs: z
 		.number()
 		.int()
@@ -296,11 +304,32 @@ const waitForArgs = {
 		.describe("Give up after this long (default 10000); settled carries on instead of failing"),
 };
 
-const WAIT_FOR_RULE =
-	"Wait for an element (text and/or role, optionally gone: true) or for settled: true, not both";
-const waitForValid = (value: { text?: string; role?: string; gone?: boolean; settled?: boolean }) =>
-	(value.text !== undefined || value.role !== undefined) !== (value.settled === true) &&
-	!(value.settled === true && value.gone === true);
+type WaitForFields = {
+	text?: string;
+	role?: string;
+	target?: { text: string; role?: string; index?: number };
+	gone?: boolean;
+	settled?: boolean;
+};
+const waitForCheck = (value: WaitForFields, ctx: z.RefinementCtx) => {
+	const element =
+		value.text !== undefined || value.role !== undefined || value.target !== undefined;
+	const settled = value.settled === true;
+	const add = (message: string) => ctx.addIssue({ code: "custom", message });
+	if (element && settled)
+		add("Wait for an element (text, role or target) or for settled: true, not both");
+	else if (!element && !settled)
+		add("Nothing to wait for: give text, role or target {text}, or settled: true");
+	else if (settled && value.gone === true)
+		add("gone: true waits for an element, so give text, role or target instead of settled");
+	if (value.target?.index !== undefined)
+		add("A wait has no index: it waits for any element matching the text or role");
+};
+const flattenWaitFor = <T extends WaitForFields>(value: T) => {
+	if (!value.target) return value;
+	const { target: found, ...rest } = value;
+	return { ...rest, text: rest.text ?? found.text, role: rest.role ?? found.role };
+};
 
 type PointFields = { x?: number; y?: number; target?: unknown };
 const onePoint = (
@@ -339,7 +368,7 @@ const stepSchema = z.discriminatedUnion("action", [
 		action: z.literal("wait"),
 		ms: z.number().int().min(0).max(30_000).describe("Pause in ms (at most 30000)"),
 	}),
-	z.object({ action: z.literal("waitFor"), ...waitForArgs }).refine(waitForValid, WAIT_FOR_RULE),
+	z.object({ action: z.literal("waitFor"), ...waitForArgs }).superRefine(waitForCheck),
 	z.object({
 		action: z.literal("hold"),
 		ms: z.number().int().min(0).max(30_000).describe("Hold the screen in ms (at most 30000)"),
@@ -464,7 +493,11 @@ function demoPrompt(
 				"list that finishes loading), put a waitFor for the settled page before the click, " +
 				"or waitFor settled: true, and prove it in the rehearsal.",
 			"- Slow load. Add waitFor {text | role} for the thing you are about to click, with " +
-				"timeoutMs above the slowest rehearsal time. Never a bare wait to cover a load.",
+				"timeoutMs well above the slowest rehearsal time: capture takes a whole CPU core, " +
+				"so the app runs 2-4x slower in the take than it did in the rehearsal, and a wait " +
+				"that was generous unrecorded can time out on camera. Never a bare wait to cover a " +
+				"load, and never waitFor settled on a page that shows skeleton loaders - settled " +
+				"means the picture stopped moving, not that the data arrived.",
 			"- Dialog, cookie banner or toast. Dismiss it before start_recording, or make " +
 				"dismissing it scene 1. Never let it appear for the first time during the take.",
 			"- Empty state. If the demo needs rows, confirm in the rehearsal that they are there, " +
@@ -476,7 +509,10 @@ function demoPrompt(
 			"- Covered or resized window. select_source again and screenshot before start_recording.",
 			"- The user took over. That ends the scene, not the recording, and the scene is cut from " +
 				"the video. Wait until the user is done, screenshot, re-aim, and continue with the " +
-				"next perform. Stop and ask only if they clearly want the machine back.",
+				"next perform. Stop and ask only if they clearly want the machine back. If it fires " +
+				"when nobody touched anything, the drift tolerance is too tight for their pointing " +
+				"device: set_input_policy raises it with tolerancePx, or makes a takeover pause and " +
+				"re-arm with onTakeover: 'pause'.",
 			"",
 			"HARD STOPS",
 			"- Never call start_recording before a clean rehearsal of the whole flow.",
@@ -633,7 +669,9 @@ export function buildRecordlyMcpServer(
 				"keyboard act on, which is not always what is captured: role 'control' means a screen " +
 				"is recorded and this window was chosen with select_source, role 'recorded' means the " +
 				"captured source is itself that window, and null means a screen is recorded with no " +
-				"window chosen yet.",
+				"window chosen yet. input.running is { action, forMs } while a mouse and keyboard " +
+				"sequence is still going and null otherwise; it stays set after your own call timed " +
+				"out, because the steps carry on without it.",
 			annotations: { readOnlyHint: true },
 		},
 		async () =>
@@ -714,7 +752,10 @@ export function buildRecordlyMcpServer(
 				(platform === "linux"
 					? " On Wayland a person must confirm the system share dialog first; until then " +
 						"get_status reports starting."
-					: ""),
+					: "") +
+				" Capture is not free: it records the display at full resolution and 60 fps, and the " +
+				"system capture service can take a whole CPU core, so the app being recorded can run " +
+				"2-4x slower than it did in rehearsal. Allow longer waits in the take than you measured.",
 			inputSchema: z.object({
 				countdownSeconds: z
 					.number()
@@ -726,11 +767,11 @@ export function buildRecordlyMcpServer(
 				scenes: z
 					.array(z.string().trim().min(1).max(200))
 					.min(1)
-					.max(12)
+					.max(40)
 					.optional()
 					.describe(
-						"The scene list you rehearsed, one short line per scene; required while the " +
-							"mouse and keyboard switch is on",
+						"The scene list you rehearsed, one short line per scene, at most 40; " +
+							"required while the mouse and keyboard switch is on",
 					),
 			}),
 		},
@@ -1570,8 +1611,10 @@ export function buildRecordlyMcpServer(
 				"Silence notification banners for a take, and restore them afterwards. Best effort: " +
 				"no operating system offers a stable way to do this, so it reports what happened " +
 				"instead of failing, and on macOS it needs two Shortcuts named 'Recordly Do Not " +
-				"Disturb On' and 'Recordly Do Not Disturb Off'. If it says it could not, ask the user " +
-				"to turn it on themselves before you record.",
+				"Disturb On' and 'Recordly Do Not Disturb Off'. It waits up to 30 s and cannot confirm " +
+				"the result, so on a timeout the Focus may still change late, or be waiting for the " +
+				"user to approve a Shortcuts prompt. If it says it could not, ask the user to turn it " +
+				"on themselves before you record.",
 			inputSchema: z.object({
 				enabled: z.boolean().describe("true to silence, false to restore"),
 			}),
@@ -1629,10 +1672,10 @@ export function buildRecordlyMcpServer(
 				scenes: z
 					.array(z.string().trim().min(1).max(200))
 					.min(1)
-					.max(12)
+					.max(40)
 					.optional()
 					.describe(
-						"The scene list you rehearsed; required while the control switch is on",
+						"The scene list you rehearsed, at most 40; required while the control switch is on",
 					),
 			}),
 		},
@@ -2083,7 +2126,9 @@ export function buildRecordlyMcpServer(
 				"size (at least 1.2 × as wide as tall, so automatic zooms work). It is also the fix " +
 				"for an app that opens off-screen or on another display. Pass source to aim at a " +
 				"window other than the selected one. The window manager may adjust the rectangle; the " +
-				"result says what it ended up as. Refused for the window being recorded once capture " +
+				"result says what it ended up as, and applied: false means the window did not move at " +
+				"all — it is maximized or full screen, or the app refuses to be resized, and the note " +
+				"says which. Refused for the window being recorded once capture " +
 				"has started, because moving it mid-take wrecks the framing of the video.",
 			inputSchema: z.object({
 				source: z
@@ -2381,11 +2426,15 @@ export function buildRecordlyMcpServer(
 			description:
 				"Wait in the selected window until an element appears (text and/or role), disappears " +
 				"(gone: true) or the screen stops changing (settled: true). Use after open_url or anything " +
-				"slow, before planning the next targets. Element waits fail at timeoutMs (default 10000); " +
-				`settled carries on. Logged as waiting, which Recordly shortens in the video. ${INPUT_NOTE}`,
-			inputSchema: z.object(waitForArgs).refine(waitForValid, WAIT_FOR_RULE),
+				"slow, before planning the next targets. Element waits fail at timeoutMs (default 10000). " +
+				"settled is layout stillness, not a data-loaded signal: a skeleton loader holding still " +
+				"counts as settled, and it never fails — if the screen never settles the wait proceeds " +
+				"anyway. quietMs sets how long it must hold still (default 400); raise it on a " +
+				"single-page app, and raise timeoutMs with it, or wait for a value you expect instead. " +
+				`Logged as waiting, which Recordly shortens in the video. ${INPUT_NOTE}`,
+			inputSchema: z.object(waitForArgs).superRefine(waitForCheck),
 		},
-		async (args) => perform([{ action: "waitFor", ...args }]),
+		async (args) => perform([{ action: "waitFor", ...flattenWaitFor(args) }]),
 	);
 
 	server.registerTool(
@@ -2398,8 +2447,10 @@ export function buildRecordlyMcpServer(
 				"carries on, re-running the interrupted step; the pause is logged as waiting and shortened. " +
 				"Because the whole step re-runs, a type interrupted halfway types the text again on top " +
 				"of what landed, so prefer 'abort' for scenes that type into fields. " +
+				"'ignore' turns detection off for the take: only Esc aborts, so use it when a resting " +
+				"hand or a twitchy trackpad keeps interrupting a scene nobody is touching. " +
 				"tolerancePx is how far the pointer may drift in one second before it counts as a " +
-				"takeover (default 8; macOS only). requireTargets refuses raw coordinates while " +
+				"takeover (default 40; macOS only). requireTargets refuses raw coordinates while " +
 				"recording — a stale coordinate once created a sheet in a real workbook because the " +
 				"tab strip had scrolled since the screenshot. safeRegion here applies to every later " +
 				"perform, and perform's own safeRegion wins. Esc always aborts. Settings last until " +
@@ -2407,7 +2458,7 @@ export function buildRecordlyMcpServer(
 			inputSchema: z.object({
 				tolerancePx: z.number().min(1).max(500).optional(),
 				autoResumeAfterMs: z.number().int().min(200).max(30000).optional(),
-				onTakeover: z.enum(["pause", "abort"]).optional(),
+				onTakeover: z.enum(["pause", "abort", "ignore"]).optional(),
 				requireTargets: z
 					.boolean()
 					.optional()
@@ -2431,13 +2482,28 @@ export function buildRecordlyMcpServer(
 	);
 
 	server.registerTool(
+		"cancel_action",
+		{
+			description:
+				"Stop the mouse and keyboard sequence running now. The scene ends; the recording keeps " +
+				"going, so wait, re-aim and perform the next scene — do not cancel_recording. Use it " +
+				"when your perform call timed out but get_status still shows input.running, or when a " +
+				"scene is acting on the wrong page. Returns cancelled: false with a note when nothing " +
+				"is running, or when the action cannot be interrupted.",
+			annotations: { readOnlyHint: false },
+			inputSchema: z.object({}),
+		},
+		async () => textResult(agent.cancelAction()),
+	);
+
+	server.registerTool(
 		"perform",
 		{
 			description:
 				"Run one rehearsed scene: steps run back to back with exact timing (separate calls " +
-				"add cuts). Each step takes the matching tool's fields plus " +
-				"action: move, click, drag, scroll, type, key, wait/hold {ms}, expect or waitFor. A target {text, " +
-				"role?, index?} is found when its step runs (waiting up to 5 s, scrolling into " +
+				"add cuts). Each step names its action and takes that tool's fields; see steps. " +
+				"A target is found when its step runs " +
+				"(waiting up to 5 s, scrolling into " +
 				"view), so a scene may change page; prefer targets to coordinates. Leave out " +
 				"durationMs and waits: Recordly glides naturally and, after a click or Enter, lets " +
 				"the screen settle and holds the result. A wait or waitFor right after one " +
@@ -2448,18 +2514,30 @@ export function buildRecordlyMcpServer(
 				"dryRun acts on nothing: " +
 				"it probes to the first step that can change the page, inclusive, returning " +
 				"dryRun: [{index (1-based, as in 'Step n'), action, found, label?, candidates?, " +
-				"ambiguous?, matches?, note?}], later steps as found: null, note 'validated at run " +
-				"time'. found: false with " +
+				"note?}], later steps as found: null, note 'validated at run time'. found: false with " +
 				"candidates > 1 means ambiguous, not missing. dryRun and " +
 				"then: 'elements' also return page, a signature to compare between the rehearsal " +
-				"and the take; then: 'elements' adds the visible controls. Limits: 1–200 steps, waits up to " +
-				"30000 ms, 10 min a call." +
+				"and the take; 'elements' adds the visible controls. Limit: 10 min a call." +
 				" A failure says 'Step n (action)': the page diverged, so cancel_recording and " +
-				`take the scene again. Returns { performed, durationMs }. ${POINT_HELP} ${INPUT_NOTE} ` +
-				"Errors, including 'the user took over' (it ends the scene, not the recording), " +
-				"are in click's description.",
+				"take the scene again. Returns { performed, durationMs }, or past 60 s " +
+				"{ status: 'still-running' }: the steps carry on, so never call perform again — poll " +
+				`get_status until input.running is null, or cancel_action. ${POINT_HELP} ${INPUT_NOTE} ` +
+				"Errors are in click's description; 'the user took over' ends the scene, not the " +
+				"recording.",
 			inputSchema: z.object({
-				steps: z.array(stepSchema).min(1).max(200),
+				steps: z
+					.array(stepSchema)
+					.min(1)
+					.max(200)
+					.describe(
+						'Each step names what it does in action (not "op"): move {target | x, y}, ' +
+							"click {target | x, y, button?, count?, modifiers?}, drag {from | fromX, " +
+							"fromY, to | toX, toY}, scroll {deltaY | deltaX, target | x, y}, type " +
+							"{text, into?}, key {key, modifiers?, repeat?}, wait {ms}, hold {ms}, " +
+							"waitFor {text | role | target, gone? | settled?, quietMs?, timeoutMs?} or expect " +
+							"{target, visible?}. A target is {text, role?, index?}; durationMs sets " +
+							"one glide.",
+					),
 				title: z
 					.string()
 					.trim()
@@ -2496,7 +2574,7 @@ export function buildRecordlyMcpServer(
 		},
 		async ({ steps, ...options }) =>
 			perform(
-				steps,
+				steps.map((step) => (step.action === "waitFor" ? flattenWaitFor(step) : step)),
 				Object.values(options).some((value) => value !== undefined) ? options : undefined,
 			),
 	);

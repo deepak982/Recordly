@@ -65,6 +65,7 @@ function setup(
 		})),
 		undoLastInput: vi.fn(async () => ({ sent: "Cmd+Z", app: "Numbers", note: "best effort" })),
 		setInputPolicy: vi.fn((policy: unknown) => policy),
+		cancelAction: vi.fn(() => ({ cancelled: true, action: "perform", forMs: 4200 })),
 	} as unknown as AgentControl & Record<string, ReturnType<typeof vi.fn>>;
 	const review = {
 		reviewRecording: vi.fn(async () => ({
@@ -188,9 +189,10 @@ function collectSchemaWords(node: unknown, into: Set<string>) {
 const PROTOCOL_INSTRUCTIONS = [
 	"Never record a flow you have not already run",
 	"Plan, rehearse, take:",
-	"dryRun: true (one page only)",
+	"one page at a time: perform dryRun: true",
 	"cancel_recording, re-plan, rehearse, re-take",
 	"Never retry blindly or patch a ruined take",
+	"set_input_policy tunes the tolerance",
 ];
 
 const PROTOCOL_PROMPT = [
@@ -242,6 +244,7 @@ describe("buildRecordlyMcpServer", () => {
 			"add_card",
 			"annotate",
 			"arm_recording",
+			"cancel_action",
 			"cancel_recording",
 			"check_edits",
 			"click",
@@ -520,14 +523,17 @@ describe("buildRecordlyMcpServer", () => {
 		const scenes = ["Open the project list"];
 		await call("tools/call", { name: "start_recording", arguments: { scenes } });
 		expect(remote.startRecording).toHaveBeenCalledWith({ scenes, hideCursor: false });
-		for (const bad of [[], Array.from({ length: 13 }, () => "scene"), [" "]]) {
+		const long = Array.from({ length: 17 }, (_, index) => `Scene ${index + 1}`);
+		await call("tools/call", { name: "start_recording", arguments: { scenes: long } });
+		expect(remote.startRecording).toHaveBeenCalledWith({ scenes: long, hideCursor: false });
+		for (const bad of [[], Array.from({ length: 41 }, () => "scene"), [" "]]) {
 			const { result: refused } = await call("tools/call", {
 				name: "start_recording",
 				arguments: { scenes: bad },
 			});
 			expect(refused.isError).toBe(true);
 		}
-		expect(remote.startRecording).toHaveBeenCalledTimes(1);
+		expect(remote.startRecording).toHaveBeenCalledTimes(2);
 	});
 
 	it("records without a scene list when the mouse and keyboard switch is off", async () => {
@@ -783,6 +789,50 @@ describe("buildRecordlyMcpServer", () => {
 			expect(result.isError).toBe(true);
 		}
 		expect(agent.perform).toHaveBeenCalledTimes(3);
+	});
+
+	it("waits for a target the way a click takes one", async () => {
+		const { call, agent } = setup();
+		const { result: listed } = await call("tools/list");
+		const performed = listed.tools.find((tool: { name: string }) => tool.name === "perform");
+		expect(performed.inputSchema.properties.steps.description).toContain('not "op"');
+		expect(performed.inputSchema.properties.steps.description).toContain(
+			"waitFor {text | role",
+		);
+		const waitFor = listed.tools.find((tool: { name: string }) => tool.name === "wait_for");
+		expect(Object.keys(waitFor.inputSchema.properties)).toEqual(
+			expect.arrayContaining(["text", "role", "target", "gone", "settled"]),
+		);
+		await call("tools/call", {
+			name: "wait_for",
+			arguments: { target: { text: "Total", role: "cell" }, timeoutMs: 5000 },
+		});
+		expect(agent.perform).toHaveBeenNthCalledWith(
+			1,
+			[{ action: "waitFor", text: "Total", role: "cell", timeoutMs: 5000 }],
+			undefined,
+		);
+		await call("tools/call", {
+			name: "perform",
+			arguments: { steps: [{ action: "waitFor", target: { text: "Total" } }] },
+		});
+		expect(agent.perform).toHaveBeenNthCalledWith(
+			2,
+			[{ action: "waitFor", text: "Total" }],
+			undefined,
+		);
+		const cases = [
+			[{}, "Nothing to wait for"],
+			[{ target: { text: "Total" }, settled: true }, "not both"],
+			[{ target: { text: "Row", index: 2 } }, "no index"],
+			[{ settled: true, gone: true }, "gone: true"],
+		] as const;
+		for (const [args, message] of cases) {
+			const { result } = await call("tools/call", { name: "wait_for", arguments: args });
+			expect(result.isError).toBe(true);
+			expect(result.content[0].text).toContain(message);
+		}
+		expect(agent.perform).toHaveBeenCalledTimes(2);
 	});
 
 	it("accepts every step the controller accepts", async () => {
@@ -1075,9 +1125,32 @@ describe("buildRecordlyMcpServer", () => {
 			arguments: { onTakeover: "sulk" },
 		});
 		expect(bad.result.isError).toBe(true);
+		const ignore = await call("tools/call", {
+			name: "set_input_policy",
+			arguments: { onTakeover: "ignore" },
+		});
+		expect(ignore.result.isError).toBeFalsy();
 		const list = await call("tools/list", {});
 		const perform = list.result.tools.find((tool: { name: string }) => tool.name === "perform");
 		expect(perform.description).toContain("hold {ms} (same as wait {ms}) is kept");
+		expect(perform.description).toContain("still-running");
+	});
+
+	it("offers cancel_action for a sequence that outlived its call", async () => {
+		const { call, agent } = setup("idle", { platform: "darwin" });
+		const { result } = await call("tools/call", { name: "cancel_action", arguments: {} });
+		expect(result.isError).toBeFalsy();
+		expect(agent.cancelAction).toHaveBeenCalledTimes(1);
+		expect(result.content[0].text).toContain('"cancelled": true');
+		const list = await call("tools/list", {});
+		const status = list.result.tools.find(
+			(tool: { name: string }) => tool.name === "get_status",
+		);
+		expect(status.description).toContain("input.running");
+		const cancel = list.result.tools.find(
+			(tool: { name: string }) => tool.name === "cancel_action",
+		);
+		expect(cancel.description).toContain("do not cancel_recording");
 	});
 
 	it("chooses the control window on Linux without changing what is recorded", async () => {
