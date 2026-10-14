@@ -68,6 +68,7 @@ export type AgentStep =
 			gone?: boolean;
 			settled?: boolean;
 			timeoutMs?: number;
+			quietMs?: number;
 	  };
 
 export type AgentPace = "brisk" | "normal" | "relaxed";
@@ -97,6 +98,14 @@ export type PerformResult = {
 	elements?: AgentElementView[];
 	dryRun?: AgentDryRunStep[];
 	page?: string;
+};
+export type PerformPending = { status: "still-running"; action: "perform"; note: string };
+export type RunningAction = { action: string; forMs: number };
+export type CancelResult = {
+	cancelled: boolean;
+	action?: string;
+	forMs?: number;
+	note?: string;
 };
 
 export type AgentShotScope = "window" | "display";
@@ -150,6 +159,17 @@ const PACES = new Map<string, Pace>([
 ]);
 
 export const TAKEOVER_MESSAGE = "Stopped: the user took over the mouse or keyboard.";
+const TAKEOVER_TAIL =
+	" This ends the scene, not the recording: the recording is still running. Wait for them to " +
+	"finish, re-aim, and perform the next scene. Do not cancel_recording.";
+export const CANCELLED_MESSAGE =
+	"Stopped: cancel_action cancelled this sequence. The recording is still running.";
+const NOTHING_TO_CANCEL = "No mouse or keyboard action is running, so there was nothing to cancel.";
+const IGNORING_TAKEOVER =
+	"Takeover detection is off: pointer movement and scrolling by the user are ignored, and " +
+	"perform will keep going over the top of them. Esc still aborts, and a real key press or " +
+	"mouse click still interrupts the step in flight, because Recordly's input helper cancels " +
+	"its own action when the OS hands it one.";
 const TAKEOVER_CAUSES: Record<AgentEvent["kind"], string> = {
 	move: "the mouse moved",
 	button: "a mouse button was pressed",
@@ -211,9 +231,13 @@ const UNDO_NOTE =
 	"un-click or reverse an action itself, and the app may have nothing to undo or may undo " +
 	"something else. Take a screenshot to see what actually happened.";
 const LIMIT_PASSED = "the perform passed its 10-minute limit. Split the demo into shorter scenes.";
+const PERFORM_WAIT_MS = 60_000;
 const BROWSER_NOT_FOUND =
-	"The page opened, but Recordly could not find the browser window. Call list_sources, then " +
-	"select_source.";
+	"The page opened, but no browser window came to the front within 5 seconds, so Recordly " +
+	"could not tell which window to drive. Call list_sources, then select_source.";
+const BROWSER_NOT_LISTED =
+	"The page opened in the browser window that is now in front, but that window is not in " +
+	"list_sources, so Recordly could not select it. Call list_sources, then select_source.";
 
 type TargetWindow = {
 	pid: number;
@@ -234,7 +258,7 @@ type Run = {
 type InputPolicy = {
 	tolerancePx?: number;
 	autoResumeAfterMs: number;
-	onTakeover: "pause" | "abort";
+	onTakeover: "pause" | "abort" | "ignore";
 	requireTargets?: boolean;
 	safeRegion?: AgentFrame | null;
 };
@@ -255,6 +279,7 @@ export type AgentControlDeps = {
 	waitForStill: typeof waitForStillWindow;
 	now: () => number;
 	setHudPassthrough: (active: boolean) => void;
+	performWaitMs: number;
 };
 
 let hudWindows: Promise<typeof import("../windows")> | null = null;
@@ -283,6 +308,7 @@ const defaultDeps = (): AgentControlDeps => ({
 	waitForStill: waitForStillWindow,
 	now: Date.now,
 	setHudPassthrough,
+	performWaitMs: PERFORM_WAIT_MS,
 });
 
 const normalizeAppName = (name: string) =>
@@ -757,15 +783,16 @@ const undoChord = (name: string): { key: string; modifiers: AgentModifier[] } =>
 
 export function createAgentControl(
 	remote: Pick<RemoteControl, "getStatus" | "listSources" | "selectSource"> &
-		Partial<Pick<RemoteControl, "setControlWindowProvider">>,
+		Partial<Pick<RemoteControl, "setControlWindowProvider" | "setInputActionProvider">>,
 	overrides: Partial<AgentControlDeps> = {},
 ) {
 	const deps = { ...defaultDeps(), ...overrides };
 	const { input, platform } = deps;
 	const webWindows = new Map<number, boolean>();
-	let busy = false;
+	let current: { action: string; startedAt: number; cancel: (() => void) | null } | null = null;
 	let controlWindowId: number | null = null;
 	remote.setControlWindowProvider?.(() => controlWindowId);
+	remote.setInputActionProvider?.(() => runningAction());
 	let lastInput = 0;
 	let policy: InputPolicy = { autoResumeAfterMs: 2000, onTakeover: "abort" };
 
@@ -823,14 +850,48 @@ export function createAgentControl(
 	const request: Post = async (command) =>
 		fromHelper(command.cmd, await input.request(toHelper(command))) as never;
 
-	async function exclusive<T>(run: () => Promise<T>) {
-		if (busy) throw new Error("Another action is still running.");
-		busy = true;
+	function runningAction(): RunningAction | null {
+		return current
+			? { action: current.action, forMs: Math.round(deps.now() - current.startedAt) }
+			: null;
+	}
+
+	async function exclusive<T>(action: string, run: () => Promise<T>) {
+		const running = runningAction();
+		if (running) {
+			throw new Error(
+				`Another action is still running. ${running.action} has been going for ` +
+					`${Math.round(running.forMs / 1000)} s and keeps running even if your call ` +
+					"timed out. Call get_status to watch it, or cancel_action to stop it.",
+			);
+		}
+		current = { action, startedAt: deps.now(), cancel: null };
 		try {
 			return await run();
 		} finally {
-			busy = false;
+			current = null;
 		}
+	}
+
+	function onCancel(cancel: (() => void) | null) {
+		if (current) current.cancel = cancel;
+	}
+
+	function cancelAction(): CancelResult {
+		if (!current) return { cancelled: false, note: NOTHING_TO_CANCEL };
+		const { action, cancel } = current;
+		const forMs = Math.round(deps.now() - current.startedAt);
+		if (!cancel) {
+			return {
+				cancelled: false,
+				action,
+				forMs,
+				note: `${action} is already stopping, or cannot be interrupted, so it will finish on its own. Poll get_status until input.running is null.`,
+			};
+		}
+		current.cancel = null;
+		cancel();
+		return { cancelled: true, action, forMs };
 	}
 
 	function toGlobal({ frame }: TargetWindow, { x, y }: { x: number; y: number }) {
@@ -1395,7 +1456,11 @@ export function createAgentControl(
 		const timeoutMs = step.timeoutMs ?? WAIT_FOR_MS;
 		if (step.settled) {
 			const { frame } = await requireTarget();
-			await deps.waitForStill(frame, { timeoutMs, signal: run.signal });
+			await deps.waitForStill(frame, {
+				timeoutMs,
+				signal: run.signal,
+				...(step.quietMs === undefined ? {} : { quietMs: step.quietMs }),
+			});
 			return;
 		}
 		const deadline = deps.now() + timeoutMs;
@@ -1521,24 +1586,33 @@ export function createAgentControl(
 		}
 		let stopped = false;
 		let tookOver = false;
+		let cancelled = false;
 		let paused = false;
 		let cause: string | undefined;
 		const mode = { ...policy };
 		let controller = new AbortController();
-		const takeover = () =>
+		const stopReason = () =>
 			new Error(
-				cause ? `${TAKEOVER_MESSAGE} Recordly noticed that ${cause}.` : TAKEOVER_MESSAGE,
+				cancelled
+					? CANCELLED_MESSAGE
+					: `${TAKEOVER_MESSAGE}${cause ? ` Recordly noticed that ${cause}.` : ""}${TAKEOVER_TAIL}`,
 			);
 		let abort!: () => void;
 		const freshAbort = () => {
 			const promise = new Promise<never>((_, reject) => {
-				abort = () => reject(takeover());
+				abort = () => reject(stopReason());
 			});
 			promise.catch(() => undefined);
 			return promise;
 		};
+		const stop = () => {
+			stopped = true;
+			abort();
+			controller.abort();
+		};
 		const onUserInput = (event: AgentEvent) => {
 			lastInput = deps.now();
+			if (mode.onTakeover === "ignore" && !event.escape) return;
 			if (mode.onTakeover === "pause" && !event.escape && !tookOver) {
 				if (paused) return;
 				paused = true;
@@ -1547,12 +1621,10 @@ export function createAgentControl(
 					cause = event.escape ? "Esc was pressed" : TAKEOVER_CAUSES[event.kind];
 				tookOver = true;
 			}
-			stopped = true;
-			abort();
-			controller.abort();
+			stop();
 		};
 		const post: Post = (command) => {
-			if (stopped) return Promise.reject(takeover());
+			if (stopped) return Promise.reject(stopReason());
 			return request(command);
 		};
 		const run: Run = {
@@ -1564,24 +1636,22 @@ export function createAgentControl(
 			deadline,
 			safeRegion,
 		};
+		const tolerancePx =
+			mode.onTakeover === "ignore" ? Number.MAX_SAFE_INTEGER : mode.tolerancePx;
 		const armHelper = () =>
-			request(
-				mode.tolerancePx === undefined
-					? { cmd: "arm" }
-					: { cmd: "arm", tolerancePx: mode.tolerancePx },
-			);
+			request(tolerancePx === undefined ? { cmd: "arm" } : { cmd: "arm", tolerancePx });
 		const resume = async () => {
 			const endPause = beginSpan("wait", "wait");
 			try {
 				for (;;) {
-					if (tookOver) throw takeover();
+					if (tookOver) throw stopReason();
 					checkDeadline(run);
 					const quiet = deps.now() - lastInput;
 					if (quiet >= mode.autoResumeAfterMs) break;
 					await deps.sleep(Math.min(POLL_MS, mode.autoResumeAfterMs - quiet));
 				}
 				await armHelper();
-				if (tookOver) throw takeover();
+				if (tookOver) throw stopReason();
 			} finally {
 				endPause();
 			}
@@ -1594,13 +1664,18 @@ export function createAgentControl(
 		let armed = false;
 		deps.setHudPassthrough(true);
 		input.events.on("user-input", onUserInput);
+		onCancel(() => {
+			cancelled = true;
+			tookOver = true;
+			stop();
+		});
 		try {
 			await armHelper();
 			armed = true;
 			for (const [index, step] of steps.entries()) {
 				for (;;) {
 					try {
-						if (stopped) throw takeover();
+						if (stopped) throw stopReason();
 						checkDeadline(run);
 						await Promise.race([runStep(step, run), run.aborted]);
 						if (readsAfter(steps, index)) {
@@ -1618,17 +1693,20 @@ export function createAgentControl(
 							try {
 								await resume();
 							} catch (resumeError) {
+								if (tookOver) throw stopReason();
 								throw stepError(index, step, resumeError);
 							}
 							continue;
 						}
-						throw stepError(index, step, tookOver || userInput ? takeover() : error);
+						if (tookOver || userInput) throw stopReason();
+						throw stepError(index, step, error);
 					}
 				}
 			}
 		} finally {
 			stopped = true;
 			controller.abort();
+			onCancel(null);
 			input.events.off("user-input", onUserInput);
 			if (armed) await request({ cmd: "disarm" }).catch(() => undefined);
 			deps.setHudPassthrough(false);
@@ -1719,7 +1797,10 @@ export function createAgentControl(
 		return { dryRun: report, page: await pageSignature(request, window) };
 	}
 
-	async function perform(steps: AgentStep[], options: PerformOptions = {}) {
+	async function perform(
+		steps: AgentStep[],
+		options: PerformOptions = {},
+	): Promise<PerformResult | PerformPending> {
 		const pace = PACES.get(options.pace ?? "normal");
 		if (!pace) throw new Error('pace must be "brisk", "normal" or "relaxed".');
 		if (options.then !== undefined && options.then !== "elements") {
@@ -1731,7 +1812,7 @@ export function createAgentControl(
 			steps.forEach((step, index) => checkTargetsRequired(index, step));
 		}
 		const safeRegion = options.safeRegion ?? policy.safeRegion ?? undefined;
-		return exclusive(async () => {
+		const work = exclusive("perform", async () => {
 			const startedAt = deps.now();
 			const result: PerformResult = { performed: 0, durationMs: 0 };
 			if (options.dryRun) {
@@ -1755,6 +1836,25 @@ export function createAgentControl(
 			}
 			return result;
 		});
+		work.catch(() => undefined);
+		if (options.dryRun) return await work;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const detached = new Promise<null>((resolve) => {
+			timer = setTimeout(() => resolve(null), deps.performWaitMs);
+			timer.unref?.();
+		});
+		try {
+			const done = await Promise.race([work.then((data) => ({ data })), detached]);
+			if (done) return done.data;
+			const seconds = Math.round(deps.performWaitMs / 1000);
+			return {
+				status: "still-running",
+				action: "perform",
+				note: `The steps are still running after ${seconds} s and keep running on their own. Do NOT call perform again — the steps would be replayed on top of each other. Poll get_status until input.running is null, then take a screenshot to see where the scene ended, because this call can no longer tell you whether it finished or was stopped. Call cancel_action to stop the steps now.`,
+			};
+		} finally {
+			clearTimeout(timer);
+		}
 	}
 
 	async function listControls(query: { text?: string; role?: string } = {}, limit = FIND_LIMIT) {
@@ -1854,12 +1954,16 @@ export function createAgentControl(
 	}
 
 	async function selectWindow(windowId: number) {
-		if (platform.recordsScreen(deps.getSelectedSource())) {
+		const selected = deps.getSelectedSource();
+		if (platform.recordsScreen(selected)) {
 			return selectControlWindow(String(windowId));
+		}
+		if (selected?.id && parseWindowId(selected.id) === windowId) {
+			return { id: selected.id, name: selected.name };
 		}
 		const listed = await remote.listSources();
 		const match = listed.find((source) => parseWindowId(source.id) === windowId);
-		if (!match) throw new Error(BROWSER_NOT_FOUND);
+		if (!match) throw new Error(BROWSER_NOT_LISTED);
 		return remote.selectSource({ id: match.id });
 	}
 
@@ -1879,17 +1983,18 @@ export function createAgentControl(
 				"open_url cannot switch windows while recording. Navigate inside the page with perform instead.",
 			);
 		}
-		return exclusive(() => openInBrowser(parsed.href));
+		return exclusive("open_url", () => openInBrowser(parsed.href));
 	}
 
 	async function openInBrowser(url: string) {
 		const browser = deps.getBrowserName(url);
+		const driven = parseWindowId(deps.getSelectedSource()?.id ?? undefined) ?? controlWindowId;
 		const isBrowser = (window: AgentWindow | null): window is AgentWindow =>
 			window !== null &&
 			!platform.isOwnWindow(window) &&
-			(normalizeAppName(browser)
-				? platform.sameApp(browser, window.appName)
-				: isKnownBrowser(window.bundleId));
+			(window.windowId === driven ||
+				(Boolean(normalizeAppName(browser)) && platform.sameApp(browser, window.appName)) ||
+				isKnownBrowser(window.bundleId));
 		await deps.openExternal(url);
 		let candidate: number | null = null;
 		for (let waited = 0; waited < OPEN_URL_WAIT_MS; waited += POLL_MS) {
@@ -1943,7 +2048,7 @@ export function createAgentControl(
 			...policy,
 			...Object.fromEntries(Object.entries(next).filter(([, v]) => v !== undefined)),
 		};
-		return policy;
+		return policy.onTakeover === "ignore" ? { ...policy, note: IGNORING_TAKEOVER } : policy;
 	}
 
 	async function windowFor(source?: string): Promise<TargetWindow> {
@@ -1984,7 +2089,7 @@ export function createAgentControl(
 				`The rectangle (x ${x}, y ${y}, ${width} × ${height}) is not on any display, so the window would be unreachable. Pick a rectangle that overlaps a display.`,
 			);
 		}
-		return exclusive(async () => {
+		return exclusive("set_window_bounds", async () => {
 			const target = await windowFor(args.source);
 			const { frame } = await request({
 				cmd: "set_bounds",
@@ -1994,6 +2099,14 @@ export function createAgentControl(
 				bounds,
 			});
 			const applied = frame ?? bounds;
+			const unchanged =
+				frame !== undefined &&
+				[
+					applied.x - target.frame.x,
+					applied.y - target.frame.y,
+					applied.width - target.frame.width,
+					applied.height - target.frame.height,
+				].every((delta) => Math.abs(delta) <= 2);
 			const raiseFailed = args.raise
 				? await raise({ ...target, frame: applied }).then(
 						() => null,
@@ -2007,11 +2120,15 @@ export function createAgentControl(
 				applied.width - width,
 				applied.height - height,
 			].some((delta) => Math.abs(delta) > 2);
+			const refused = adjusted && unchanged;
 			const note = [
 				frame
 					? undefined
 					: "Recordly could not read the window's rectangle back, so frame is the one it asked for, not a measured result.",
-				adjusted
+				refused
+					? "The bounds were NOT applied: the window's rectangle is exactly what it was before. A maximized or full-screen window does this, and so does an app that refuses to be resized. Unmaximize the window (or leave full screen) and call set_window_bounds again."
+					: undefined,
+				adjusted && !refused
 					? "The app or window manager adjusted the rectangle (minimum size or screen edge); frame is what it ended up as."
 					: undefined,
 				raiseFailed
@@ -2021,6 +2138,7 @@ export function createAgentControl(
 			return {
 				windowId: target.windowId,
 				frame: applied,
+				applied: !refused,
 				adjusted,
 				...(note.length > 0 ? { note: note.join(" ") } : {}),
 			};
@@ -2029,7 +2147,7 @@ export function createAgentControl(
 
 	async function undoLastInput() {
 		await preflightInput();
-		return exclusive(async () => {
+		return exclusive("undo_last_input", async () => {
 			const { window } = await request({ cmd: "frontmost_window" });
 			if (window && platform.isOwnWindow(window)) {
 				throw new Error(
@@ -2055,6 +2173,8 @@ export function createAgentControl(
 		setWindowBounds,
 		undoLastInput,
 		setInputPolicy,
+		runningAction,
+		cancelAction,
 		perform,
 		findElements,
 		screenshot,

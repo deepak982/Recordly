@@ -23,6 +23,7 @@ import { resetAgentActivity, snapshotAgentActivity } from "./agentActivity";
 import {
 	type AgentControlDeps,
 	type AgentStep,
+	CANCELLED_MESSAGE,
 	createAgentControl,
 	TAKEOVER_MESSAGE,
 } from "./agentControl";
@@ -975,7 +976,9 @@ describe("openUrl", () => {
 
 	it("gives up after about 5 s without a browser window", async () => {
 		const { agent, remote } = setup({}, { frontmost_window: () => ({ window: null }) });
-		await expect(agent.openUrl("https://example.com")).rejects.toThrow(/could not find/);
+		await expect(agent.openUrl("https://example.com")).rejects.toThrow(
+			/no browser window came to the front/,
+		);
 		expect(remote.selectSource).not.toHaveBeenCalled();
 	});
 });
@@ -1114,7 +1117,8 @@ describe("targets", () => {
 		await flush();
 		expect(finds).toBe(3);
 		events.emit("user-input", { event: "user-input", kind: "move", escape: false });
-		await expect(running).rejects.toThrow(`Step 1 (click): ${TAKEOVER_MESSAGE}`);
+		await expect(running).rejects.toThrow(TAKEOVER_MESSAGE);
+		await expect(running).rejects.not.toThrow("Step 1 (click)");
 		expect(snapshotAgentActivity(clock.ms + 5_000).spans).toEqual([
 			{ kind: "wait", action: "wait", startMs: 1_000, endMs: 1_250 },
 		]);
@@ -1447,7 +1451,8 @@ describe("waitFor", () => {
 		const running = agent.perform([{ action: "waitFor", text: "Saved" }]);
 		await flush();
 		events.emit("user-input", { event: "user-input", kind: "move", escape: false });
-		await expect(running).rejects.toThrow(`Step 1 (waitFor): ${TAKEOVER_MESSAGE}`);
+		await expect(running).rejects.toThrow(TAKEOVER_MESSAGE);
+		await expect(running).rejects.not.toThrow("Step 1 (waitFor)");
 		const finds = count("find");
 		await flush();
 		expect(count("find")).toBe(finds);
@@ -3215,5 +3220,321 @@ describe("recording a whole display", () => {
 		expect(provider()).toBeNull();
 		await agent.chooseWindow("window:7:0");
 		expect(provider()).toBe(7);
+	});
+});
+
+describe("takeover detection off", () => {
+	const pointer = { event: "user-input", kind: "move", escape: false } as const;
+	const scroll = { event: "user-input", kind: "scroll", escape: false } as const;
+	const esc = { event: "user-input", kind: "key", escape: true } as const;
+
+	beforeEach(() => {
+		clock.ms = 1_000;
+		resetAgentActivity();
+	});
+
+	it("says plainly what ignore does and does not cover", () => {
+		const { agent } = setup();
+		expect(agent.setInputPolicy({ onTakeover: "ignore" })).toMatchObject({
+			onTakeover: "ignore",
+			note: expect.stringContaining("Takeover detection is off"),
+		});
+		expect(agent.setInputPolicy({ onTakeover: "abort" })).not.toHaveProperty("note");
+	});
+
+	it("keeps going through movement and scrolling, and arms with no drift budget", async () => {
+		let release!: () => void;
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const { agent, events, commands, count } = setup(
+			{ sleep: (ms) => (ms === 5000 ? held : Promise.resolve()) },
+			{ click: tick },
+		);
+		agent.setInputPolicy({ onTakeover: "ignore" });
+		const running = agent.perform([
+			{ action: "wait", ms: 5000 },
+			{ action: "click", x: 10, y: 10 },
+		]);
+		await flush();
+		events.emit("user-input", pointer);
+		events.emit("user-input", scroll);
+		release();
+		await expect(running).resolves.toEqual({ performed: 2, durationMs: expect.any(Number) });
+		expect(count("click")).toBe(1);
+		expect(count("disarm")).toBe(1);
+		expect(commands.find((c) => c.cmd === "arm")).toEqual({
+			cmd: "arm",
+			tolerancePx: Number.MAX_SAFE_INTEGER,
+		});
+	});
+
+	it("still aborts on Esc", async () => {
+		const { agent, events, count } = setup({ sleep: () => new Promise(() => undefined) });
+		agent.setInputPolicy({ onTakeover: "ignore" });
+		const running = agent.perform([{ action: "wait", ms: 5000 }]);
+		await flush();
+		events.emit("user-input", esc);
+		await expect(running).rejects.toThrow("Esc was pressed");
+		expect(count("disarm")).toBe(1);
+	});
+
+	it("reports a takeover as the end of the scene, not of the recording", async () => {
+		const { agent, events } = setup({ sleep: () => new Promise(() => undefined) });
+		const running = agent.perform([{ action: "wait", ms: 5000 }]);
+		await flush();
+		events.emit("user-input", pointer);
+		await expect(running).rejects.toThrow("the recording is still running");
+		await expect(running).rejects.not.toThrow("Step 1");
+	});
+});
+
+describe("the in-flight action and cancel_action", () => {
+	beforeEach(() => {
+		clock.ms = 1_000;
+		resetAgentActivity();
+	});
+
+	const hang = () =>
+		setup({ sleep: (ms) => (ms === 5000 ? new Promise(() => undefined) : Promise.resolve()) });
+
+	it("hands the remote a provider that reports the running action", async () => {
+		let provider: (() => { action: string; forMs: number } | null) | undefined;
+		const remote = {
+			getStatus: () => ({ state: "idle" }),
+			setInputActionProvider: (next: () => { action: string; forMs: number } | null) => {
+				provider = next;
+			},
+		};
+		const { deps } = setup({ sleep: () => new Promise(() => undefined) });
+		const agent = createAgentControl(remote as never, deps);
+		expect(provider?.()).toBeNull();
+		const running = agent.perform([{ action: "wait", ms: 5000 }]);
+		await flush();
+		expect(provider?.()).toEqual({ action: "perform", forMs: 0 });
+		expect(agent.cancelAction()).toEqual({ cancelled: true, action: "perform", forMs: 0 });
+		await expect(running).rejects.toThrow(CANCELLED_MESSAGE);
+		expect(provider?.()).toBeNull();
+	});
+
+	it("says there was nothing to cancel when nothing is running", () => {
+		const { agent } = setup();
+		expect(agent.runningAction()).toBeNull();
+		expect(agent.cancelAction()).toEqual({
+			cancelled: false,
+			note: expect.stringContaining("nothing to cancel"),
+		});
+	});
+
+	it("cancels a running sequence, releases the lock and disarms", async () => {
+		const { agent, count } = hang();
+		const running = agent.perform([{ action: "wait", ms: 5000 }]);
+		await flush();
+		expect(agent.cancelAction().cancelled).toBe(true);
+		await expect(running).rejects.toThrow(CANCELLED_MESSAGE);
+		expect(count("disarm")).toBe(1);
+		expect(agent.runningAction()).toBeNull();
+		await expect(agent.perform([{ action: "wait", ms: 1 }])).resolves.toEqual({
+			performed: 1,
+			durationMs: 0,
+		});
+	});
+
+	it("says a second cancel has nothing left to do", async () => {
+		const { agent } = hang();
+		const running = agent.perform([{ action: "wait", ms: 5000 }]);
+		await flush();
+		expect(agent.cancelAction().cancelled).toBe(true);
+		expect(agent.cancelAction()).toMatchObject({
+			cancelled: false,
+			action: "perform",
+			note: expect.stringContaining("already stopping"),
+		});
+		await expect(running).rejects.toThrow(CANCELLED_MESSAGE);
+	});
+
+	it("names the running action and the way out when a second call collides", async () => {
+		const { agent } = hang();
+		const running = agent.perform([{ action: "wait", ms: 5000 }]);
+		await flush();
+		await expect(agent.perform([{ action: "wait", ms: 1 }])).rejects.toThrow(
+			/Another action is still running\. perform has been going for 0 s.*cancel_action/s,
+		);
+		agent.cancelAction();
+		await expect(running).rejects.toThrow(CANCELLED_MESSAGE);
+	});
+
+	it("hands back a pollable handle instead of hanging past its wait budget", async () => {
+		const { agent } = setup({
+			sleep: () => new Promise(() => undefined),
+			performWaitMs: 0,
+		});
+		await expect(agent.perform([{ action: "wait", ms: 5000 }])).resolves.toEqual({
+			status: "still-running",
+			action: "perform",
+			note: expect.stringContaining("Do NOT call perform again"),
+		});
+		expect(agent.runningAction()).toEqual({ action: "perform", forMs: 0 });
+		const stopped = agent.cancelAction();
+		expect(stopped.cancelled).toBe(true);
+		await flush();
+		expect(agent.runningAction()).toBeNull();
+	});
+
+	it("returns normally when the steps finish inside the budget", async () => {
+		const { agent } = setup({ performWaitMs: 60_000 });
+		await expect(agent.perform([{ action: "wait", ms: 1 }])).resolves.toEqual({
+			performed: 1,
+			durationMs: 1,
+		});
+		expect(agent.runningAction()).toBeNull();
+	});
+});
+
+describe("waitFor settled quiet period", () => {
+	beforeEach(() => {
+		clock.ms = 1_000;
+		resetAgentActivity();
+	});
+
+	it("passes quietMs through to the stillness detector, and leaves it out when unset", async () => {
+		const { agent, deps } = setup();
+		await agent.perform([{ action: "waitFor", settled: true, quietMs: 3_000 }]);
+		expect(deps.waitForStill).toHaveBeenCalledWith(FRAME, {
+			timeoutMs: 10_000,
+			quietMs: 3_000,
+			signal: expect.any(AbortSignal),
+		});
+		const plain = setup();
+		await plain.agent.perform([{ action: "waitFor", settled: true }]);
+		expect(plain.deps.waitForStill).toHaveBeenCalledWith(FRAME, {
+			timeoutMs: 10_000,
+			signal: expect.any(AbortSignal),
+		});
+	});
+});
+
+describe("open_url window lookup", () => {
+	beforeEach(() => {
+		clock.ms = 1_000;
+		resetAgentActivity();
+	});
+
+	it("accepts the already-selected window once it holds the front, whatever the app is called", async () => {
+		const odd = {
+			...CHROME,
+			appName: "Orion RC",
+			bundleId: "com.kagi.kagimacOS",
+			title: "Example",
+		};
+		const { agent, remote } = setup(
+			{ getBrowserName: () => "Safari" },
+			{ frontmost_window: () => ({ window: odd }) },
+		);
+		await expect(agent.openUrl("https://example.com")).resolves.toEqual({
+			url: "https://example.com/",
+			source: { id: "window:7:0", name: "Docs" },
+		});
+		expect(remote.listSources).not.toHaveBeenCalled();
+		expect(remote.selectSource).not.toHaveBeenCalled();
+	});
+
+	it("says so plainly when the browser window in front is not in list_sources", async () => {
+		const frontmost = [
+			{ ...CHROME, windowId: 11 },
+			{ ...CHROME, windowId: 11 },
+		];
+		const { agent } = setup(
+			{},
+			{ frontmost_window: () => ({ window: frontmost.shift() ?? null }) },
+		);
+		await expect(agent.openUrl("https://example.com")).rejects.toThrow(/not in list_sources/);
+	});
+
+	it("accepts a known browser even when it is not the default handler", async () => {
+		const frontmost = [
+			{ ...CHROME, windowId: 9 },
+			{ ...CHROME, windowId: 9 },
+		];
+		const { agent, remote } = setup(
+			{ getBrowserName: () => "Safari" },
+			{ frontmost_window: () => ({ window: frontmost.shift() ?? null }) },
+		);
+		await agent.openUrl("https://example.com");
+		expect(remote.selectSource).toHaveBeenCalledWith({ id: "window:9:0" });
+	});
+
+	it("still refuses to claim success when the window in front is not a browser", async () => {
+		const terminal = {
+			...CHROME,
+			windowId: 3,
+			appName: "Terminal",
+			bundleId: "com.apple.Terminal",
+		};
+		const { agent, remote } = setup(
+			{ getBrowserName: () => "", getSelectedSource: () => null },
+			{ frontmost_window: () => ({ window: terminal }) },
+		);
+		await expect(agent.openUrl("https://example.com")).rejects.toThrow(
+			/no browser window came to the front/,
+		);
+		expect(remote.selectSource).not.toHaveBeenCalled();
+	});
+
+	it("still refuses Recordly's own window even when it is the selected source", async () => {
+		const { agent } = setup(
+			{ getSelectedSource: () => ({ id: "window:7:0", name: "Recordly", pid: 1 }) },
+			{ frontmost_window: () => ({ window: { ...CHROME, pid: 1 } }) },
+		);
+		await expect(agent.openUrl("https://example.com")).rejects.toThrow(
+			/no browser window came to the front/,
+		);
+	});
+});
+
+describe("set_window_bounds on a window that will not move", () => {
+	const BOUNDS = { x: 40, y: 60, width: 1000, height: 800 };
+
+	beforeEach(() => {
+		clock.ms = 1_000;
+		resetAgentActivity();
+	});
+
+	it("says the bounds were not applied when the rectangle did not change", async () => {
+		const { agent } = setup({}, { set_bounds: () => ({ frame: FRAME }) });
+		const result = await agent.setWindowBounds(BOUNDS);
+		expect(result).toMatchObject({ frame: FRAME, applied: false, adjusted: true });
+		expect(result.note).toMatch(/bounds were NOT applied/);
+		expect(result.note).toMatch(/maximized or full-screen/);
+	});
+
+	it("reports an adjusted rectangle as applied when the window really moved", async () => {
+		const { agent } = setup({}, { set_bounds: () => ({ frame: { ...BOUNDS, width: 300 } }) });
+		const result = await agent.setWindowBounds(BOUNDS);
+		expect(result).toMatchObject({ applied: true, adjusted: true });
+		expect(result.note).toMatch(/adjusted the rectangle/);
+		expect(result.note).not.toMatch(/NOT applied/);
+	});
+
+	it("treats a window already at the asked-for rectangle as applied", async () => {
+		const { agent } = setup({}, { set_bounds: () => ({ frame: FRAME }) });
+		const result = await agent.setWindowBounds(FRAME);
+		expect(result).toMatchObject({ applied: true, adjusted: false });
+		expect(result.note).toBeUndefined();
+	});
+
+	it("accepts bounds larger than the display and refuses bounds off every display", async () => {
+		const { agent } = setup(
+			{},
+			{ set_bounds: (c) => ({ frame: (c as { bounds: unknown }).bounds }) },
+		);
+		const huge = { x: 0, y: 0, width: 9000, height: 9000 };
+		await expect(agent.setWindowBounds(huge)).resolves.toMatchObject({
+			applied: true,
+			frame: huge,
+		});
+		await expect(agent.setWindowBounds({ ...BOUNDS, y: -9000 })).rejects.toThrow(
+			/not on any display/,
+		);
 	});
 });

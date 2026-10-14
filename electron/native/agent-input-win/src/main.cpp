@@ -42,7 +42,7 @@ constexpr int kHeadingLevel9 = 80059;
 constexpr int kHeadingRole = -1;
 constexpr int kMatchSubstring = 0x2;  // PropertyConditionFlags_MatchSubstring, missing from older SDK headers
 
-double driftLimit = 8;
+double driftLimit = 40;
 
 struct Failure {
 	std::string message;
@@ -1834,7 +1834,7 @@ int main() {
 	if (!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) SetProcessDPIAware();
 	CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 	timeBeginPeriod(1);
-	driftLimit = 8.0 * GetDpiForSystem() / 96.0;  // 8 points, like macOS; ponytail: primary-monitor DPI only
+	driftLimit = 40.0 * GetDpiForSystem() / 96.0;  // 40 points, like macOS; ponytail: primary-monitor DPI only
 	stdoutHandle = GetStdHandle(STD_OUTPUT_HANDLE);
 	SetConsoleCtrlHandler(consoleClosed, TRUE);
 

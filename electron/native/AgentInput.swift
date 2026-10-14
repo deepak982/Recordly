@@ -5,7 +5,7 @@ import CoreGraphics
 import Foundation
 
 let agentTag: Int64 = 0x52434459
-let defaultDriftLimit = 8.0
+let defaultDriftLimit = 40.0
 let driftWindow: TimeInterval = 1
 
 struct Failure: Error {
@@ -832,6 +832,23 @@ func axValue(_ type: AXValueType, _ value: UnsafeRawPointer) -> AXValue? {
 	AXValueCreate(type, value)
 }
 
+func settleFrame(_ window: AXUIElement) {
+	let start = windowFrame(window)
+	let deadline = ProcessInfo.processInfo.systemUptime + 1
+	while windowFrame(window) == start, ProcessInfo.processInfo.systemUptime < deadline {
+		usleep(100_000)
+	}
+}
+
+func unzoom(_ window: AXUIElement) -> Bool {
+	guard let value = attribute(window, kAXZoomButtonAttribute), CFGetTypeID(value) == AXUIElementGetTypeID(),
+		AXUIElementPerformAction(value as! AXUIElement, kAXPressAction as CFString) == .success else {
+		return false
+	}
+	settleFrame(window)
+	return true
+}
+
 // Moves and resizes one window through AX. Position is written twice around the size because a
 // window that grows past the edge of its display is clamped back, and the second write corrects it.
 func setBounds(_ request: [String: Any]) throws -> [String: Any] {
@@ -855,9 +872,22 @@ func setBounds(_ request: [String: Any]) throws -> [String: Any] {
 	if (attribute(window, kAXMinimizedAttribute) as? Bool) == true {
 		AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
 	}
-	let moved = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, position)
-	let resized = AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, size)
-	AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, position)
+	if (attribute(window, "AXFullScreen") as? Bool) == true {
+		AXUIElementSetAttributeValue(window, "AXFullScreen" as CFString, kCFBooleanFalse)
+		settleFrame(window)
+	}
+	let write = { () -> (AXError, AXError) in
+		let moved = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, position)
+		let resized = AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, size)
+		AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, position)
+		return (moved, resized)
+	}
+	let before = windowFrame(window)
+	var (moved, resized) = write()
+	if let before, windowFrame(window) == before, before.width >= extent.width, before.height >= extent.height,
+		unzoom(window) {
+		(moved, resized) = write()
+	}
 	guard moved == .success || resized == .success else {
 		if (attribute(window, "AXFullScreen") as? Bool) == true {
 			throw Failure("this window is full screen, so it cannot be moved or resized. Leave full screen first")

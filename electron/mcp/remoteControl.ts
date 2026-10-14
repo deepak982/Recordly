@@ -278,6 +278,7 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 	const deps = { ...defaultDeps(), ...overrides };
 	let recording = false;
 	let controlWindowId: () => number | null = () => null;
+	let inputAction: () => { action: string; forMs: number } | null = () => null;
 	let recordingHud: Hud | null = null;
 	let closingHud: Hud | null = null;
 	let closingSince = 0;
@@ -516,6 +517,7 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 			state: getState(),
 			selectedSource: source ? { id: source.id ?? null, name: source.name } : null,
 			drivenWindow: drivenWindow(),
+			input: { running: inputAction() },
 			lastRecordingPath: deps.getLastVideoPath(),
 			permissions: deps.getPermissions(),
 		};
@@ -524,6 +526,9 @@ export function createRemoteControl(overrides: Partial<RemoteControlDeps> = {}) 
 	return {
 		setControlWindowProvider(provider: () => number | null) {
 			controlWindowId = provider;
+		},
+		setInputActionProvider(provider: () => { action: string; forMs: number } | null) {
+			inputAction = provider;
 		},
 		onRecordingStateChange(next: boolean) {
 			if (next) {

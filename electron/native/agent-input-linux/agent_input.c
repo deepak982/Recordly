@@ -21,7 +21,7 @@
 #include <unistd.h>
 
 #define WAYLAND_MESSAGE "Mouse and keyboard control needs an X11 session on Linux; Wayland is not supported yet."
-#define DRIFT_LIMIT 8.0
+#define DRIFT_LIMIT 40.0
 #define DRIFT_WINDOW 1.0
 #define EXPECT_SECONDS 2.0
 #define PIXELS_PER_NOTCH 50.0
