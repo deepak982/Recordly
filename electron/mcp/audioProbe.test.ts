@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("../ipc/ffmpeg/binary", () => ({ getFfmpegBinaryPath: () => "/usr/bin/true" }));
+vi.mock("../ipc/ffmpeg/binary", () => ({ getFfmpegBinaryPath: () => process.execPath }));
 
 const { probeAudioFile } = await import("./audioProbe");
 
