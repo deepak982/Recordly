@@ -66,6 +66,43 @@ beforeEach(() => {
 });
 
 describe("getNativeMacWindowSources", () => {
+	it("spawns one helper for overlapping calls instead of one per call", async () => {
+		const original = mocks.execFile.getMockImplementation();
+		const pending: Array<() => void> = [];
+		mocks.execFile.mockImplementation((_command, args, _options, callback) => {
+			pending.push(() =>
+				callback(null, {
+					stdout: args.includes("--all-spaces")
+						? mocks.lists.allSpaces
+						: mocks.lists.onScreen,
+				}),
+			);
+		});
+		try {
+			const overlapping = Array.from({ length: 20 }, () =>
+				getNativeMacWindowSources({ maxAgeMs: 0 }),
+			);
+			const crossSpaces = getNativeMacWindowSources({ maxAgeMs: 0, allSpaces: true });
+			await vi.waitFor(() => expect(pending).toHaveLength(2));
+
+			for (const settle of pending) settle();
+			for (const entries of await Promise.all(overlapping)) {
+				expect(entries).toEqual([VISIBLE]);
+			}
+			await expect(crossSpaces).resolves.toEqual([VISIBLE, HIDDEN]);
+			expect(mocks.execFile).toHaveBeenCalledTimes(2);
+		} finally {
+			if (original) mocks.execFile.mockImplementation(original);
+		}
+		await getNativeMacWindowSources({ maxAgeMs: 0 });
+		expect(mocks.execFile).toHaveBeenCalledTimes(3);
+	});
+
+	it("gives the helper five seconds, not thirty", async () => {
+		await getNativeMacWindowSources({ maxAgeMs: 0 });
+		expect(mocks.execFile.mock.calls[0][2]).toMatchObject({ timeout: 5000 });
+	});
+
 	it("keeps all-spaces results out of the HUD's on-screen cache and never caches them", async () => {
 		await expect(getNativeMacWindowSources()).resolves.toEqual([VISIBLE]);
 		await expect(getNativeMacWindowSources({ allSpaces: true })).resolves.toEqual([

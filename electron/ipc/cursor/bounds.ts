@@ -20,6 +20,8 @@ import { resolveWindowsWindowBounds } from "../windowsWindowControl";
 
 const execFileAsync = promisify(execFile);
 
+const inFlightWindowSources = new Map<boolean, Promise<NativeMacWindowSource[]>>();
+
 export async function getNativeMacWindowSources(options?: {
 	maxAgeMs?: number;
 	allSpaces?: boolean;
@@ -39,10 +41,23 @@ export async function getNativeMacWindowSources(options?: {
 		return cachedNativeMacWindowSources;
 	}
 
+	const running = inFlightWindowSources.get(allSpaces);
+	if (running) {
+		return running;
+	}
+
+	const started = listNativeMacWindowSources(allSpaces, now).finally(() => {
+		inFlightWindowSources.delete(allSpaces);
+	});
+	inFlightWindowSources.set(allSpaces, started);
+	return started;
+}
+
+async function listNativeMacWindowSources(allSpaces: boolean, now: number) {
 	try {
 		const binaryPath = await ensureNativeWindowListBinary();
 		const { stdout } = await execFileAsync(binaryPath, allSpaces ? ["--all-spaces"] : [], {
-			timeout: 30000,
+			timeout: 5000,
 			maxBuffer: 10 * 1024 * 1024,
 		});
 
