@@ -5,6 +5,7 @@ import type { HudOverlayOptions, HudOverlayState } from "../windows";
 import type { AgentControl, AgentStep, PerformOptions } from "./agentControl";
 import type { AgentSupport } from "./agentPlatform";
 import { AGENT_KEY_ALIASES, AGENT_KEY_NAMES, AGENT_MODIFIER_ALIASES } from "./agentProtocol";
+import { readCaptureHealth } from "./captureHealth";
 import { CLIP_DETAILS, projectEditorState, STATE_SECTIONS } from "./editorStateView";
 import type { OpenFileTools } from "./openFile";
 import { MAX_COUNTDOWN_SECONDS, type RemoteControl } from "./remoteControl";
@@ -671,15 +672,20 @@ export function buildRecordlyMcpServer(
 				"captured source is itself that window, and null means a screen is recorded with no " +
 				"window chosen yet. input.running is { action, forMs } while a mouse and keyboard " +
 				"sequence is still going and null otherwise; it stays set after your own call timed " +
-				"out, because the steps carry on without it.",
+				"out, because the steps carry on without it. health appears only when the machine is " +
+				"too busy or too short of memory to record at its normal speed; when it is there, " +
+				"raise your timeouts or ask the user to close what they are not using.",
 			annotations: { readOnlyHint: true },
 		},
-		async () =>
-			textResult({
+		async () => {
+			const health = await readCaptureHealth();
+			return textResult({
 				...remote.getStatus(),
 				export: remoteExport.getStatus(),
 				editor: { running: editor.runningOp() },
-			}),
+				...(health ? { health } : {}),
+			});
+		},
 	);
 
 	server.registerTool(
@@ -784,9 +790,12 @@ export function buildRecordlyMcpServer(
 				);
 			}
 			capture.rememberScenes(args.scenes);
-			return textResult(
-				await remote.startRecording({ ...args, hideCursor: capture.getHideCursor() }),
-			);
+			const started = await remote.startRecording({
+				...args,
+				hideCursor: capture.getHideCursor(),
+			});
+			const health = await readCaptureHealth();
+			return textResult(health ? { ...started, health } : started);
 		},
 	);
 

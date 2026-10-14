@@ -2,6 +2,8 @@ import { createMcpHandler } from "@modelcontextprotocol/server";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("./remoteControl", () => ({ MAX_COUNTDOWN_SECONDS: 10 }));
+const health = vi.hoisted(() => ({ value: null as { note: string } | null }));
+vi.mock("./captureHealth", () => ({ readCaptureHealth: async () => health.value }));
 
 import type { AgentControl } from "./agentControl";
 import type { OpenFileTools } from "./openFile";
@@ -1134,6 +1136,28 @@ describe("buildRecordlyMcpServer", () => {
 		const perform = list.result.tools.find((tool: { name: string }) => tool.name === "perform");
 		expect(perform.description).toContain("hold {ms} (same as wait {ms}) is kept");
 		expect(perform.description).toContain("still-running");
+	});
+
+	it("warns through get_status and start_recording when the machine cannot keep up", async () => {
+		const { call, remote } = setup("idle", { platform: "darwin" });
+		const quiet = await call("tools/call", { name: "get_status", arguments: {} });
+		expect(quiet.result.content[0].text).not.toContain("health");
+
+		health.value = { note: "This machine is under pressure: swap is 96% full" };
+		const busy = await call("tools/call", { name: "get_status", arguments: {} });
+		expect(busy.result.content[0].text).toContain("swap is 96% full");
+		remote.startRecording.mockResolvedValueOnce({ state: "recording" });
+		const started = await call("tools/call", {
+			name: "start_recording",
+			arguments: { scenes: ["Open the list"] },
+		});
+		expect(started.result.content[0].text).toContain("swap is 96% full");
+		health.value = null;
+		const list = await call("tools/list", {});
+		const status = list.result.tools.find(
+			(tool: { name: string }) => tool.name === "get_status",
+		);
+		expect(status.description).toContain("health appears only when the machine is");
 	});
 
 	it("offers cancel_action for a sequence that outlived its call", async () => {
