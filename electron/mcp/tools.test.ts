@@ -1165,6 +1165,14 @@ describe("buildRecordlyMcpServer", () => {
 		expect(status.description).toContain("health appears only when the machine is");
 	});
 
+	it("says plainly what verify_export cannot see", async () => {
+		const { call } = setup("idle", { platform: "darwin" });
+		const { result } = await call("tools/list");
+		const verify = result.tools.find((tool: { name: string }) => tool.name === "verify_export");
+		expect(verify.description).toContain("passes this check");
+		expect(verify.description).toContain("not proof the video is right");
+	});
+
 	it("offers cancel_action for a sequence that outlived its call", async () => {
 		const { call, agent } = setup("idle", { platform: "darwin" });
 		const { result } = await call("tools/call", { name: "cancel_action", arguments: {} });

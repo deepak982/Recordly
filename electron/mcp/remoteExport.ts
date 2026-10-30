@@ -894,7 +894,9 @@ export function createRemoteExport({
 			warnings: checked.warnings,
 			note:
 				checked.warnings.length === 0
-					? `Every one of the ${checked.checked} frames sampled has a picture.`
+					? `None of the ${checked.checked} frames sampled is black or a flat colour. This ` +
+						"check cannot see whether the recording's own picture is in them, so sample a " +
+						"few frames yourself before sending the file to anyone."
 					: "A deliberate fade or a plain card looks the same as a fault here; check the moments named before deciding.",
 		};
 	};

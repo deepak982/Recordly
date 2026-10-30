@@ -2052,10 +2052,12 @@ export function buildRecordlyMcpServer(
 				"Check a video file for frames with no picture. export_video already does this to " +
 				"what it writes; use this for a file exported earlier, or to re-check one after " +
 				"moving it. It samples frames across the file and reports the moments that are black " +
-				"or a single flat colour, which is what a broken render leaves behind — a file can " +
-				"have the right size and length and still be minutes of bare wallpaper. It cannot " +
-				"tell a deliberate fade or a plain title card from a fault; it reports what it finds " +
-				"and you decide.",
+				"or a single flat colour. That is all it can see: a frame that still shows the " +
+				"wallpaper, the cursor and the captions while the recording's own picture is missing " +
+				"passes this check, so a clean result is not proof the video is right — look at " +
+				"frames yourself with get_frame or sample_frames before you send it to anyone. It " +
+				"also cannot tell a deliberate fade or a plain title card from a fault; it reports " +
+				"what it finds and you decide.",
 			inputSchema: z.object({
 				path: z.string().min(1).describe("Absolute path to the video file"),
 				samples: z
