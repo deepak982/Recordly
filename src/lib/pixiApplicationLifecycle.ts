@@ -10,6 +10,11 @@ const completedCleanups = new WeakSet<Application>();
 
 const RENDERER_DESTROY_OPTIONS = {
 	removeView: true,
+	releaseGlobalResources: true,
+} as const;
+
+const UNINITIALIZED_RENDERER_DESTROY_OPTIONS = {
+	removeView: true,
 	releaseGlobalResources: false,
 } as const;
 
@@ -34,7 +39,7 @@ function destroyFailedApplication(app: Application): void {
 	}
 
 	try {
-		partialApp.renderer?.destroy(RENDERER_DESTROY_OPTIONS);
+		partialApp.renderer?.destroy(UNINITIALIZED_RENDERER_DESTROY_OPTIONS);
 	} catch (error) {
 		reportCleanupError(app, error);
 	}

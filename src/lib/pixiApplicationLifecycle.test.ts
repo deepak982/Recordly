@@ -75,9 +75,34 @@ describe("Pixi application lifecycle", () => {
 
 		expect(app.destroy).toHaveBeenCalledTimes(1);
 		expect(app.destroy).toHaveBeenCalledWith(
-			{ removeView: true, releaseGlobalResources: false },
+			{ removeView: true, releaseGlobalResources: true },
 			{ children: true, texture: false, textureSource: false },
 		);
+	});
+
+	it("releases Pixi's global pools so the next renderer cannot inherit filter textures bound to the dead GPU context", async () => {
+		const app = createApplication();
+
+		await initializePixiApplication(app, {});
+		destroyPixiApplication(app, "Lightning export renderer");
+
+		const [rendererDestroyOptions] = vi.mocked(app.destroy).mock.calls[0];
+		expect(rendererDestroyOptions).toMatchObject({ releaseGlobalResources: true });
+	});
+
+	it("leaves the global pools alone when a failed initialization hands over to a fallback renderer", async () => {
+		const app = createApplication(async () => {
+			throw new Error("No available renderer");
+		});
+
+		await expect(initializePixiApplication(app, {})).rejects.toThrow();
+		destroyPixiApplication(app, "webgpu export renderer initialization");
+
+		expect(app.destroy).not.toHaveBeenCalled();
+		expect(app.renderer.destroy).toHaveBeenCalledWith({
+			removeView: true,
+			releaseGlobalResources: false,
+		});
 	});
 
 	it("defers teardown until an in-flight initialization settles", async () => {
